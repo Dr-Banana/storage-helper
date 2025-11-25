@@ -1,0 +1,7 @@
+# Test images directory
+test_images/
+**/test_images/
+
+# Temporary files and directories
+tmp/
+**/tmp/
