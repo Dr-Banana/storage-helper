@@ -5,3 +5,5 @@ test_images/
 # Temporary files and directories
 tmp/
 **/tmp/
+__cache/
+__pycache__/
