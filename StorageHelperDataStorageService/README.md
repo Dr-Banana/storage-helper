@@ -45,8 +45,55 @@ The Data Storage service should provide **stable APIs** and handle **schema migr
 
 ---
 
-## Implementation Notes (TBD)
+## Implementation Notes
 
-- Relational database choice (e.g., PostgreSQL/MySQL) and initial schema.
-- Object storage provider (e.g., AWS S3, GCS) and naming conventions.
-- Vector search solution (e.g., pgvector, OpenSearch, dedicated vector DB, or custom implementation).
+- **Database**: MySQL 8.0 (via Docker)
+- **Schema**: See `schema.sql` for the complete database structure
+- **Object Storage**: Supports local storage, MinIO, and S3 (see `STORAGE_PROTOCOL_USAGE.md`)
+- **Vector Search**: Custom implementation with embedding storage
+
+---
+
+## Quick Start
+
+### 1. Start the Database
+
+From the `StorageHelperDataStorageService` directory:
+
+**Linux/Mac:**
+```bash
+chmod +x scripts/init-db.sh
+./scripts/init-db.sh
+```
+
+**Windows (PowerShell):**
+```powershell
+.\scripts\init-db.ps1
+```
+
+### 2. Connection Details
+
+- **Host**: localhost
+- **Port**: 3306
+- **User**: root
+- **Password**: root
+- **Database**: storage_helper
+
+### 3. Common Commands
+
+**Stop the database:**
+```bash
+docker-compose down
+```
+
+**View logs:**
+```bash
+docker-compose logs mysql
+```
+
+**Access MySQL CLI:**
+```bash
+docker-compose exec mysql mysql -uroot -proot storage_helper
+```
+
+For more details, see `db_local_setup_guide.md` and `STORAGE_PROTOCOL_USAGE.md`.

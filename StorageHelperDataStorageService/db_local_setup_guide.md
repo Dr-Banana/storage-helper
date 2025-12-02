@@ -7,11 +7,17 @@
 
 ## Quick Start
 
-Simply run the initialization script:
+Simply run the initialization script from the StorageHelperDataStorageService directory:
 
+**Linux/Mac:**
 ```bash
 chmod +x scripts/init-db.sh
 ./scripts/init-db.sh
+```
+
+**Windows (PowerShell):**
+```powershell
+.\scripts\init-db.ps1
 ```
 
 The script will:
