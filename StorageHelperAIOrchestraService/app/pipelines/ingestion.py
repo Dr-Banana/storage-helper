@@ -8,7 +8,7 @@ from app.modules.cleaning import process_text
 from app.modules.recommendation import generate_recommendation
 from app.modules.embedding import EmbeddingGenerator
 from app.integrations.storage_client import persist_document
-from app.storage.local_storage import LocalStorage, save_document
+from app.storage.local_storage import LocalStorage, save_document, save_error_document
 import asyncio
 
 logger = logging.getLogger(__name__)
@@ -272,14 +272,18 @@ class IngestionPipeline:
             logger.error(f"STEP 3 (Embedding) Failed: {e}", exc_info=True)
             return False
     
-    async def step_persist(self, state: PipelineState) -> bool:
+    async def step_persist(self, state: PipelineState, is_error: bool = False) -> bool:
         """
         Step 4: Persist document data to storage service and local storage.
         
         :param state: Pipeline state to update.
+        :param is_error: If True, save to error directory instead of documents
         :return: True if successful, False otherwise.
         """
-        logger.info("STEP 4 (Persistence): Persisting document to storage service and local storage...")
+        if is_error:
+            logger.warning("STEP 4 (Error Persistence): Saving failed document to error directory...")
+        else:
+            logger.info("STEP 4 (Persistence): Persisting document to storage service and local storage...")
         
         try:
             # Prepare document data for persistence
@@ -288,33 +292,67 @@ class IngestionPipeline:
             # Add image_path to document_data so it can be saved to images/ directory
             document_data["image_path"] = state.image_url
             
-            # Save to local storage (tmp folder) - this generates and returns a UUID string
-            # The save_document function will also save the image to images/ directory
-            local_doc_id = save_document(document_data)
-            logger.info(f"Document saved to local storage: {local_doc_id}")
-            
-            # Always use the local UUID as the document_id (local storage generates UUID strings)
-            # If remote storage returns an ID, we could use it, but for consistency, use local UUID
-            state.document_id = local_doc_id
-            
-            # Also persist using storage client (if available)
-            persisted_id = None
-            if self.storage_client:
-                # Update document_data with the new document_id before sending to storage client
-                document_data["document_id"] = local_doc_id
-                persisted_id = await self.storage_client(document_data)
-                # Note: We keep using local_doc_id (UUID string) even if persisted_id is returned
-                # This ensures consistency with the saved document file
-            state.processing_steps.append("Persistence")
-            state.status = "completed"
-            logger.info(f"STEP 4 (Persistence) Complete. Local Document ID: {local_doc_id}, Remote ID: {persisted_id}")
-            return True
+            if is_error:
+                # Save to error directory with full context
+                error_info = {
+                    "status": state.status,
+                    "error": state.error,
+                    "failed_step": self._get_failed_step(state),
+                    "processing_steps": state.processing_steps
+                }
+                error_doc_id = save_error_document(document_data, error_info)
+                state.document_id = error_doc_id
+                logger.warning(f"⚠️  Failed document saved to error directory: {error_doc_id}")
+                logger.warning(f"    This document can be reviewed and retried later.")
+                return True
+            else:
+                # Save to normal storage (tmp folder) - this generates and returns a UUID string
+                # The save_document function will also save the image to images/ directory
+                local_doc_id = save_document(document_data)
+                logger.info(f"✓ Document saved to local storage: {local_doc_id}")
+                
+                # Always use the local UUID as the document_id (local storage generates UUID strings)
+                # If remote storage returns an ID, we could use it, but for consistency, use local UUID
+                state.document_id = local_doc_id
+                
+                # Also persist using storage client (if available)
+                persisted_id = None
+                if self.storage_client:
+                    # Update document_data with the new document_id before sending to storage client
+                    document_data["document_id"] = local_doc_id
+                    persisted_id = await self.storage_client(document_data)
+                    # Note: We keep using local_doc_id (UUID string) even if persisted_id is returned
+                    # This ensures consistency with the saved document file
+                state.processing_steps.append("Persistence")
+                state.status = "completed"
+                logger.info(f"STEP 4 (Persistence) Complete. Local Document ID: {local_doc_id}, Remote ID: {persisted_id}")
+                return True
                 
         except Exception as e:
             state.status = "persistence_failed"
             state.error = f"Persistence step failed: {str(e)}"
             logger.error(f"STEP 4 (Persistence) Failed: {e}", exc_info=True)
             return False
+    
+    def _get_failed_step(self, state: PipelineState) -> str:
+        """
+        Determine which step failed based on pipeline state.
+        
+        :param state: Pipeline state
+        :return: Name of the failed step
+        """
+        if state.status in ["failed", "ocr_failed"]:
+            return "OCR"
+        elif state.status == "cleaning_failed":
+            return "Cleaning"
+        elif state.status == "recommendation_failed":
+            return "Recommendation"
+        elif state.status == "embedding_failed":
+            return "Embedding"
+        elif state.status == "persistence_failed":
+            return "Persistence"
+        else:
+            return "Unknown"
     
     async def run(
         self,
@@ -370,12 +408,24 @@ class IngestionPipeline:
         
         logger.info("STEP 3: Recommendation and Embedding completed (parallel execution)")
         
-        # Step 4: Persistence (optional)
-        if state.status == "recommendation_failed":
-            logger.error("Recommendation failed. Continuing to persistence to retain OCR/cleaning results.")
-
+        # Step 4: Persistence
         if not skip_persist:
-            await self.step_persist(state)
+            # Check if pipeline failed at any critical step
+            is_failed = state.status in [
+                "failed",              # OCR failed
+                "ocr_failed",          # OCR failed explicitly
+                "recommendation_failed",  # Recommendation failed
+                "embedding_failed"     # Embedding failed (optional but tracked)
+            ]
+            
+            if is_failed:
+                logger.error(f"Pipeline failed with status: {state.status}")
+                logger.warning("Saving to error directory for debugging and potential retry...")
+                # Save to error directory
+                await self.step_persist(state, is_error=True)
+            else:
+                # Normal persistence
+                await self.step_persist(state, is_error=False)
         
         logger.info(f"Pipeline completed with status: {state.status}")
         return state.to_output_dict()

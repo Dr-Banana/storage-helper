@@ -3,6 +3,7 @@ import json
 import logging
 import asyncio
 from typing import List, Optional
+from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -15,8 +16,8 @@ class EmbeddingGenerator:
     
     def __init__(
         self,
-        model_name: str = "text-embedding-004",
-        api_key: str = "",
+        model_name: Optional[str] = None,
+        api_key: Optional[str] = None,
         task_type: str = "RETRIEVAL_DOCUMENT",
         max_retries: int = 3,
         timeout: float = 30.0
@@ -24,14 +25,14 @@ class EmbeddingGenerator:
         """
         Initialize the EmbeddingGenerator with configuration.
         
-        :param model_name: The embedding model name (e.g., "text-embedding-004").
-        :param api_key: API key for Gemini API.
+        :param model_name: The embedding model name. Defaults to settings.GEMINI_EMBEDDING_MODEL.
+        :param api_key: API key for Gemini API. Defaults to settings.GEMINI_EMBEDDING_API_KEY.
         :param task_type: Task type for embedding (e.g., "RETRIEVAL_DOCUMENT").
         :param max_retries: Maximum number of retry attempts.
         :param timeout: Request timeout in seconds.
         """
-        self.model_name = model_name
-        self.api_key = api_key
+        self.model_name = model_name or settings.GEMINI_EMBEDDING_MODEL
+        self.api_key = api_key or settings.GEMINI_EMBEDDING_API_KEY
         self.task_type = task_type
         self.max_retries = max_retries
         self.timeout = timeout

@@ -17,6 +17,7 @@ STORAGE_DIR = Path(__file__).parent.parent.parent / "tmp"
 DOCUMENTS_DIR = STORAGE_DIR / "documents"
 EMBEDDINGS_DIR = STORAGE_DIR / "embeddings"  # Separate directory for embeddings
 IMAGES_DIR = STORAGE_DIR / "images"  # Directory for storing document images
+ERROR_DIR = STORAGE_DIR / "error"  # Directory for failed ingestion documents
 INDEX_FILE = STORAGE_DIR / "index.json"
 
 
@@ -36,12 +37,14 @@ class LocalStorage:
         self.documents_dir = self.storage_dir / "documents"
         self.embeddings_dir = self.storage_dir / "embeddings"  # Separate embeddings directory
         self.images_dir = self.storage_dir / "images"  # Directory for storing document images
+        self.error_dir = self.storage_dir / "error"  # Directory for failed documents
         self.index_file = self.storage_dir / "index.json"
         
         # Create directories if they don't exist
         self.documents_dir.mkdir(parents=True, exist_ok=True)
         self.embeddings_dir.mkdir(parents=True, exist_ok=True)
         self.images_dir.mkdir(parents=True, exist_ok=True)
+        self.error_dir.mkdir(parents=True, exist_ok=True)
         
         # Initialize index if it doesn't exist
         self._ensure_index()
@@ -258,6 +261,95 @@ class LocalStorage:
         
         return doc_id
     
+    def save_error_document(self, document_data: Dict[str, Any], error_info: Dict[str, Any]) -> str:
+        """
+        Save a failed document to the error directory for debugging and retry.
+        
+        :param document_data: Dictionary containing document data
+        :param error_info: Dictionary containing error information (status, error message, etc.)
+        :return: Error document ID (UUID string)
+        """
+        # Generate unique error document ID
+        error_id = str(uuid.uuid4())
+        
+        # Save image if image_path is provided
+        image_path = document_data.get("image_path") or document_data.get("source")
+        saved_image_path = None
+        if image_path:
+            saved_image_path = self.save_image(image_path, f"error_{error_id}")
+        
+        # Prepare error document record with full context
+        error_record = {
+            "id": error_id,
+            "created_at": datetime.now().isoformat(),
+            "error_type": "ingestion_failed",
+            "owner_id": document_data.get("owner_id"),
+            "source": document_data.get("source"),
+            "image_path": saved_image_path,
+            
+            # Error information
+            "status": error_info.get("status", "failed"),
+            "error_message": error_info.get("error"),
+            "failed_step": error_info.get("failed_step"),
+            "processing_steps": error_info.get("processing_steps", []),
+            
+            # Partial results (if any)
+            "extracted_text": document_data.get("extracted_text"),
+            "ocr_confidence": document_data.get("ocr_confidence"),
+            "ocr_result": document_data.get("raw_ocr_info"),
+            "cleaning_info": document_data.get("cleaning_info"),
+            "recommendation_status": document_data.get("recommendation_status"),
+            "recommendation_error": document_data.get("recommendation_error"),
+            "embedding_status": document_data.get("embedding_status"),
+            
+            # Metadata for debugging
+            "metadata": {
+                "retry_count": 0,
+                "can_retry": self._can_retry_error(error_info.get("status")),
+                "original_data": document_data  # Keep full original data for retry
+            }
+        }
+        
+        # Save error document file
+        error_file = self.error_dir / f"{error_id}.json"
+        with open(error_file, 'w', encoding='utf-8') as f:
+            json.dump(error_record, f, indent=2, ensure_ascii=False)
+        
+        logger.warning(f"⚠️  Failed document saved to error directory: {error_id} -> {error_file}")
+        logger.warning(f"    Error: {error_info.get('error', 'Unknown error')}")
+        logger.warning(f"    Status: {error_info.get('status', 'failed')}")
+        
+        return error_id
+    
+    def _can_retry_error(self, status: str) -> bool:
+        """
+        Determine if an error can be retried based on status.
+        
+        :param status: Error status
+        :return: True if error is potentially recoverable
+        """
+        # Errors that might be recoverable with retry
+        recoverable_statuses = [
+            "recommendation_failed",
+            "embedding_failed", 
+            "persistence_failed",
+            "cleaning_failed"
+        ]
+        
+        # Fatal errors that shouldn't be retried
+        fatal_statuses = [
+            "failed",  # OCR failed (usually means invalid image)
+            "ocr_failed"
+        ]
+        
+        if status in fatal_statuses:
+            return False
+        if status in recoverable_statuses:
+            return True
+        
+        # Default: assume recoverable
+        return True
+    
     def get_document(self, doc_id: str, include_embedding: bool = False) -> Optional[Dict[str, Any]]:
         """
         Retrieve a document by ID.
@@ -425,6 +517,11 @@ _default_storage = LocalStorage()
 def save_document(document_data: Dict[str, Any]) -> str:
     """Convenience function to save document using default storage."""
     return _default_storage.save_document(document_data)
+
+
+def save_error_document(document_data: Dict[str, Any], error_info: Dict[str, Any]) -> str:
+    """Convenience function to save error document using default storage."""
+    return _default_storage.save_error_document(document_data, error_info)
 
 
 def get_document(doc_id: str, include_embedding: bool = False) -> Optional[Dict[str, Any]]:

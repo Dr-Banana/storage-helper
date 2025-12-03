@@ -8,6 +8,8 @@ from datetime import datetime
 
 # Import location data handler from storage_client
 from app.integrations.storage_client import LocationDataHandler, LLM_LOCATION_FORMAT, DB_LOCATION_FORMAT
+# Import settings for API configuration
+from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -33,10 +35,6 @@ class RecommendationGenerator:
     DOCUMENT_CATEGORIES_FILE = STORAGE_DIR / "document_categories.json"
     LOCATIONS_FILE = STORAGE_DIR / "locations.json"
     INDEX_FILE = STORAGE_DIR.parent / "index.json"
-
-    # --- Gemini API Configuration ---
-    MODEL_NAME = "gemini-2.5-flash-preview-09-2025"
-    API_KEY = ""  # Leave as-is for Canvas environment
 
     # Define the mandatory structured output schema for the recommendation
     RECOMMENDATION_SCHEMA = {
@@ -98,11 +96,11 @@ class RecommendationGenerator:
         """
         Initialize the RecommendationGenerator.
 
-        :param model_name: Optional Gemini model name. Defaults to MODEL_NAME class attribute.
-        :param api_key: Optional API key. Defaults to API_KEY class attribute.
+        :param model_name: Optional Gemini model name. Defaults to settings.GEMINI_LLM_MODEL.
+        :param api_key: Optional API key. Defaults to settings.GEMINI_LLM_API_KEY.
         """
-        self.model_name = model_name or self.MODEL_NAME
-        self.api_key = api_key or self.API_KEY
+        self.model_name = model_name or settings.GEMINI_LLM_MODEL
+        self.api_key = api_key or settings.GEMINI_LLM_API_KEY
         self.api_url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model_name}:generateContent?key={self.api_key}"
 
     def load_document_categories(self) -> List[Dict[str, Any]]:
