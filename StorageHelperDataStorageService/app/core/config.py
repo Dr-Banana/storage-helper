@@ -22,7 +22,7 @@ class Settings:
     LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
     
     class Config:
-        env_file = ".env"
+        env_file = ".env.local"
 
 
 settings = Settings()
