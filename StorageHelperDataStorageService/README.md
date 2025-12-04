@@ -62,7 +62,7 @@ From the `StorageHelperDataStorageService` directory:
 
 **Linux/Mac:**
 ```bash
-chmod +x scripts/init-db.sh
+chmod +x scripts/*.sh
 ./scripts/init-db.sh
 ```
 
@@ -71,7 +71,35 @@ chmod +x scripts/init-db.sh
 .\scripts\init-db.ps1
 ```
 
-### 2. Connection Details
+### 2. Install Dependencies
+
+```bash
+pip install -r requirements.txt
+```
+
+Or copy from example:
+```bash
+cp .env.example .env
+```
+
+### 3. Run the API Server
+
+```bash
+python main.py
+```
+
+Or using uvicorn directly:
+```bash
+uvicorn main:app --reload --host 0.0.0.0 --port 8000
+```
+
+### 4. Access the API
+
+- **API Documentation**: http://localhost:8000/docs (Swagger UI)
+- **API Schema**: http://localhost:8000/redoc (ReDoc)
+- **Health Check**: http://localhost:8000/health
+
+### 5. Database Connection Details
 
 - **Host**: localhost
 - **Port**: 3306
@@ -79,11 +107,16 @@ chmod +x scripts/init-db.sh
 - **Password**: root
 - **Database**: storage_helper
 
-### 3. Common Commands
+### 6. Common Commands
 
 **Stop the database:**
 ```bash
 docker-compose down
+```
+
+**Force refresh database (delete all data):**
+```bash
+./scripts/refresh-db.sh
 ```
 
 **View logs:**
