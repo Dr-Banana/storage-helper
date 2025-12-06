@@ -1,5 +1,9 @@
 """
 FastAPI application entry point
+
+Minimal setup with only essential routes:
+- /api/users - User management (create user)
+- /api/v1 - Public API for AI Service (high-level operations)
 """
 import logging
 from fastapi import FastAPI
@@ -7,7 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.config import settings
 from app.core.database import engine, Base
-from app.routes import users
+from app.routes import users, public_api
 # Import all models to register them with SQLAlchemy
 from app.models import (
     User, DocumentCategory, StorageLocation, Event, 
@@ -38,7 +42,39 @@ app.add_middleware(
 )
 
 # Include routers
-app.include_router(users.router, prefix="/api")
+app.include_router(users.router, prefix="/api", tags=["users"])
+app.include_router(public_api.router, tags=["public-api"])
+
+
+@app.get("/", tags=["root"])
+def root():
+    """Root endpoint"""
+    return {
+        "service": settings.API_TITLE,
+        "version": settings.API_VERSION,
+        "status": "running"
+    }
+
+
+@app.get("/health", tags=["health"])
+def health_check():
+    """Health check endpoint"""
+    return {
+        "status": "healthy",
+        "database": "connected"
+    }
+
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(
+        "main:app",
+        host="0.0.0.0",
+        port=8000,
+        reload=True,
+        log_level=settings.LOG_LEVEL.lower()
+    )
+
 
 
 @app.get("/", tags=["root"])

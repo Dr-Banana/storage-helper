@@ -1,1 +1,1 @@
-"""Schemas package"""
+"""Schemas package - Pydantic request/response models (minimal)"""
