@@ -6,9 +6,10 @@
 
 **Core Responsibilities:**
 1.  **Orchestration**: Managing the lifecycle of a document processing request through modular, testable pipelines.
-2.  **Ingestion Pipeline**: Image $\to$ OCR (Tesseract + Preprocessing) $\to$ Text Cleaning $\to$ [Parallel: LLM Recommendation + Vector Embedding] $\to$ Persistence.
+2.  **Ingestion Pipeline**: Image/PDF $\to$ OCR/Text Extraction $\to$ Text Cleaning $\to$ [Parallel: LLM Recommendation + Vector Embedding] $\to$ Persistence.
 3.  **Search Pipeline**: User Query $\to$ Normalization $\to$ Vector Embedding $\to$ Cosine Similarity Search $\to$ Result Assembly (with Location context & previews).
 4.  **Recommendation Engine**: LLM-powered (Gemini 2.5 Flash) intelligent document categorization and storage location suggestion with structured output.
+5.  **Multi-Format Support**: Handles both image files (JPG, PNG, etc.) and PDF documents with intelligent processing.
 
 ---
 
@@ -16,19 +17,37 @@
 
 ### 2.1 Ingestion Flow
 
-The ingestion pipeline orchestrates the complete document processing workflow from image upload to storage. Implemented in `app/pipelines/ingestion.py` using a modular, testable architecture with dependency injection.
+The ingestion pipeline orchestrates the complete document processing workflow from image/PDF upload to storage. Implemented in `app/pipelines/ingestion.py` using a modular, testable architecture with dependency injection.
+
+**Supported File Formats:**
+- **Images**: JPG, JPEG, PNG, GIF, BMP, WEBP, TIFF
+- **PDFs**: Single or multi-page PDF documents (up to 10 pages processed for performance)
 
 #### Pipeline Architecture
 
 ```mermaid
 flowchart TD
-    Start([INGESTION PIPELINE<br/>app/pipelines/ingestion.py]) --> Input[INPUT<br/>• image_url<br/>• owner_id<br/>• document_id<br/>State: PipelineState]
+    Start([INGESTION PIPELINE<br/>app/pipelines/ingestion.py]) --> Input[INPUT<br/>• image_url file path<br/>• owner_id<br/>• document_id<br/>• file_type auto-detect<br/>State: PipelineState]
     
-    Input --> OCR[STEP 1: OCR<br/>app/modules/ocr.py<br/>─────────────────<br/>• Load image from URL/path/bytes<br/>• Image preprocessing:<br/>  - RGB conversion<br/>  - Grayscale<br/>  - Contrast enhance<br/>  - Denoise & sharpen<br/>  - Binarization<br/>• Tesseract OCR PSM 1<br/>• Confidence scoring<br/>─────────────────<br/>OUTPUT: OCRResult<br/>  - text cleaned<br/>  - confidence<br/>  - page_info]
+    Input --> FileType{File Type<br/>Detection}
     
-    OCR -->|Success| Cleaning[STEP 2: CLEANING<br/>app/modules/cleaning.py<br/>─────────────────<br/>• Whitespace removal<br/>• Line normalization<br/>• Garbage filtering<br/>• Special char handling<br/>─────────────────<br/>OUTPUT:<br/>  - cleaned_text<br/>  - cleaning_info]
+    FileType -->|Image| OCR[STEP 1: OCR IMAGE<br/>app/modules/ocr.py<br/>─────────────────<br/>• Load image from URL/path/bytes<br/>• Image preprocessing:<br/>  - RGB conversion<br/>  - Grayscale<br/>  - Contrast enhance<br/>  - Denoise & sharpen<br/>  - Binarization<br/>• Tesseract OCR PSM 1<br/>• Confidence scoring<br/>─────────────────<br/>OUTPUT: OCRResult<br/>  - text cleaned<br/>  - confidence<br/>  - page_info]
+    
+    FileType -->|PDF| PDFOCR[STEP 1: OCR PDF<br/>app/modules/pdf_processor.py<br/>app/modules/ocr.py<br/>─────────────────<br/>• Load PDF from source<br/>• Check for embedded text<br/>• If text-based PDF:<br/>  - Direct text extraction<br/>• If image-based PDF:<br/>  - Convert pages to images<br/>  - Run OCR on each page<br/>  - Combine results<br/>• Multi-page support max 10<br/>─────────────────<br/>OUTPUT: OCRResult<br/>  - text combined pages<br/>  - confidence<br/>  - total_pages<br/>  - source_type: pdf]
+    
+    PDFOCR --> Vision
+    OCR --> Vision[STEP 1B: VISION ENHANCEMENT<br/>app/modules/vision.py<br/>OPTIONAL - CONFIGURABLE]
+    
+    Vision[STEP 1B: VISION ENHANCEMENT<br/>app/modules/vision.py<br/>─────────────────<br/>🔍 MULTIMODAL AI UNDERSTANDING<br/>─────────────────<br/>• Gemini Vision API<br/>  gemini-2.0-flash-exp<br/>• Understands beyond OCR:<br/>  - Photos & product images<br/>  - Logos & branding<br/>  - Charts & diagrams<br/>  - Visual layout & context<br/>• Auto-trigger on low OCR<br/>  confidence configurable<br/>• Merges vision description<br/>  with OCR text<br/>─────────────────<br/>TRIGGER CONDITIONS:<br/>  - VISION_ENABLE=true<br/>  - Low OCR confidence OR<br/>  - Always-on mode<br/>─────────────────<br/>OUTPUT: VisionResult<br/>  - description text<br/>  - detected_elements<br/>  - confidence<br/>  - merged_with_ocr_text]
+    
+    Vision --> Cleaning[STEP 2: CLEANING<br/>app/modules/cleaning.py]
+    
+    Cleaning[STEP 2: CLEANING<br/>app/modules/cleaning.py<br/>─────────────────<br/>• Whitespace removal<br/>• Line normalization<br/>• Garbage filtering<br/>• Special char handling<br/>─────────────────<br/>OUTPUT:<br/>  - cleaned_text<br/>  - cleaning_info]
     
     OCR -->|Failure| Stop1([STOP - Error])
+    PDFOCR -->|Failure| Stop1
+    
+    style FileType fill:#0000
     
     Cleaning --> Parallel[STEP 3: PARALLEL EXECUTION<br/>asyncio.gather - concurrent]
     
@@ -39,7 +58,7 @@ flowchart TD
     Recommendation --> Merge{Merge Results}
     Embedding --> Merge
     
-    Merge --> Persistence[STEP 4: PERSISTENCE<br/>app/storage/local_storage.py<br/>─────────────────<br/>LOCAL STORAGE:<br/>• Generate UUID<br/>• Save document JSON tmp/documents/<br/>• Save embedding tmp/embeddings/<br/>• Save image file tmp/images/<br/>• Update index.json<br/>REMOTE STORAGE:<br/>• Call storage_client optional<br/>• Persist to DB if available<br/>─────────────────<br/>OUTPUT: document_id UUID string]
+    Merge --> Persistence[STEP 4: PERSISTENCE<br/>app/storage/local_storage.py<br/>─────────────────<br/>LOCAL STORAGE:<br/>• Generate UUID<br/>• Save document JSON tmp/documents/<br/>• Save embedding tmp/embeddings/<br/>• Save file tmp/images/ or tmp/pdfs/<br/>• Update index.json<br/>REMOTE STORAGE:<br/>• Call storage_client optional<br/>• Persist to DB if available<br/>─────────────────<br/>OUTPUT: document_id UUID string]
     
     Persistence --> Response[RESPONSE: IngestResponse<br/>─────────────────<br/>• status: completed<br/>• document_id: UUID<br/>• detected_type_code<br/>• extracted_metadata<br/>• recommended_location_id<br/>• recommended_location_reason]
     
@@ -53,25 +72,82 @@ flowchart TD
 #### Key Design Features
 
 1. **Modular Architecture**: Each step is a separate method, making the pipeline highly testable and maintainable
-2. **Dependency Injection**: All modules (OCR, cleaning, recommendation, embedding, storage) are injected via constructor
+2. **Dependency Injection**: All modules (OCR, vision, cleaning, recommendation, embedding, storage) are injected via constructor
 3. **State Management**: `PipelineState` dataclass tracks all processing results and metadata throughout the pipeline
-4. **Parallel Processing**: Steps 3A (Recommendation) and 3B (Embedding) run concurrently using `asyncio.gather()`
-5. **Error Resilience**: 
+4. **Multimodal Intelligence**: Vision Enhancement (Step 1B) adds semantic understanding beyond OCR text extraction
+5. **Parallel Processing**: Steps 3A (Recommendation) and 3B (Embedding) run concurrently using `asyncio.gather()`
+6. **Error Resilience**: 
    - Cleaning failure doesn't stop pipeline (falls back to raw OCR text)
+   - Vision enhancement failure doesn't stop pipeline (graceful degradation to OCR-only)
    - Recommendation and embedding failures are logged independently
    - Pipeline continues to persistence to retain partial results
-6. **Comprehensive Logging**: Each step logs progress, timing, and results for debugging and monitoring
+7. **Comprehensive Logging**: Each step logs progress, timing, and results for debugging and monitoring
 
 #### Module Details
 
 | Module | Location | Responsibility |
 |--------|----------|----------------|
-| **OCR Module** | `app/modules/ocr.py` | Image preprocessing, Tesseract OCR, confidence scoring |
+| **OCR Module** | `app/modules/ocr.py` | Image/PDF preprocessing, file type detection, Tesseract OCR, confidence scoring |
+| **PDF Processor** | `app/modules/pdf_processor.py` | PDF loading, text extraction, PDF-to-image conversion, multi-page handling |
+| **Vision Module** | `app/modules/vision.py` | 🆕 Multimodal understanding using Gemini Vision API - sees photos, logos, charts beyond OCR |
 | **Cleaning Module** | `app/modules/cleaning.py` | Text normalization, noise removal, quality filtering |
 | **Recommendation Module** | `app/modules/recommendation.py` | LLM-based category and location suggestion using Gemini API |
 | **Embedding Module** | `app/modules/embedding.py` | Vector generation using Gemini API embedContent (text-embedding-004) with retry mechanism |
 | **Storage Client** | `app/integrations/storage_client.py` | Interface to DataStorageService (optional) |
-| **Local Storage** | `app/storage/local_storage.py` | File-based persistence (documents, embeddings, images, index) |
+| **Local Storage** | `app/storage/local_storage.py` | File-based persistence (documents, embeddings, images, PDFs, index) |
+
+#### Vision Module Implementation Details
+
+**🆕 NEW: Multimodal Vision Understanding**
+
+The `VisionAnalyzer` class (`app/modules/vision.py`) is a breakthrough enhancement that addresses OCR's fundamental limitation: **traditional OCR can only "read text" but cannot "see images"**.
+
+**Problem Statement:**
+Traditional OCR (Tesseract) fails to understand:
+- Product photos on warranty cards
+- Company logos on invoices
+- Charts and diagrams in reports
+- Handwritten sketches or markings
+- Complex layouts with mixed text and visuals
+
+**Solution:**
+Gemini Vision API (multimodal) can understand images holistically - both text AND visual content.
+
+**API Configuration:**
+- **Endpoint**: Gemini API `generateContent` endpoint
+- **Model**: `gemini-2.0-flash-exp` (Google's latest multimodal model)
+- **Capabilities**: 
+  - Reads text with comparable accuracy to OCR
+  - Describes photos, logos, charts, diagrams
+  - Understands layout and visual context
+  - Extracts semantic meaning from images
+
+**Integration Strategy:**
+1. **Smart Triggering**: Vision enhancement is optional and configurable
+   - Auto-trigger when OCR confidence is low (< 0.6 by default)
+   - OR always-on mode for maximum understanding
+   - OR completely disabled for cost optimization
+2. **Graceful Enhancement**: Vision runs AFTER OCR, enhancing (not replacing) it
+   - OCR provides precise text extraction
+   - Vision adds semantic understanding and visual context
+   - Results are merged: `OCR Text + Vision Description`
+3. **Error Resilience**: Vision failure doesn't stop the pipeline
+   - Graceful degradation to OCR-only if Vision API fails
+   - Cost-optimized: only runs when needed
+
+**Configuration Options** (in `app/core/config.py`):
+```python
+VISION_ENABLE = True  # Master switch
+VISION_AUTO_TRIGGER_ON_LOW_OCR = True  # Smart triggering
+VISION_OCR_CONFIDENCE_THRESHOLD = 0.6  # Trigger threshold
+VISION_MODEL = "gemini-2.0-flash-exp"
+```
+
+**Example Use Cases:**
+- **Warranty Card with Product Photo**: OCR extracts warranty details, Vision identifies "Dyson V11 vacuum cleaner" from product image
+- **Insurance Document with Logo**: OCR extracts policy text, Vision recognizes "Blue Cross Blue Shield logo"
+- **Receipt with Faded Text**: OCR struggles (low confidence), Vision auto-triggers and recovers full content
+- **Chart-Heavy Report**: OCR extracts titles, Vision describes "bar chart showing quarterly revenue growth"
 
 #### Embedding Module Implementation Details
 
@@ -115,9 +191,32 @@ generator = EmbeddingGenerator(
 embedding = await generator.generate(text)
 ```
 
+#### PDF Processing Details
+
+The `pdf_processor` module (`app/modules/pdf_processor.py`) handles PDF document processing:
+
+**Key Features:**
+1. **Intelligent Processing**: Automatically detects if PDF has embedded text or is image-based
+2. **Text Extraction**: For text-based PDFs, directly extracts text without OCR (faster, 100% accuracy)
+3. **Image Conversion**: For image-based PDFs, converts pages to high-resolution images for OCR
+4. **Multi-Page Support**: Processes up to 10 pages (configurable) to balance accuracy and performance
+5. **PyMuPDF Integration**: Uses PyMuPDF (fitz) library for robust PDF handling
+
+**Processing Methods:**
+- **Text-based PDF**: Direct text extraction via `extract_text_from_pdf()`
+- **Image-based PDF**: Page-by-page OCR via `convert_pdf_to_images()` + Tesseract OCR
+- **Hybrid Approach**: Automatically selects best method via `process_pdf_for_ocr()`
+
+**Performance Considerations:**
+- DPI: 300 (configurable) for image rendering
+- Max pages: 10 (default) to prevent long processing times
+- Async implementation for non-blocking operations
+
 #### Error Handling Strategy
 
 - **OCR Failure**: Pipeline stops immediately, returns error status
+- **PDF Processing Failure**: Pipeline stops, saves to error directory for debugging
+- **Vision Enhancement Failure**: 🆕 Continue with OCR text only (graceful degradation), log warning
 - **Cleaning Failure**: Continue with raw OCR text, log warning
 - **Recommendation Failure**: Log error, continue to persistence with partial data
 - **Embedding Failure**: Log error, continue to persistence (search won't find this document)
@@ -302,10 +401,12 @@ StorageHelperAIOrchestraService/
 │   │   ├── assembler.py        # Search result assembly
 │   │   ├── cleaning.py         # Text cleaning & normalization
 │   │   ├── embedding.py        # Vector embedding generation
-│   │   ├── ocr.py              # OCR engine wrapper
+│   │   ├── ocr.py              # OCR engine wrapper (image + PDF)
+│   │   ├── pdf_processor.py    # PDF processing & conversion
 │   │   ├── query_processor.py  # Query normalization
 │   │   ├── recommendation.py   # Location recommendation logic
 │   │   ├── search_engine.py    # Search execution & ranking
+│   │   ├── vision.py           # 🆕 Vision AI for multimodal understanding
 │   │   └── tesseract/          # Tesseract OCR binaries & data
 │   ├── pipelines/              # Orchestration workflows
 │   │   ├── __init__.py
@@ -317,9 +418,11 @@ StorageHelperAIOrchestraService/
 │       ├── local_storage.py    # File-based data persistence
 │       └── migrate_embeddings.py  # Data migration utilities
 ├── tmp/                        # Runtime temporary storage
-│   ├── documents/              # Document file cache
+│   ├── documents/              # Document metadata cache
 │   ├── embeddings/             # Vector embeddings storage
 │   ├── images/                 # Image file cache
+│   ├── pdfs/                   # PDF file cache (NEW)
+│   ├── error/                  # Failed documents for debugging
 │   ├── Storage/                # Configuration data
 │   │   ├── document_categories.json
 │   │   ├── locations.json
@@ -364,10 +467,50 @@ StorageHelperAIOrchestraService/
     - JSON-based document index with UUID identifiers
     - Separate storage for embeddings, documents, and images
     - Integration client ready for DataStorageService connection
+*   **PDF Support Implementation** (December 3, 2025):
+    - Added comprehensive PDF processing capability to handle both image and text-based PDFs
+    - Created `pdf_processor.py` module with PyMuPDF integration
+    - Extended OCR module with automatic file type detection (image vs PDF)
+    - Intelligent processing: direct text extraction for text-based PDFs, OCR for image-based
+    - Multi-page support (up to 10 pages) with page-by-page processing
+    - Updated storage module to handle both image and PDF files
+    - Enhanced API schemas to support `file_type` parameter
+    - Modified ingestion pipeline to auto-detect and route files appropriately
+    - Search functionality fully compatible with PDF documents
+    - Backward compatible: existing image processing unchanged
+*   **Vision Enhancement Implementation** (December 4, 2025):
+    - **Major Feature**: Added multimodal vision understanding to address OCR's fundamental limitation
+    - **Problem Identified**: Traditional OCR can only "read text" but cannot "see images" (photos, logos, charts, complex layouts)
+    - **Solution**: Integrated Gemini Vision API (`gemini-2.0-flash-exp`) for holistic image understanding
+    - Created `app/modules/vision.py` with `VisionAnalyzer` class
+    - **Smart Integration Strategy**:
+      - Vision runs as optional Step 1B (between OCR and Cleaning)
+      - Configurable trigger: auto-enable on low OCR confidence OR always-on OR disabled
+      - Graceful enhancement: Vision augments (not replaces) OCR
+      - Results merged: `OCR Text + Vision Description` for richer semantic understanding
+      - Error resilient: Vision failure doesn't stop pipeline (degrades to OCR-only)
+    - **Configuration Added** (`app/core/config.py`):
+      - `VISION_ENABLE`: Master switch (default: True)
+      - `VISION_AUTO_TRIGGER_ON_LOW_OCR`: Smart triggering (default: True)
+      - `VISION_OCR_CONFIDENCE_THRESHOLD`: Trigger threshold (default: 0.6)
+      - `VISION_MODEL`: Model selection (default: gemini-2.0-flash-exp)
+    - **Pipeline Updated** (`app/pipelines/ingestion.py`):
+      - Added `step_vision_enhancement()` method
+      - Integrated into main pipeline flow
+      - Enhanced `PipelineState` with `vision_result` field
+    - **Use Cases Enabled**:
+      - Product warranty cards with photos
+      - Insurance documents with logos
+      - Receipts with faded/low-quality text
+      - Reports with charts and diagrams
+      - Mixed text-image documents
+    - **Architecture Benefit**: Modular design allows easy enable/disable for cost optimization
+    - **Documentation**: Updated design document with Vision Enhancement architecture
 *   **Pending Work**: 
     - Feedback handler implementation (endpoint exists, logic needed)
     - Comprehensive test suite (unit and integration tests)
     - Production deployment configurations
+    - Performance testing and cost analysis for Vision API usage
 
 ---
 

@@ -17,6 +17,7 @@ STORAGE_DIR = Path(__file__).parent.parent.parent / "tmp"
 DOCUMENTS_DIR = STORAGE_DIR / "documents"
 EMBEDDINGS_DIR = STORAGE_DIR / "embeddings"  # Separate directory for embeddings
 IMAGES_DIR = STORAGE_DIR / "images"  # Directory for storing document images
+PDFS_DIR = STORAGE_DIR / "pdfs"  # Directory for storing PDF files
 ERROR_DIR = STORAGE_DIR / "error"  # Directory for failed ingestion documents
 INDEX_FILE = STORAGE_DIR / "index.json"
 
@@ -37,6 +38,7 @@ class LocalStorage:
         self.documents_dir = self.storage_dir / "documents"
         self.embeddings_dir = self.storage_dir / "embeddings"  # Separate embeddings directory
         self.images_dir = self.storage_dir / "images"  # Directory for storing document images
+        self.pdfs_dir = self.storage_dir / "pdfs"  # Directory for storing PDF files
         self.error_dir = self.storage_dir / "error"  # Directory for failed documents
         self.index_file = self.storage_dir / "index.json"
         
@@ -44,6 +46,7 @@ class LocalStorage:
         self.documents_dir.mkdir(parents=True, exist_ok=True)
         self.embeddings_dir.mkdir(parents=True, exist_ok=True)
         self.images_dir.mkdir(parents=True, exist_ok=True)
+        self.pdfs_dir.mkdir(parents=True, exist_ok=True)
         self.error_dir.mkdir(parents=True, exist_ok=True)
         
         # Initialize index if it doesn't exist
@@ -119,60 +122,79 @@ class LocalStorage:
             logger.error(f"Error reading embedding for {doc_id}: {e}")
             return None
     
-    def save_image(self, image_path: str, doc_id: str) -> Optional[str]:
+    def save_file(self, file_path: str, doc_id: str, file_type: str = "image") -> Optional[str]:
         """
-        Save an image file to the images directory, associated with a document ID.
+        Save a file (image or PDF) to the appropriate directory, associated with a document ID.
         
-        :param image_path: Path to the source image file (local path or URL)
-        :param doc_id: Document ID to associate with the image
-        :return: Path to the saved image file, or None if saving failed
+        :param file_path: Path to the source file (local path or URL)
+        :param doc_id: Document ID to associate with the file
+        :param file_type: Type of file ("image" or "pdf")
+        :return: Path to the saved file, or None if saving failed
         """
         try:
             import shutil
             import httpx
             
-            source_path = Path(image_path)
+            source_path = Path(file_path)
+            
+            # Determine target directory based on file type
+            if file_type == "pdf":
+                target_dir = self.pdfs_dir
+                default_ext = '.pdf'
+            else:
+                target_dir = self.images_dir
+                default_ext = '.jpg'
             
             # Determine file extension from source
             if source_path.suffix:
                 ext = source_path.suffix
             else:
-                # Try to determine from URL or default to .jpg
-                if image_path.startswith(('http://', 'https://')):
-                    # For URLs, try to get extension from URL or default to .jpg
-                    url_path = Path(image_path.split('?')[0])  # Remove query parameters
-                    ext = url_path.suffix or '.jpg'
+                # Try to determine from URL or use default
+                if file_path.startswith(('http://', 'https://')):
+                    # For URLs, try to get extension from URL or use default
+                    url_path = Path(file_path.split('?')[0])  # Remove query parameters
+                    ext = url_path.suffix or default_ext
                 else:
-                    ext = '.jpg'
+                    ext = default_ext
             
             # Create destination path with document ID
-            dest_path = self.images_dir / f"{doc_id}{ext}"
+            dest_path = target_dir / f"{doc_id}{ext}"
             
             # If source is a local file, copy it
             if source_path.exists() and source_path.is_file():
                 shutil.copy2(source_path, dest_path)
-                logger.info(f"Image copied from {source_path} to {dest_path}")
+                logger.info(f"File copied from {source_path} to {dest_path}")
                 return str(dest_path)
             # If source is a URL, download it synchronously
-            elif image_path.startswith(('http://', 'https://')):
+            elif file_path.startswith(('http://', 'https://')):
                 try:
                     with httpx.Client(timeout=30.0) as client:
-                        response = client.get(image_path)
+                        response = client.get(file_path)
                         response.raise_for_status()
                         with open(dest_path, 'wb') as f:
                             f.write(response.content)
-                    logger.info(f"Image downloaded from {image_path} to {dest_path}")
+                    logger.info(f"File downloaded from {file_path} to {dest_path}")
                     return str(dest_path)
                 except Exception as e:
-                    logger.error(f"Failed to download image from URL {image_path}: {e}")
+                    logger.error(f"Failed to download file from URL {file_path}: {e}")
                     return None
             else:
-                logger.warning(f"Image source not found or invalid: {image_path}")
+                logger.warning(f"File source not found or invalid: {file_path}")
                 return None
                 
         except Exception as e:
-            logger.error(f"Error saving image for document {doc_id}: {e}", exc_info=True)
+            logger.error(f"Error saving file for document {doc_id}: {e}", exc_info=True)
             return None
+    
+    def save_image(self, image_path: str, doc_id: str) -> Optional[str]:
+        """
+        Save an image file to the images directory (backward compatibility wrapper).
+        
+        :param image_path: Path to the source image file (local path or URL)
+        :param doc_id: Document ID to associate with the image
+        :return: Path to the saved image file, or None if saving failed
+        """
+        return self.save_file(image_path, doc_id, file_type="image")
     
     def save_document(self, document_data: Dict[str, Any]) -> str:
         """
@@ -189,11 +211,19 @@ class LocalStorage:
         embedding = document_data.get("embedding", [])
         embedding_dimension = document_data.get("embedding_dimension", len(embedding) if embedding else 0)
         
-        # Save image if image_path is provided
-        image_path = document_data.get("image_path")
-        saved_image_path = None
-        if image_path:
-            saved_image_path = self.save_image(image_path, doc_id)
+        # Detect file type from source
+        source_path = document_data.get("source") or document_data.get("image_path")
+        file_type = "image"  # Default
+        if source_path:
+            source_path_lower = str(source_path).lower()
+            if source_path_lower.endswith('.pdf') or '.pdf' in source_path_lower:
+                file_type = "pdf"
+        
+        # Save file (image or PDF) if path is provided
+        file_path = document_data.get("image_path") or document_data.get("pdf_path")
+        saved_file_path = None
+        if file_path:
+            saved_file_path = self.save_file(file_path, doc_id, file_type=file_type)
         
         # Prepare document record (without full embedding, just reference)
         document_record = {
@@ -201,7 +231,10 @@ class LocalStorage:
             "created_at": datetime.now().isoformat(),
             "owner_id": document_data.get("owner_id"),
             "source": document_data.get("source"),  # Original source (URL or path)
-            "image_path": saved_image_path,  # Path to saved image in images/ directory
+            "file_type": file_type,  # "image" or "pdf"
+            "file_path": saved_file_path,  # Path to saved file in images/ or pdfs/ directory
+            "image_path": saved_file_path if file_type == "image" else None,  # Backward compatibility
+            "pdf_path": saved_file_path if file_type == "pdf" else None,
             "extracted_text": document_data.get("extracted_text", ""),
             "ocr_confidence": document_data.get("ocr_confidence"),
             # Note: embedding is NOT stored in document file, only reference via doc_id
@@ -212,6 +245,7 @@ class LocalStorage:
             "metadata": {
                 "processing_steps": document_data.get("processing_steps", []),
                 "status": document_data.get("status", "unknown"),
+                "total_pages": document_data.get("raw_ocr_info", {}).get("total_pages", 1) if document_data.get("raw_ocr_info") else 1,
             }
         }
         
@@ -272,11 +306,17 @@ class LocalStorage:
         # Generate unique error document ID
         error_id = str(uuid.uuid4())
         
-        # Save image if image_path is provided
-        image_path = document_data.get("image_path") or document_data.get("source")
-        saved_image_path = None
-        if image_path:
-            saved_image_path = self.save_image(image_path, f"error_{error_id}")
+        # Detect file type and save file if path is provided
+        source_path = document_data.get("source") or document_data.get("image_path")
+        file_type = "image"
+        if source_path:
+            source_path_lower = str(source_path).lower()
+            if source_path_lower.endswith('.pdf') or '.pdf' in source_path_lower:
+                file_type = "pdf"
+        
+        saved_file_path = None
+        if source_path:
+            saved_file_path = self.save_file(source_path, f"error_{error_id}", file_type=file_type)
         
         # Prepare error document record with full context
         error_record = {
@@ -285,7 +325,10 @@ class LocalStorage:
             "error_type": "ingestion_failed",
             "owner_id": document_data.get("owner_id"),
             "source": document_data.get("source"),
-            "image_path": saved_image_path,
+            "file_type": file_type,
+            "file_path": saved_file_path,
+            "image_path": saved_file_path if file_type == "image" else None,
+            "pdf_path": saved_file_path if file_type == "pdf" else None,
             
             # Error information
             "status": error_info.get("status", "failed"),
@@ -476,13 +519,24 @@ class LocalStorage:
                 embedding_file.unlink()
                 logger.info(f"Embedding deleted: {doc_id}")
             
-            # Remove image file if exists (try common extensions)
-            image_extensions = ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp']
+            # Remove image/PDF file if exists (try common extensions)
+            image_extensions = ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.tiff', '.tif']
+            pdf_extensions = ['.pdf']
+            
+            # Try image files
             for ext in image_extensions:
                 image_file = self.images_dir / f"{doc_id}{ext}"
                 if image_file.exists():
                     image_file.unlink()
                     logger.info(f"Image deleted: {doc_id}{ext}")
+                    break
+            
+            # Try PDF files
+            for ext in pdf_extensions:
+                pdf_file = self.pdfs_dir / f"{doc_id}{ext}"
+                if pdf_file.exists():
+                    pdf_file.unlink()
+                    logger.info(f"PDF deleted: {doc_id}{ext}")
                     break
             
             # Remove from index

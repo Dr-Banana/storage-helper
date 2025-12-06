@@ -7,8 +7,10 @@ from app.modules.ocr import OCRResult, extract_text_advanced
 from app.modules.cleaning import process_text
 from app.modules.recommendation import generate_recommendation
 from app.modules.embedding import EmbeddingGenerator
+from app.modules.vision import VisionAnalyzer, VisionResult
 from app.integrations.storage_client import persist_document
 from app.storage.local_storage import LocalStorage, save_document, save_error_document
+from app.core.config import settings
 import asyncio
 
 logger = logging.getLogger(__name__)
@@ -20,9 +22,11 @@ class PipelineState:
     image_url: str
     owner_id: int
     document_id: Optional[Union[int, str]] = None  # Can be int (from DB) or str (UUID from local storage)
+    file_type: Optional[str] = None  # "image" or "pdf"
     
     # Processing results
     ocr_result: Optional[OCRResult] = None
+    vision_result: Optional[VisionResult] = None  # Vision understanding result
     cleaned_text: Optional[str] = None
     cleaning_info: Optional[Dict[str, Any]] = None
     recommendation_result: Optional[Dict[str, Any]] = None
@@ -40,6 +44,7 @@ class PipelineState:
             "status": self.status,
             "owner_id": self.owner_id,
             "source": self.image_url,
+            "file_type": self.file_type or "image",
             "document_id": str(self.document_id) if self.document_id is not None else None,
             "processing_steps": self.processing_steps.copy(),
         }
@@ -53,6 +58,14 @@ class PipelineState:
         
         if self.cleaning_info:
             output["cleaning_info"] = self.cleaning_info
+        
+        if self.vision_result:
+            output["vision_understanding"] = {
+                "description": self.vision_result.description,
+                "confidence": self.vision_result.confidence,
+                "detected_elements": self.vision_result.detected_elements,
+                "has_text": self.vision_result.has_text,
+            }
         
         if self.recommendation_result:
             output["recommendation_status"] = self.recommendation_result.get("status")
@@ -91,6 +104,7 @@ class IngestionPipeline:
         text_cleaner: Optional[Callable] = None,
         recommendation_generator: Optional[Callable] = None,
         embedding_generator: Optional[EmbeddingGenerator] = None,
+        vision_analyzer: Optional[VisionAnalyzer] = None,
         storage_client: Optional[Callable] = None,
     ):
         """
@@ -100,6 +114,7 @@ class IngestionPipeline:
         :param text_cleaner: Function for cleaning OCR text. Defaults to process_text from cleaning module.
         :param recommendation_generator: Function for generating recommendations. Defaults to generate_recommendation.
         :param embedding_generator: EmbeddingGenerator instance. Defaults to new EmbeddingGenerator().
+        :param vision_analyzer: VisionAnalyzer instance for multimodal understanding. Defaults to new VisionAnalyzer().
         :param storage_client: Function for persisting documents. Defaults to persist_document.
         """
         # Set defaults for module dependencies
@@ -107,9 +122,19 @@ class IngestionPipeline:
         self.text_cleaner = text_cleaner or process_text
         self.recommendation_generator = recommendation_generator or generate_recommendation
         self.embedding_generator = embedding_generator or EmbeddingGenerator()
+        
+        # Initialize vision analyzer with configuration
+        vision_api_key = settings.VISION_API_KEY or settings.GEMINI_LLM_API_KEY
+        self.vision_analyzer = vision_analyzer or VisionAnalyzer(
+            api_key=vision_api_key,
+            model_name=settings.VISION_MODEL,
+            timeout=int(settings.VISION_TIMEOUT),
+            enable_vision=settings.VISION_ENABLE
+        )
+        
         self.storage_client = storage_client or persist_document
         
-        logger.info("IngestionPipeline initialized with module dependencies")
+        logger.info(f"IngestionPipeline initialized with module dependencies (Vision: {'Enabled' if settings.VISION_ENABLE else 'Disabled'})")
     
     async def step_ocr(self, state: PipelineState) -> bool:
         """
@@ -143,6 +168,89 @@ class IngestionPipeline:
             state.error = f"OCR step failed: {str(e)}"
             logger.error(f"STEP 1 (OCR) Failed: {e}", exc_info=True)
             return False
+    
+    async def step_vision_enhancement(self, state: PipelineState) -> bool:
+        """
+        Step 1B (Optional): Enhance understanding with Vision AI (multimodal).
+        
+        Triggers when:
+        - Vision is globally enabled (VISION_ENABLE=True)
+        - AND either:
+          a) Auto-trigger is on AND OCR confidence is low, OR
+          b) Auto-trigger is off (always run)
+        
+        Vision AI can understand:
+        - Photos, logos, charts that OCR cannot read
+        - Visual context and layout
+        - Mixed text-image documents
+        
+        :param state: Pipeline state to update.
+        :return: True if successful or skipped, False on critical error.
+        """
+        # Check if vision is enabled
+        if not settings.VISION_ENABLE:
+            logger.info("STEP 1B (Vision): Skipped (disabled in configuration)")
+            return True
+        
+        # Check if we should trigger vision analysis
+        should_trigger = True
+        
+        if settings.VISION_AUTO_TRIGGER_ON_LOW_OCR:
+            # Only trigger if OCR confidence is low
+            ocr_confidence = state.ocr_result.confidence if state.ocr_result else 0.0
+            threshold = settings.VISION_OCR_CONFIDENCE_THRESHOLD
+            
+            if ocr_confidence >= threshold:
+                logger.info(
+                    f"STEP 1B (Vision): Skipped (OCR confidence {ocr_confidence:.2f} >= threshold {threshold})"
+                )
+                return True
+            
+            logger.info(
+                f"STEP 1B (Vision): Triggered due to low OCR confidence "
+                f"({ocr_confidence:.2f} < {threshold})"
+            )
+        else:
+            logger.info("STEP 1B (Vision): Running for all documents (auto-trigger disabled)")
+        
+        try:
+            # Run vision analysis
+            logger.info(f"STEP 1B (Vision): Analyzing image with Gemini Vision API...")
+            state.vision_result = await self.vision_analyzer.analyze_image(state.image_url)
+            
+            if state.vision_result and state.vision_result.description:
+                state.processing_steps.append("Vision Enhancement")
+                logger.info(
+                    f"STEP 1B (Vision) Complete. Description length: {len(state.vision_result.description)}, "
+                    f"Confidence: {state.vision_result.confidence:.2f}, "
+                    f"Elements: {', '.join(state.vision_result.detected_elements)}"
+                )
+                
+                # Merge vision description with OCR text for richer understanding
+                if state.ocr_result and state.ocr_result.text:
+                    # Combine OCR text with vision description
+                    merged_text = f"""=== OCR Extracted Text ===
+{state.ocr_result.text}
+
+=== Visual Understanding (AI Analysis) ===
+{state.vision_result.description}"""
+                    
+                    # Update OCR result with merged content
+                    # This will be used by downstream steps (cleaning, recommendation, embedding)
+                    state.ocr_result.text = merged_text
+                    logger.info("Vision description merged with OCR text for enhanced understanding")
+                
+                state.status = "vision_completed"
+                return True
+            else:
+                logger.warning("STEP 1B (Vision): No description returned, continuing without vision enhancement")
+                return True
+                
+        except Exception as e:
+            # Vision failure is not critical - continue pipeline with OCR only
+            logger.error(f"STEP 1B (Vision) Failed: {e}", exc_info=True)
+            logger.info("Continuing pipeline with OCR text only (graceful degradation)")
+            return True  # Don't fail pipeline on vision errors
     
     async def step_cleaning(self, state: PipelineState) -> bool:
         """
@@ -359,31 +467,43 @@ class IngestionPipeline:
         image_url: str,
         owner_id: int,
         document_id: Optional[int] = None,
-        skip_persist: bool = False
+        skip_persist: bool = False,
+        file_type: Optional[str] = None
     ) -> Dict[str, Any]:
         """
         Execute the complete ingestion pipeline.
         
-        :param image_url: URL or path of the image to process.
+        :param image_url: URL or path of the file to process (image or PDF).
         :param owner_id: ID of the user who owns the document.
         :param document_id: Optional existing document ID.
         :param skip_persist: If True, skip the persistence step.
+        :param file_type: Type of file ("image" or "pdf"), auto-detected if not provided.
         :return: Dictionary containing the processed document data.
         """
+        # Auto-detect file type if not provided
+        if not file_type:
+            from app.modules.ocr import detect_file_type
+            file_type = detect_file_type(image_url)
+        
         # Initialize pipeline state
         state = PipelineState(
             image_url=image_url,
             owner_id=owner_id,
-            document_id=document_id
+            document_id=document_id,
+            file_type=file_type
         )
         
-        logger.info(f"Pipeline started for document_id={document_id}, processing image from: {image_url}")
+        logger.info(f"Pipeline started for document_id={document_id}, processing {file_type} from: {image_url}")
         
         # Step 1: OCR
         if not await self.step_ocr(state):
             return state.to_output_dict()
         
-        # Step 2: Cleaning (after OCR, before recommendation/embedding)
+        # Step 1B: Vision Enhancement (optional, based on configuration)
+        # Enhances understanding with multimodal AI - can see photos, logos, charts beyond OCR
+        await self.step_vision_enhancement(state)
+        
+        # Step 2: Cleaning (after OCR+Vision, before recommendation/embedding)
         await self.step_cleaning(state)
         
         # Step 3: Recommendation and Embedding (run in parallel)
@@ -438,15 +558,17 @@ _default_pipeline = IngestionPipeline()
 async def run_ingestion_pipeline(
     image_url: str,
     owner_id: int,
-    document_id: Optional[int] = None
+    document_id: Optional[int] = None,
+    file_type: Optional[str] = None
 ) -> Dict[str, Any]:
     """
     Backward compatibility wrapper for run_ingestion_pipeline function.
     Uses the default IngestionPipeline instance.
     
-    :param image_url: URL or path of the image to process.
+    :param image_url: URL or path of the file to process (image or PDF).
     :param owner_id: ID of the user who owns the document.
     :param document_id: Optional existing document ID.
+    :param file_type: Type of file ("image" or "pdf"), auto-detected if not provided.
     :return: Dictionary containing the processed document data.
     """
-    return await _default_pipeline.run(image_url, owner_id, document_id)
+    return await _default_pipeline.run(image_url, owner_id, document_id, file_type=file_type)

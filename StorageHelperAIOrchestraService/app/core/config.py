@@ -105,6 +105,14 @@ class Settings(BaseSettings):
     OCR_MIN_CONFIDENCE: float = 0.0  # 最小置信度阈值（0-100），低于此值的文本可能被过滤
     OCR_PSM: int = 1  # Page Segmentation Mode (0-13), 1=auto with OSD (orientation/script detection), 3=fully automatic, 6=uniform block, 11=sparse text
     
+    # Vision Enhancement Configuration (Multimodal Understanding)
+    VISION_ENABLE: bool = True  # Enable Gemini Vision API for multimodal document understanding
+    VISION_API_KEY: str = ""  # Gemini API key for vision (can reuse GEMINI_LLM_API_KEY if not set separately)
+    VISION_MODEL: str = "gemini-2.0-flash-exp"  # Vision model name
+    VISION_AUTO_TRIGGER_ON_LOW_OCR: bool = True  # Auto-trigger vision when OCR confidence is low
+    VISION_OCR_CONFIDENCE_THRESHOLD: float = 80  # Trigger vision if OCR confidence below this (0-100, percentage)
+    VISION_TIMEOUT: float = 30.0  # Vision API timeout (seconds)
+    
     # 允许 Pydantic 读取 .env 文件
     model_config = SettingsConfigDict(env_file=get_env_file(), extra='ignore')
     
@@ -122,6 +130,10 @@ class Settings(BaseSettings):
         logger.info(f"LLM Model: {self.GEMINI_LLM_MODEL}")
         logger.info(f"Tesseract Language: {self.TESSERACT_LANG}")
         logger.info(f"OCR Preprocessing: {'Enabled' if self.OCR_ENABLE_PREPROCESSING else 'Disabled'}")
+        logger.info(f"Vision Enhancement: {'Enabled' if self.VISION_ENABLE else 'Disabled'}")
+        if self.VISION_ENABLE:
+            logger.info(f"Vision Model: {self.VISION_MODEL}")
+            logger.info(f"Vision Auto-trigger: {'Yes' if self.VISION_AUTO_TRIGGER_ON_LOW_OCR else 'No'} (threshold: {self.VISION_OCR_CONFIDENCE_THRESHOLD})")
         logger.info("=" * 70)
 
 

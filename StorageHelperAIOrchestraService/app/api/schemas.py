@@ -36,9 +36,10 @@ class IngestRequest(BaseModel):
     前端请求 AI 处理文档的入参
     """
     document_id: Optional[int] = Field(None, description="If storage service already created the row, pass ID here.")
-    image_url: str = Field(..., description="The source image to process (OCR)")
+    image_url: str = Field(..., description="The source file to process (image or PDF)")
     owner_id: int = Field(..., description="References user.id")
     user_notes: Optional[str] = Field(None, description="User's manual input to help AI")
+    file_type: Optional[str] = Field(None, description="File type: 'image' or 'pdf' (auto-detected if not provided)")
 
 class IngestResponse(BaseModel):
     """
@@ -75,6 +76,7 @@ class SearchResultItem(BaseModel):
     # 关键信息
     snippet: Optional[str] = Field(None, description="Relevant text snippet from OCR")
     preview_image_url: str = Field(..., description="Thumbnail of the document")
+    file_type: Optional[str] = Field("image", description="File type: 'image' or 'pdf'")
     
     # 物理位置信息 (MVP 核心目标：告诉用户在哪里)
     location: Optional[LocationInfo] = None

@@ -88,6 +88,10 @@ class ResultAssembler:
             # Extract text for title and snippet
             extracted_text = doc.get("extracted_text", "")
             
+            # Get file type and path
+            file_type = doc.get("file_type", "image")
+            file_path = doc.get("file_path") or doc.get("image_path") or doc.get("pdf_path") or doc.get("source", "")
+            
             # Build result item matching SearchResultItem schema
             # Use original UUID string as document_id (not converted to int)
             result_item = {
@@ -95,7 +99,8 @@ class ResultAssembler:
                 "score": score,
                 "title": extracted_text[:100].strip() if extracted_text else None,
                 "snippet": extracted_text[:300].strip() if extracted_text else None,
-                "preview_image_url": doc.get("source", ""),  # Use source as image URL
+                "preview_image_url": file_path,  # Use file path as preview URL
+                "file_type": file_type,  # Include file type
                 "created_at": None,
             }
             

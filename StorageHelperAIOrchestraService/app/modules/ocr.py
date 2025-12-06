@@ -5,7 +5,7 @@ import pytesseract
 import httpx
 import logging
 import asyncio
-from typing import Optional, Union, Dict, Any, Tuple
+from typing import Optional, Union, Dict, Any, Tuple, List
 import numpy as np
 # Assuming app.core.config exists and imports settings
 from app.core.config import settings
@@ -48,12 +48,16 @@ class OCRResult:
         text: str,
         confidence: Optional[float] = None,
         page_info: Optional[Dict[str, Any]] = None,
-        processed_image_info: Optional[Dict[str, Any]] = None
+        processed_image_info: Optional[Dict[str, Any]] = None,
+        source_type: str = "image",
+        total_pages: int = 1
     ):
         self.text = text
         self.confidence = confidence  # Average confidence (0-100)
         self.page_info = page_info or {}  # Page information (blocks, lines, etc.)
         self.processed_image_info = processed_image_info or {}  # Preprocessing information
+        self.source_type = source_type  # "image" or "pdf"
+        self.total_pages = total_pages  # Number of pages processed
     
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary format for serialization"""
@@ -61,7 +65,9 @@ class OCRResult:
             "text": self.text,
             "confidence": self.confidence,
             "page_info": self.page_info,
-            "processed_image_info": self.processed_image_info
+            "processed_image_info": self.processed_image_info,
+            "source_type": self.source_type,
+            "total_pages": self.total_pages
         }
 
 
@@ -163,6 +169,151 @@ async def extract_text(
     return result.text
 
 
+def detect_file_type(source: Union[str, bytes, Path]) -> str:
+    """
+    Detect file type from source (image or PDF).
+    
+    :param source: File source (URL, local path, or bytes)
+    :return: File type ("image" or "pdf")
+    """
+    # Check bytes magic number
+    if isinstance(source, bytes):
+        # PDF magic number: %PDF
+        if source[:4] == b'%PDF':
+            return "pdf"
+        return "image"
+    
+    # Check file extension
+    if isinstance(source, (str, Path)):
+        path = Path(str(source))
+        ext = path.suffix.lower()
+        
+        if ext == '.pdf':
+            return "pdf"
+        elif ext in ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.tiff', '.tif']:
+            return "image"
+    
+    # Default to image if cannot determine
+    return "image"
+
+
+async def extract_text_from_pdf_document(
+    pdf_source: Union[str, bytes, Path],
+    language: Optional[str] = None,
+    enable_preprocessing: Optional[bool] = None,
+    psm: Optional[int] = None,
+    max_pages: Optional[int] = 10
+) -> OCRResult:
+    """
+    Extract text from PDF document using PDF processor and OCR.
+    
+    :param pdf_source: PDF source (URL, local path, or byte stream)
+    :param language: OCR language
+    :param enable_preprocessing: Whether to enable image preprocessing
+    :param psm: Page Segmentation Mode
+    :param max_pages: Maximum number of pages to process
+    :return: OCRResult with extracted text from all pages
+    """
+    from app.modules.pdf_processor import process_pdf_for_ocr
+    from app.modules.cleaning import clean_ocr_text
+    
+    logger.info(f"Processing PDF document (max {max_pages} pages)...")
+    
+    # Process PDF
+    pdf_result = await process_pdf_for_ocr(pdf_source, max_pages=max_pages)
+    
+    # If PDF has embedded text, return it directly
+    if pdf_result.method == "text" and pdf_result.extracted_text:
+        logger.info(f"PDF has embedded text ({len(pdf_result.extracted_text)} chars), skipping OCR")
+        cleaned_text = clean_ocr_text(pdf_result.extracted_text)
+        
+        return OCRResult(
+            text=cleaned_text,
+            confidence=100.0,  # Text extraction is 100% confident
+            page_info={
+                "num_pages": pdf_result.total_pages,
+                "extraction_method": "text",
+                "num_words": len(cleaned_text.split())
+            },
+            processed_image_info={"method": "direct_text_extraction"},
+            source_type="pdf",
+            total_pages=pdf_result.total_pages
+        )
+    
+    # Otherwise, run OCR on each page image
+    logger.info(f"Running OCR on {len(pdf_result.pages)} PDF pages...")
+    
+    all_text = []
+    all_confidences = []
+    total_words = 0
+    
+    lang = language or settings.TESSERACT_LANG
+    do_preprocess = enable_preprocessing if enable_preprocessing is not None else settings.OCR_ENABLE_PREPROCESSING
+    psm_mode = psm if psm is not None else 1
+    
+    for page_data in pdf_result.pages:
+        page_num = page_data["page_number"]
+        page_image = page_data["image"]
+        
+        logger.info(f"Processing page {page_num}/{pdf_result.total_pages}...")
+        
+        # Preprocess image
+        processed_image, preprocess_info = preprocess_image(page_image, do_preprocess)
+        
+        # Run OCR
+        loop = asyncio.get_event_loop()
+        tesseract_config = f'--psm {psm_mode}'
+        if lang:
+            tesseract_config += f' -l {lang}'
+        
+        def _extract_text():
+            return pytesseract.image_to_string(processed_image, lang=lang, config=tesseract_config)
+        
+        def _extract_data():
+            return pytesseract.image_to_data(processed_image, lang=lang, config=tesseract_config, output_type=pytesseract.Output.DICT)
+        
+        page_text = await loop.run_in_executor(None, _extract_text)
+        page_data_ocr = await loop.run_in_executor(None, _extract_data)
+        
+        # Calculate confidence
+        confidences = [conf for conf in page_data_ocr.get('conf', []) if conf > 0]
+        if confidences:
+            page_confidence = float(np.mean(confidences))
+            all_confidences.append(page_confidence)
+        
+        # Clean and store text
+        cleaned_page_text = clean_ocr_text(page_text)
+        if cleaned_page_text:
+            all_text.append(f"[Page {page_num}]\n{cleaned_page_text}")
+            total_words += len(cleaned_page_text.split())
+        
+        logger.info(f"Page {page_num} OCR complete: {len(cleaned_page_text)} chars")
+    
+    # Combine all pages
+    combined_text = "\n\n".join(all_text)
+    avg_confidence = float(np.mean(all_confidences)) if all_confidences else None
+    
+    logger.info(
+        f"PDF OCR complete: {pdf_result.total_pages} pages, "
+        f"{len(combined_text)} total chars, "
+        f"avg confidence: {avg_confidence:.2f if avg_confidence else 'N/A'}"
+    )
+    
+    return OCRResult(
+        text=combined_text,
+        confidence=avg_confidence,
+        page_info={
+            "num_pages": pdf_result.total_pages,
+            "extraction_method": "ocr",
+            "num_words": total_words,
+            "psm_mode": psm_mode
+        },
+        processed_image_info={"method": "pdf_to_image_ocr", "dpi": 300},
+        source_type="pdf",
+        total_pages=pdf_result.total_pages
+    )
+
+
 async def extract_text_advanced(
     image_source: Union[str, bytes, Path],
     language: Optional[str] = None,
@@ -170,9 +321,9 @@ async def extract_text_advanced(
     psm: Optional[int] = None
 ) -> OCRResult:
     """
-    Extract text from an image, returning detailed OCR results.
+    Extract text from an image or PDF, returning detailed OCR results.
     
-    :param image_source: Image source (URL, local path, or byte stream)
+    :param image_source: Image or PDF source (URL, local path, or byte stream)
     :param language: OCR language (e.g., "eng", "chi_sim", "eng+chi_sim"), defaults to configuration
     :param enable_preprocessing: Whether to enable preprocessing, defaults to configuration
     :param psm: Page Segmentation Mode (0-13), None uses Tesseract default (3)
@@ -184,6 +335,19 @@ async def extract_text_advanced(
     :return: OCRResult object, containing text, confidence, etc.
     """
     from app.modules.cleaning import clean_ocr_text
+    
+    # Detect file type
+    file_type = detect_file_type(image_source)
+    
+    # If PDF, use PDF processing pipeline
+    if file_type == "pdf":
+        logger.info("Detected PDF file, using PDF processing pipeline")
+        return await extract_text_from_pdf_document(
+            image_source,
+            language=language,
+            enable_preprocessing=enable_preprocessing,
+            psm=psm
+        )
     
     lang = language or settings.TESSERACT_LANG
     do_preprocess = enable_preprocessing if enable_preprocessing is not None else settings.OCR_ENABLE_PREPROCESSING
@@ -255,7 +419,9 @@ async def extract_text_advanced(
             text=cleaned_text,  # Return cleaned text instead of raw
             confidence=avg_confidence,
             page_info=page_info,
-            processed_image_info={**preprocess_info, "psm_mode": psm_mode}
+            processed_image_info={**preprocess_info, "psm_mode": psm_mode},
+            source_type="image",
+            total_pages=1
         )
         
     except pytesseract.TesseractError as e:

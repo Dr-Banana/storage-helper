@@ -24,7 +24,8 @@ async def process_document(request: IngestRequest):
         result = await ingestion.run_ingestion_pipeline(
              image_url=request.image_url, 
              owner_id=request.owner_id,
-             document_id=request.document_id
+             document_id=request.document_id,
+             file_type=request.file_type
         )
         
         # Validate pipeline status
