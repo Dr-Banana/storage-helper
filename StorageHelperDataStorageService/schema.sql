@@ -47,7 +47,7 @@ CREATE TABLE storage_location (
 CREATE TABLE event (
     id              INT AUTO_INCREMENT PRIMARY KEY,
     name            VARCHAR(200) NOT NULL,         -- e.g. "2024 Tax Filing", "Q2 Dental Visit"
-    category        VARCHAR(50),                  -- Optional: tag for organizing events (independent from document_category)
+    category        VARCHAR(50),                  -- tag for organizing events (independent from document_category)
     start_date      DATE,
     end_date        DATE,
     description     TEXT,
