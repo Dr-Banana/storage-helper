@@ -31,9 +31,9 @@ flowchart TD
     
     Input --> FileType{File Type<br/>Detection}
     
-    FileType -->|Image| OCR[STEP 1: OCR IMAGE<br/>app/modules/ocr.py<br/>─────────────────<br/>• Load image from URL/path/bytes<br/>• Image preprocessing:<br/>  - RGB conversion<br/>  - Grayscale<br/>  - Contrast enhance<br/>  - Denoise & sharpen<br/>  - Binarization<br/>• Tesseract OCR PSM 1<br/>• Confidence scoring<br/>─────────────────<br/>OUTPUT: OCRResult<br/>  - text cleaned<br/>  - confidence<br/>  - page_info]
+    FileType -->|Image| OCR[STEP 1: OCR IMAGE<br/>app/modules/ocr.py<br/>─────────────────<br/>• Load image from URL/path/bytes<br/>• Image preprocessing:<br/>  - RGB conversion<br/>  - Grayscale<br/>  - Contrast enhance<br/>  - Denoise & sharpen<br/>  - Binarization<br/>• Tesseract OCR PSM 1<br/>• Confidence scoring<br/>─────────────────<br/>PARALLEL: File Upload<br/>• Upload to DataStorageService<br/>  via HTTP API<br/>• POST /api/v1/documents/upload-and-process<br/>• Non-blocking, continues if fails<br/>─────────────────<br/>OUTPUT: OCRResult<br/>  - text cleaned<br/>  - confidence<br/>  - page_info<br/>OUTPUT: file_url if upload succeeds<br/>OUTPUT: file_upload_error if upload fails]
     
-    FileType -->|PDF| PDFOCR[STEP 1: OCR PDF<br/>app/modules/pdf_processor.py<br/>app/modules/ocr.py<br/>─────────────────<br/>• Load PDF from source<br/>• Check for embedded text<br/>• If text-based PDF:<br/>  - Direct text extraction<br/>• If image-based PDF:<br/>  - Convert pages to images<br/>  - Run OCR on each page<br/>  - Combine results<br/>• Multi-page support max 10<br/>─────────────────<br/>OUTPUT: OCRResult<br/>  - text combined pages<br/>  - confidence<br/>  - total_pages<br/>  - source_type: pdf]
+    FileType -->|PDF| PDFOCR[STEP 1: OCR PDF<br/>app/modules/pdf_processor.py<br/>app/modules/ocr.py<br/>─────────────────<br/>• Load PDF from source<br/>• Check for embedded text<br/>• If text-based PDF:<br/>  - Direct text extraction<br/>• If image-based PDF:<br/>  - Convert pages to images<br/>  - Run OCR on each page<br/>  - Combine results<br/>• Multi-page support max 10<br/>─────────────────<br/>PARALLEL: File Upload<br/>• Upload to DataStorageService<br/>  via HTTP API<br/>• POST /api/v1/documents/upload-and-process<br/>• Non-blocking, continues if fails<br/>─────────────────<br/>OUTPUT: OCRResult<br/>  - text combined pages<br/>  - confidence<br/>  - total_pages<br/>  - source_type: pdf<br/>OUTPUT: file_url if upload succeeds<br/>OUTPUT: file_upload_error if upload fails]
     
     PDFOCR --> Vision
     OCR --> Vision[STEP 1B: VISION ENHANCEMENT<br/>app/modules/vision.py<br/>OPTIONAL - CONFIGURABLE]
@@ -60,7 +60,7 @@ flowchart TD
     
     Merge --> Persistence[STEP 4: PERSISTENCE<br/>app/pipelines/ingestion.py<br/>─────────────────<br/>STORAGE LOGIC REMOVED:<br/>• Generate UUID for document_id<br/>• No local file storage<br/>• No remote API calls<br/>• Persistence handled by API layer<br/>─────────────────<br/>OUTPUT: document_id UUID string<br/>for API response]
     
-    Persistence --> Response[RESPONSE: Complete Pipeline Output<br/>─────────────────<br/>Returns full pipeline results via<br/>PipelineStorage get_pipeline_output<br/>• status: completed<br/>• document_id: UUID<br/>• extracted_text<br/>• ocr_confidence<br/>• vision_understanding<br/>• recommendation_data<br/>• embedding<br/>• All processing steps and metadata]
+    Persistence --> Response[RESPONSE: Complete Pipeline Output<br/>─────────────────<br/>Returns full pipeline results via<br/>PipelineStorage get_pipeline_output<br/>• status: completed<br/>• document_id: UUID<br/>• file_url: URL of file in database<br/>• file_upload_error: Error if upload failed<br/>• extracted_text<br/>• ocr_confidence<br/>• vision_understanding<br/>• recommendation_data<br/>• embedding<br/>• All processing steps and metadata]
     
     style Start fill:#0000
     style Stop1 fill:#0000
@@ -75,18 +75,24 @@ flowchart TD
 2. **Dependency Injection**: All modules (OCR, vision, cleaning, recommendation, embedding, storage) are injected via constructor
 3. **State Management**: `PipelineState` dataclass tracks all processing results and metadata throughout the pipeline
 4. **Multimodal Intelligence**: Vision Enhancement (Step 1B) adds semantic understanding beyond OCR text extraction
-5. **Parallel Processing**: Steps 3A (Recommendation) and 3B (Embedding) run concurrently using `asyncio.gather()`
+5. **Parallel Processing**: 
+   - Steps 3A (Recommendation) and 3B (Embedding) run concurrently using `asyncio.gather()`
+   - Step 1 (OCR) and file upload run in parallel for efficiency
 6. **Error Resilience**: 
    - Cleaning failure doesn't stop pipeline (falls back to raw OCR text)
    - Vision enhancement failure doesn't stop pipeline (graceful degradation to OCR-only)
    - Recommendation and embedding failures are logged independently
+   - File upload failure doesn't stop pipeline (AI processing continues, error tracked)
    - Pipeline continues to completion to retain partial results
+   - Upload task properly cancelled if OCR fails to prevent resource leaks
 7. **Storage Architecture**: 
    - **Local file storage removed**: No longer saves to tmp/documents/, tmp/embeddings/, tmp/images/, tmp/pdfs/, or index.json
+   - **File upload integration**: Files uploaded to DataStorageService via HTTP API during OCR step
    - **API-only persistence**: Storage logic removed from pipeline; persistence handled by API layer
    - **Unified output management**: `PipelineStorage` class provides methods to format and return complete pipeline results
    - **Output schema**: `DocumentOutputSchema` class manages output structure and field inclusion
-7. **Comprehensive Logging**: Each step logs progress, timing, and results for debugging and monitoring
+   - **File upload error tracking**: `file_upload_error` field indicates upload failures without blocking AI processing
+8. **Comprehensive Logging**: Each step logs progress, timing, and results for debugging and monitoring
 
 #### Module Details
 
@@ -98,7 +104,7 @@ flowchart TD
 | **Cleaning Module** | `app/modules/cleaning.py` | Text normalization, noise removal, quality filtering |
 | **Recommendation Module** | `app/modules/recommendation.py` | LLM-based category and location suggestion using Gemini API |
 | **Embedding Module** | `app/modules/embedding.py` | Vector generation using Gemini API embedContent (text-embedding-004) with retry mechanism |
-| **Pipeline Storage** | `app/storage/pipeline_storage.py` | Unified storage handler for all pipeline output results (API-based, no local files) |
+| **Pipeline Storage** | `app/storage/pipeline_storage.py` | Unified storage handler for all pipeline output results (API-based, no local files). Handles file uploads to DataStorageService via HTTP API. |
 | **Output Schema** | `app/storage/output_schema.py` | Unified management of pipeline output structure and fields |
 
 #### Vision Module Implementation Details
@@ -219,8 +225,9 @@ The `pdf_processor` module (`app/modules/pdf_processor.py`) handles PDF document
 
 #### Error Handling Strategy
 
-- **OCR Failure**: Pipeline stops immediately, returns error status
-- **PDF Processing Failure**: Pipeline stops, returns error status
+- **OCR Failure**: Pipeline stops immediately, upload task cancelled, returns error status
+- **PDF Processing Failure**: Pipeline stops, upload task cancelled, returns error status
+- **File Upload Failure**: Continue with AI processing, set `file_upload_error` field, log warning
 - **Vision Enhancement Failure**: 🆕 Continue with OCR text only (graceful degradation), log warning
 - **Cleaning Failure**: Continue with raw OCR text, log warning
 - **Recommendation Failure**: Log error, continue to completion with partial data
@@ -303,7 +310,7 @@ Step 4: Assemble → Add full details:
 
 **Current Phase:** Phase 2 (AI Backend Implementation) - Near Completion
 **Timeline:** Dec 11 – Dec 24
-**Last Updated:** Dec 5, 2025
+**Last Updated:** Dec 6, 2025
 
 ### 3.1 Setup & Infrastructure
 - [x] **BE-01**: Initialize Python Project (FastAPI/Flask) & Env Setup
@@ -525,6 +532,22 @@ StorageHelperAIOrchestraService/
       - Removed `app/integrations/` folder (functionality merged into `pipeline_storage.py`)
       - Removed `app/storage/local_storage.py` (local file operations disabled)
       - Removed `app/storage/migrate_embeddings.py` (no longer needed)
+*   **File Upload Integration** (December 6, 2025):
+    - **Parallel File Upload**: Files uploaded to DataStorageService during OCR step
+      - Upload runs in parallel with OCR processing for efficiency
+      - Uses HTTP API: `POST /api/v1/documents/upload-and-process`
+      - Microservice communication: No direct code dependencies, pure HTTP
+    - **Error Handling**: 
+      - File upload failure doesn't block AI processing
+      - `file_upload_error` field tracks upload failures separately
+      - Upload task properly cancelled if OCR fails to prevent resource leaks
+    - **Output Fields**: 
+      - `file_url`: URL of file stored in database (from upload response)
+      - `file_upload_error`: Error message if upload failed (AI processing succeeded)
+    - **Configuration**: 
+      - `STORAGE_SERVICE_URL` configures DataStorageService endpoint
+      - Default: `http://localhost:8000/internal` (extracted to `http://localhost:8000` for public API)
+    - **Dependencies**: Added `aiofiles==24.1.0` for async file reading
 *   **Pending Work**: 
     - Feedback handler implementation (endpoint exists, storage logic removed, needs API integration)
     - Comprehensive test suite (unit and integration tests)

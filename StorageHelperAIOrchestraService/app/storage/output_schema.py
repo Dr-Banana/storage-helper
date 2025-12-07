@@ -15,6 +15,8 @@ class OutputField(Enum):
     SOURCE = "source"
     FILE_TYPE = "file_type"
     DOCUMENT_ID = "document_id"
+    FILE_URL = "file_url"  # URL of file stored in database
+    FILE_UPLOAD_ERROR = "file_upload_error"  # Error message if file upload failed
     PROCESSING_STEPS = "processing_steps"
     
     # OCR fields
@@ -81,7 +83,8 @@ class DocumentOutputSchema:
         
         # Check category inclusion flags
         if field in [OutputField.STATUS, OutputField.OWNER_ID, OutputField.SOURCE, 
-                     OutputField.FILE_TYPE, OutputField.DOCUMENT_ID, OutputField.PROCESSING_STEPS]:
+                     OutputField.FILE_TYPE, OutputField.DOCUMENT_ID, OutputField.FILE_URL,
+                     OutputField.FILE_UPLOAD_ERROR, OutputField.PROCESSING_STEPS]:
             return self.include_basic_fields
         
         if field in [OutputField.EXTRACTED_TEXT, OutputField.OCR_CONFIDENCE, OutputField.RAW_OCR_INFO]:
@@ -126,6 +129,8 @@ class DocumentOutputSchema:
         file_type: Optional[str],
         document_id: Optional[str],
         processing_steps: List[str],
+        file_url: Optional[str] = None,
+        file_upload_error: Optional[str] = None,
         extracted_text: Optional[str] = None,
         ocr_confidence: Optional[float] = None,
         raw_ocr_info: Optional[Dict[str, Any]] = None,
@@ -147,6 +152,8 @@ class DocumentOutputSchema:
         :param source: Source image URL
         :param file_type: File type ("image" or "pdf")
         :param document_id: Document ID
+        :param file_url: URL of file stored in database (from upload-and-process API)
+        :param file_upload_error: Error message if file upload failed (AI processing succeeded)
         :param processing_steps: List of processing steps completed
         :param extracted_text: Extracted text from OCR
         :param ocr_confidence: OCR confidence score
@@ -175,6 +182,10 @@ class DocumentOutputSchema:
             output[self.get_field_name(OutputField.FILE_TYPE)] = file_type or "image"
         if self.should_include(OutputField.DOCUMENT_ID):
             output[self.get_field_name(OutputField.DOCUMENT_ID)] = str(document_id) if document_id is not None else None
+        if self.should_include(OutputField.FILE_URL) and file_url:
+            output[self.get_field_name(OutputField.FILE_URL)] = file_url
+        if self.should_include(OutputField.FILE_UPLOAD_ERROR) and file_upload_error:
+            output[self.get_field_name(OutputField.FILE_UPLOAD_ERROR)] = file_upload_error
         if self.should_include(OutputField.PROCESSING_STEPS):
             output[self.get_field_name(OutputField.PROCESSING_STEPS)] = processing_steps.copy()
         

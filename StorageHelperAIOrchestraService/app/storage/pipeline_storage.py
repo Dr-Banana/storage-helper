@@ -9,13 +9,15 @@ Handles storage of all AI Orchestration pipeline output results including:
 
 All data is saved and retrieved via remote API.
 """
-from typing import Dict, Any, Optional, List, TYPE_CHECKING
+from typing import Dict, Any, Optional, List, TYPE_CHECKING, Union
 from pathlib import Path
 import logging
 import uuid
 from datetime import datetime
 import json
 import httpx
+import aiofiles
+from io import BytesIO
 
 from app.core.config import settings
 
@@ -210,6 +212,135 @@ class PipelineStorage:
         
         # Return original path - file will be handled via API
         return file_path if file_path else None
+    
+    async def upload_document_file(
+        self,
+        file_path: str,
+        owner_id: int,
+        category: str = "UNKNOWN",
+        event_name: Optional[str] = None
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Upload document file to DataStorageService via HTTP API.
+        
+        This method communicates with the DataStorageService microservice through
+        its public API endpoint. No direct code dependencies - pure HTTP communication.
+        
+        [API: POST /api/v1/documents/upload-and-process]
+        Service: DataStorageService (separate microservice)
+        
+        :param file_path: Local file path or URL to the document file
+        :param owner_id: Document owner user ID
+        :param category: Document category (TAX, VISA, MED, INS, etc.)
+        :param event_name: Optional associated event name
+        :return: Response dictionary with id, filename, url, owner_id, created_at, or None if failed
+        """
+        url = "/api/v1/documents/upload-and-process"
+        
+        try:
+            # Read file content
+            file_content = await self._read_file_content(file_path)
+            if not file_content:
+                logger.error(f"Failed to read file content from {file_path}")
+                return None
+            
+            # Determine filename from path
+            filename = Path(file_path).name if file_path else "document"
+            
+            # Prepare multipart form data
+            files = {
+                "file": (filename, file_content, self._get_content_type(file_path))
+            }
+            data = {
+                "owner_id": owner_id,
+                "category": category
+            }
+            if event_name:
+                data["event_name"] = event_name
+            
+            # Upload to DataStorageService via HTTP API (microservice communication)
+            # Note: This endpoint is at /api/v1, not /internal
+            # Extract base URL from STORAGE_SERVICE_URL (e.g., "http://localhost:8000" from "http://localhost:8000/internal")
+            base_url = settings.STORAGE_SERVICE_URL.replace("/internal", "").rstrip("/")
+            
+            # Validate base URL
+            if not base_url or not base_url.startswith(("http://", "https://")):
+                logger.error(f"Invalid STORAGE_SERVICE_URL configuration: {settings.STORAGE_SERVICE_URL}")
+                return None
+            
+            logger.debug(f"Uploading file to DataStorageService at: {base_url}{url}")
+            
+            async with httpx.AsyncClient(base_url=base_url, timeout=30.0) as client:
+                response = await client.post(url, files=files, data=data)
+                response.raise_for_status()
+                
+                result = response.json()
+                logger.info(f"Document file uploaded successfully. ID: {result.get('id')}, URL: {result.get('url')}")
+                return result
+                
+        except httpx.ConnectError as e:
+            error_msg = f"Cannot connect to DataStorageService at {base_url}. Service may be down or URL incorrect."
+            logger.error(f"Connection error uploading document file: {error_msg}")
+            logger.debug(f"Full error: {e}")
+            return None
+        except httpx.HTTPStatusError as e:
+            error_msg = f"HTTP {e.response.status_code}: {e.response.text[:200]}"
+            logger.error(f"Failed to upload document file via API: {error_msg}")
+            return None
+        except httpx.TimeoutException as e:
+            error_msg = f"Timeout connecting to DataStorageService at {base_url}"
+            logger.error(f"Timeout uploading document file: {error_msg}")
+            return None
+        except Exception as e:
+            error_msg = f"Unexpected error: {str(e)}"
+            logger.error(f"Error uploading document file via API: {error_msg}", exc_info=True)
+            return None
+    
+    async def _read_file_content(self, file_path: str) -> Optional[bytes]:
+        """
+        Read file content from local path or URL.
+        
+        :param file_path: Local file path or URL
+        :return: File content as bytes, or None if failed
+        """
+        try:
+            # Check if it's a URL
+            if file_path.startswith(("http://", "https://")):
+                # Download from URL
+                async with httpx.AsyncClient(timeout=30.0) as client:
+                    response = await client.get(file_path)
+                    response.raise_for_status()
+                    return response.content
+            else:
+                # Read from local file
+                async with aiofiles.open(file_path, "rb") as f:
+                    return await f.read()
+        except Exception as e:
+            logger.error(f"Failed to read file content from {file_path}: {e}")
+            return None
+    
+    def _get_content_type(self, file_path: str) -> str:
+        """
+        Determine content type from file extension.
+        
+        :param file_path: File path
+        :return: MIME type string
+        """
+        path = Path(file_path)
+        ext = path.suffix.lower()
+        
+        content_types = {
+            ".jpg": "image/jpeg",
+            ".jpeg": "image/jpeg",
+            ".png": "image/png",
+            ".gif": "image/gif",
+            ".bmp": "image/bmp",
+            ".webp": "image/webp",
+            ".tiff": "image/tiff",
+            ".pdf": "application/pdf"
+        }
+        
+        return content_types.get(ext, "application/octet-stream")
     
     async def save_embedding(self, doc_id: str, embedding: List[float], embedding_dimension: int) -> bool:
         """

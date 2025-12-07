@@ -33,6 +33,10 @@ class PipelineState:
     embedding: Optional[list] = None
     embedding_status: str = "pending"
     
+    # File storage
+    file_url: Optional[str] = None  # URL of file stored in database (from upload-and-process API)
+    file_upload_error: Optional[str] = None  # Error message if file upload failed
+    
     # Pipeline metadata
     processing_steps: list = field(default_factory=list)
     status: str = "initialized"
@@ -79,6 +83,8 @@ class PipelineState:
             file_type=self.file_type,
             document_id=self.document_id,
             processing_steps=self.processing_steps,
+            file_url=self.file_url,
+            file_upload_error=self.file_upload_error,
             extracted_text=self.cleaned_text or (self.ocr_result.text if self.ocr_result else None),
             ocr_confidence=self.ocr_result.confidence if self.ocr_result else None,
             raw_ocr_info=self.ocr_result.to_dict() if self.ocr_result else None,
@@ -137,11 +143,16 @@ class IngestionPipeline:
             enable_vision=settings.VISION_ENABLE
         )
         
+        # Initialize pipeline storage for file uploads
+        from app.storage.pipeline_storage import PipelineStorage
+        self.pipeline_storage = PipelineStorage()
+        
         logger.info(f"IngestionPipeline initialized with module dependencies (Vision: {'Enabled' if settings.VISION_ENABLE else 'Disabled'})")
     
     async def step_ocr(self, state: PipelineState) -> bool:
         """
         Step 1: Extract text from image using OCR.
+        Also uploads file to DataStorageService in parallel.
         
         :param state: Pipeline state to update.
         :return: True if successful, False otherwise.
@@ -149,13 +160,57 @@ class IngestionPipeline:
         logger.info(f"STEP 1 (OCR): Processing image from {state.image_url}")
         
         try:
-            state.ocr_result = await self.ocr_extractor(state.image_url)
+            # Run OCR and file upload in parallel
+            ocr_task = asyncio.create_task(self.ocr_extractor(state.image_url))
+            upload_task = asyncio.create_task(
+                self.pipeline_storage.upload_document_file(
+                    file_path=state.image_url,
+                    owner_id=state.owner_id,
+                    category="UNKNOWN"  # Will be updated after recommendation step
+                )
+            )
             
+            # Wait for OCR to complete (critical path)
+            state.ocr_result = await ocr_task
+            
+            # Check OCR result
             if not state.ocr_result or not state.ocr_result.text:
                 state.status = "failed"
                 state.error = "OCR Extraction Failed or returned empty text."
                 logger.warning(f"OCR failed for {state.image_url}. Stopping pipeline.")
+                
+                # Cancel upload task since OCR failed - no point in uploading
+                if not upload_task.done():
+                    upload_task.cancel()
+                    try:
+                        await upload_task
+                    except asyncio.CancelledError:
+                        logger.debug("Upload task cancelled due to OCR failure")
+                
                 return False
+            
+            # Wait for file upload (non-blocking, but we want the result)
+            try:
+                upload_result = await upload_task
+                if upload_result:
+                    state.file_url = upload_result.get("url")
+                    # Update document_id if we got one from the upload
+                    if upload_result.get("id") and not state.document_id:
+                        state.document_id = upload_result.get("id")
+                    logger.info(f"File uploaded successfully. URL: {state.file_url}")
+                else:
+                    # File upload failed but AI processing succeeded
+                    state.file_upload_error = "File upload to DataStorageService failed"
+                    logger.warning("File upload failed, but continuing with OCR result")
+            except asyncio.CancelledError:
+                # Upload was cancelled (shouldn't happen here, but handle gracefully)
+                logger.debug("Upload task was cancelled")
+                state.file_upload_error = "File upload was cancelled"
+            except Exception as upload_error:
+                # File upload failed but AI processing succeeded
+                error_msg = str(upload_error)
+                state.file_upload_error = f"File upload error: {error_msg}"
+                logger.warning(f"File upload error (non-critical): {upload_error}")
             
             state.processing_steps.append("OCR")
             confidence_str = f"{state.ocr_result.confidence:.2f}" if state.ocr_result.confidence else "N/A"

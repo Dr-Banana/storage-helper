@@ -89,7 +89,10 @@ def mask_sensitive_value(value: str, show_chars: int = 4) -> str:
 
 class Settings(BaseSettings):
     # Storage Service Configuration
-    STORAGE_SERVICE_URL: str = "http://localhost:8001/internal"
+    # Base URL for DataStorageService microservice (HTTP API communication)
+    # Default: http://localhost:8000 (local) or configure via environment variable
+    # Note: This service communicates with DataStorageService via HTTP API only
+    STORAGE_SERVICE_URL: str = "http://localhost:8000/internal"
     
     # Gemini API Configuration
     GEMINI_EMBEDDING_API_KEY: str = ""  # Gemini API key for embedding generation
