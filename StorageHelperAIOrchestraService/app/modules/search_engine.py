@@ -6,7 +6,7 @@ import numpy as np
 from typing import List, Dict, Any, Optional
 import logging
 
-from app.storage.local_storage import get_all_embeddings, get_embedding, get_document
+from app.storage.pipeline_storage import get_all_embeddings, get_embedding, get_document
 from app.modules.embedding import EmbeddingGenerator
 
 logger = logging.getLogger(__name__)
@@ -90,7 +90,7 @@ class SearchEngine:
         logger.info(f"Similarity search: owner_id={owner_id}, top_k={top_k}, min_score={min_score}")
         
         # Get all documents with embeddings
-        documents = get_all_embeddings(owner_id=owner_id)
+        documents = await get_all_embeddings(owner_id=owner_id)
         
         if not documents:
             logger.warning("No documents with embeddings found")
@@ -167,7 +167,7 @@ class SearchEngine:
             for result in results:
                 doc_id = result.get("document_id")
                 if doc_id:
-                    full_doc = get_document(str(doc_id), include_embedding=False)
+                    full_doc = await get_document(str(doc_id), include_embedding=False)
                     if full_doc:
                         result.update({
                             "text_preview": full_doc.get("extracted_text", "")[:200],

@@ -6,8 +6,8 @@ from typing import Dict, Any, Optional, List
 from pathlib import Path
 from datetime import datetime
 
-# Import location data handler from storage_client
-from app.integrations.storage_client import LocationDataHandler, LLM_LOCATION_FORMAT, DB_LOCATION_FORMAT
+# Import location data handler from pipeline_storage
+from app.storage.pipeline_storage import LocationDataHandler, LLM_LOCATION_FORMAT, DB_LOCATION_FORMAT
 # Import settings for API configuration
 from app.core.config import settings
 

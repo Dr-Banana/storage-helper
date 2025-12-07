@@ -7,8 +7,7 @@ import logging
 import json
 from pathlib import Path
 
-from app.storage.local_storage import get_document
-from app.integrations.storage_client import get_location_info
+from app.storage.pipeline_storage import get_document, get_location_info
 from app.api.schemas import LocationInfo
 
 logger = logging.getLogger(__name__)
@@ -80,7 +79,7 @@ class ResultAssembler:
                 continue
             
             # Get full document data
-            doc = get_document(str(doc_id), include_embedding=False)
+            doc = await get_document(str(doc_id), include_embedding=False)
             if not doc:
                 logger.warning(f"Document not found: {doc_id}")
                 continue

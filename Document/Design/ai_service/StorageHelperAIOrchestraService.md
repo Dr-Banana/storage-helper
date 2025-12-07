@@ -58,9 +58,9 @@ flowchart TD
     Recommendation --> Merge{Merge Results}
     Embedding --> Merge
     
-    Merge --> Persistence[STEP 4: PERSISTENCE<br/>app/storage/local_storage.py<br/>─────────────────<br/>LOCAL STORAGE:<br/>• Generate UUID<br/>• Save document JSON tmp/documents/<br/>• Save embedding tmp/embeddings/<br/>• Save file tmp/images/ or tmp/pdfs/<br/>• Update index.json<br/>REMOTE STORAGE:<br/>• Call storage_client optional<br/>• Persist to DB if available<br/>─────────────────<br/>OUTPUT: document_id UUID string]
+    Merge --> Persistence[STEP 4: PERSISTENCE<br/>app/pipelines/ingestion.py<br/>─────────────────<br/>STORAGE LOGIC REMOVED:<br/>• Generate UUID for document_id<br/>• No local file storage<br/>• No remote API calls<br/>• Persistence handled by API layer<br/>─────────────────<br/>OUTPUT: document_id UUID string<br/>for API response]
     
-    Persistence --> Response[RESPONSE: IngestResponse<br/>─────────────────<br/>• status: completed<br/>• document_id: UUID<br/>• detected_type_code<br/>• extracted_metadata<br/>• recommended_location_id<br/>• recommended_location_reason]
+    Persistence --> Response[RESPONSE: Complete Pipeline Output<br/>─────────────────<br/>Returns full pipeline results via<br/>PipelineStorage get_pipeline_output<br/>• status: completed<br/>• document_id: UUID<br/>• extracted_text<br/>• ocr_confidence<br/>• vision_understanding<br/>• recommendation_data<br/>• embedding<br/>• All processing steps and metadata]
     
     style Start fill:#0000
     style Stop1 fill:#0000
@@ -80,7 +80,12 @@ flowchart TD
    - Cleaning failure doesn't stop pipeline (falls back to raw OCR text)
    - Vision enhancement failure doesn't stop pipeline (graceful degradation to OCR-only)
    - Recommendation and embedding failures are logged independently
-   - Pipeline continues to persistence to retain partial results
+   - Pipeline continues to completion to retain partial results
+7. **Storage Architecture**: 
+   - **Local file storage removed**: No longer saves to tmp/documents/, tmp/embeddings/, tmp/images/, tmp/pdfs/, or index.json
+   - **API-only persistence**: Storage logic removed from pipeline; persistence handled by API layer
+   - **Unified output management**: `PipelineStorage` class provides methods to format and return complete pipeline results
+   - **Output schema**: `DocumentOutputSchema` class manages output structure and field inclusion
 7. **Comprehensive Logging**: Each step logs progress, timing, and results for debugging and monitoring
 
 #### Module Details
@@ -93,8 +98,8 @@ flowchart TD
 | **Cleaning Module** | `app/modules/cleaning.py` | Text normalization, noise removal, quality filtering |
 | **Recommendation Module** | `app/modules/recommendation.py` | LLM-based category and location suggestion using Gemini API |
 | **Embedding Module** | `app/modules/embedding.py` | Vector generation using Gemini API embedContent (text-embedding-004) with retry mechanism |
-| **Storage Client** | `app/integrations/storage_client.py` | Interface to DataStorageService (optional) |
-| **Local Storage** | `app/storage/local_storage.py` | File-based persistence (documents, embeddings, images, PDFs, index) |
+| **Pipeline Storage** | `app/storage/pipeline_storage.py` | Unified storage handler for all pipeline output results (API-based, no local files) |
+| **Output Schema** | `app/storage/output_schema.py` | Unified management of pipeline output structure and fields |
 
 #### Vision Module Implementation Details
 
@@ -215,12 +220,12 @@ The `pdf_processor` module (`app/modules/pdf_processor.py`) handles PDF document
 #### Error Handling Strategy
 
 - **OCR Failure**: Pipeline stops immediately, returns error status
-- **PDF Processing Failure**: Pipeline stops, saves to error directory for debugging
+- **PDF Processing Failure**: Pipeline stops, returns error status
 - **Vision Enhancement Failure**: 🆕 Continue with OCR text only (graceful degradation), log warning
 - **Cleaning Failure**: Continue with raw OCR text, log warning
-- **Recommendation Failure**: Log error, continue to persistence with partial data
-- **Embedding Failure**: Log error, continue to persistence (search won't find this document)
-- **Persistence Failure**: Pipeline fails, returns error status
+- **Recommendation Failure**: Log error, continue to completion with partial data
+- **Embedding Failure**: Log error, continue to completion (search won't find this document)
+- **Persistence Step**: Only generates UUID for document_id; actual persistence handled by API layer
 
 ### 2.2 Search Flow
 
@@ -298,7 +303,7 @@ Step 4: Assemble → Add full details:
 
 **Current Phase:** Phase 2 (AI Backend Implementation) - Near Completion
 **Timeline:** Dec 11 – Dec 24
-**Last Updated:** Dec 3, 2025
+**Last Updated:** Dec 5, 2025
 
 ### 3.1 Setup & Infrastructure
 - [x] **BE-01**: Initialize Python Project (FastAPI/Flask) & Env Setup
@@ -393,9 +398,6 @@ StorageHelperAIOrchestraService/
 │   │   ├── __init__.py
 │   │   ├── category_config.py  # Document category definitions
 │   │   └── config.py           # Service configuration
-│   ├── integrations/           # External service clients
-│   │   ├── __init__.py
-│   │   └── storage_client.py   # DataStorageService API client
 │   ├── modules/                # Business logic modules
 │   │   ├── __init__.py
 │   │   ├── assembler.py        # Search result assembly
@@ -413,22 +415,15 @@ StorageHelperAIOrchestraService/
 │   │   ├── feedback.py         # User feedback processing
 │   │   ├── ingestion.py        # Document ingestion pipeline
 │   │   └── search.py           # Search pipeline
-│   └── storage/                # Local storage management
+│   └── storage/                # Pipeline output storage management
 │       ├── __init__.py
-│       ├── local_storage.py    # File-based data persistence
-│       └── migrate_embeddings.py  # Data migration utilities
-├── tmp/                        # Runtime temporary storage
-│   ├── documents/              # Document metadata cache
-│   ├── embeddings/             # Vector embeddings storage
-│   ├── images/                 # Image file cache
-│   ├── pdfs/                   # PDF file cache (NEW)
-│   ├── error/                  # Failed documents for debugging
-│   ├── Storage/                # Configuration data
+│       ├── pipeline_storage.py # Unified storage handler for pipeline results (API-based)
+│       └── output_schema.py    # Unified output structure management
+├── tmp/                        # Runtime temporary storage (deprecated)
+│   ├── Storage/                # Configuration data (still used by AI orchestration)
 │   │   ├── document_categories.json
 │   │   ├── locations.json
 │   │   └── README.md
-│   ├── index.json              # Document index
-│   ├── delete_document.py      # Utility script
 │   └── README.md
 ├── main.py                     # FastAPI application entry point
 ├── requirements.txt            # Python dependencies
@@ -463,10 +458,15 @@ StorageHelperAIOrchestraService/
     - Dependency injection for all modules (OCR, cleaning, embedding, storage)
     - State management pattern for tracking processing steps
     - Comprehensive error handling and logging throughout
-*   **Storage Strategy**: Local file-based storage for development phase
-    - JSON-based document index with UUID identifiers
-    - Separate storage for embeddings, documents, and images
-    - Integration client ready for DataStorageService connection
+*   **Storage Architecture Refactoring** (December 5, 2025):
+    - **Removed Local File Storage**: Eliminated all local file operations (tmp/documents/, tmp/embeddings/, tmp/images/, tmp/pdfs/, index.json)
+    - **Unified Pipeline Storage**: Created `PipelineStorage` class to handle all pipeline output results via API
+    - **Output Schema Management**: Added `DocumentOutputSchema` class for unified output structure management
+    - **API Integration**: All storage operations now handled via remote API (DataStorageService)
+    - **Simplified Pipeline**: Ingestion pipeline no longer handles persistence; only generates UUID for document_id
+    - **Complete API Response**: `/api/v1/ingestion` now returns full pipeline output via `PipelineStorage.get_pipeline_output()`
+    - **Removed Integrations Folder**: Consolidated `storage_client.py` functionality into `pipeline_storage.py`
+    - **Backward Compatibility**: Maintained convenience functions and class interfaces for smooth transition
 *   **PDF Support Implementation** (December 3, 2025):
     - Added comprehensive PDF processing capability to handle both image and text-based PDFs
     - Created `pdf_processor.py` module with PyMuPDF integration
@@ -506,11 +506,31 @@ StorageHelperAIOrchestraService/
       - Mixed text-image documents
     - **Architecture Benefit**: Modular design allows easy enable/disable for cost optimization
     - **Documentation**: Updated design document with Vision Enhancement architecture
+*   **Storage Architecture Migration** (December 5, 2025):
+    - **Architecture Change**: Migrated from local file-based storage to API-only persistence
+    - **PipelineStorage Class**: Unified handler for all pipeline output results
+      - Handles ingestion pipeline results (OCR, vision, recommendations, embeddings)
+      - Handles search pipeline results
+      - Provides `get_pipeline_output()` method to return complete pipeline data
+      - All operations via remote API (no local file operations)
+    - **Output Schema System**: Created `DocumentOutputSchema` for unified output management
+      - Controls which fields are included in output
+      - Supports field mapping and exclusion
+      - Used by `PipelineState.to_output_dict()` for consistent output format
+    - **API Response Enhancement**: `/api/v1/ingestion` now returns complete pipeline output
+      - Includes all processing steps and results
+      - OCR text, vision analysis, recommendations, embeddings
+      - Full metadata and processing information
+    - **Code Cleanup**: 
+      - Removed `app/integrations/` folder (functionality merged into `pipeline_storage.py`)
+      - Removed `app/storage/local_storage.py` (local file operations disabled)
+      - Removed `app/storage/migrate_embeddings.py` (no longer needed)
 *   **Pending Work**: 
-    - Feedback handler implementation (endpoint exists, logic needed)
+    - Feedback handler implementation (endpoint exists, storage logic removed, needs API integration)
     - Comprehensive test suite (unit and integration tests)
     - Production deployment configurations
     - Performance testing and cost analysis for Vision API usage
+    - API layer persistence implementation (currently pipeline only generates UUID)
 
 ---
 

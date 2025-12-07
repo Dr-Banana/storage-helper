@@ -16,7 +16,7 @@ Integration Pattern:
 
 import os
 import logging
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Union, List
 from dataclasses import dataclass
 import httpx
 import base64
@@ -33,7 +33,7 @@ class VisionResult:
     """Result from vision analysis"""
     description: str  # Structured description of image content
     confidence: float  # Model confidence (0.0-1.0)
-    detected_elements: list[str]  # List of detected visual elements
+    detected_elements: List[str]  # List of detected visual elements
     has_text: bool  # Whether image contains text
     raw_response: Optional[Dict[str, Any]] = None  # Full API response
 
@@ -76,7 +76,7 @@ class VisionAnalyzer:
     
     async def analyze_image(
         self,
-        image_source: str | bytes,
+        image_source: Union[str, bytes],
         prompt: Optional[str] = None
     ) -> VisionResult:
         """
@@ -137,7 +137,7 @@ class VisionAnalyzer:
                 has_text=False
             )
     
-    async def _load_image(self, image_source: str | bytes) -> bytes:
+    async def _load_image(self, image_source: Union[str, bytes]) -> bytes:
         """Load image from various sources"""
         if isinstance(image_source, bytes):
             return image_source
@@ -352,7 +352,7 @@ def get_default_analyzer() -> VisionAnalyzer:
     return _default_analyzer
 
 
-async def analyze_document_image(image_source: str | bytes) -> VisionResult:
+async def analyze_document_image(image_source: Union[str, bytes]) -> VisionResult:
     """
     Convenience function for document image analysis.
     

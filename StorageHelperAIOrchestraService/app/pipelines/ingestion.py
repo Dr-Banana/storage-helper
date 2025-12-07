@@ -8,8 +8,8 @@ from app.modules.cleaning import process_text
 from app.modules.recommendation import generate_recommendation
 from app.modules.embedding import EmbeddingGenerator
 from app.modules.vision import VisionAnalyzer, VisionResult
-from app.integrations.storage_client import persist_document
-from app.storage.local_storage import LocalStorage, save_document, save_error_document
+# Storage logic removed - pipeline only processes, does not persist
+from app.storage.output_schema import DocumentOutputSchema, default_output_schema
 from app.core.config import settings
 import asyncio
 
@@ -38,53 +38,60 @@ class PipelineState:
     status: str = "initialized"
     error: Optional[str] = None
     
-    def to_output_dict(self) -> Dict[str, Any]:
-        """Convert pipeline state to output dictionary."""
-        output = {
-            "status": self.status,
-            "owner_id": self.owner_id,
-            "source": self.image_url,
-            "file_type": self.file_type or "image",
-            "document_id": str(self.document_id) if self.document_id is not None else None,
-            "processing_steps": self.processing_steps.copy(),
-        }
+    # Output schema for unified output management
+    output_schema: DocumentOutputSchema = field(default_factory=lambda: default_output_schema)
+    
+    def to_output_dict(self, schema: Optional[DocumentOutputSchema] = None) -> Dict[str, Any]:
+        """
+        Convert pipeline state to output dictionary using output schema.
         
-        if self.ocr_result:
-            output.update({
-                "extracted_text": self.cleaned_text or self.ocr_result.text,  # Use cleaned text if available
-                "ocr_confidence": self.ocr_result.confidence,
-                "raw_ocr_info": self.ocr_result.to_dict(),
-            })
+        :param schema: Optional output schema to use. If None, uses the instance's output_schema.
+        :return: Output dictionary
+        """
+        schema = schema or self.output_schema
         
-        if self.cleaning_info:
-            output["cleaning_info"] = self.cleaning_info
-        
+        # Prepare vision understanding data
+        vision_understanding = None
         if self.vision_result:
-            output["vision_understanding"] = {
+            vision_understanding = {
                 "description": self.vision_result.description,
                 "confidence": self.vision_result.confidence,
                 "detected_elements": self.vision_result.detected_elements,
                 "has_text": self.vision_result.has_text,
             }
         
+        # Prepare recommendation data
+        recommendation_status = None
+        recommendation_data = None
+        recommendation_error = None
         if self.recommendation_result:
-            output["recommendation_status"] = self.recommendation_result.get("status")
-            if self.recommendation_result.get("status") == "llm_success":
-                output["recommendation_data"] = self.recommendation_result.get("recommendation")
+            recommendation_status = self.recommendation_result.get("status")
+            if recommendation_status == "llm_success":
+                recommendation_data = self.recommendation_result.get("recommendation")
             else:
-                output["recommendation_error"] = self.recommendation_result.get("error")
+                recommendation_error = self.recommendation_result.get("error")
         
-        if self.embedding:
-            output.update({
-                "embedding": self.embedding,
-                "embedding_dimension": len(self.embedding),
-                "embedding_status": self.embedding_status,
-            })
-        
-        if self.error:
-            output["error"] = self.error
-        
-        return output
+        # Build output using schema
+        return schema.build_output(
+            status=self.status,
+            owner_id=self.owner_id,
+            source=self.image_url,
+            file_type=self.file_type,
+            document_id=self.document_id,
+            processing_steps=self.processing_steps,
+            extracted_text=self.cleaned_text or (self.ocr_result.text if self.ocr_result else None),
+            ocr_confidence=self.ocr_result.confidence if self.ocr_result else None,
+            raw_ocr_info=self.ocr_result.to_dict() if self.ocr_result else None,
+            cleaning_info=self.cleaning_info,
+            vision_understanding=vision_understanding,
+            recommendation_status=recommendation_status,
+            recommendation_data=recommendation_data,
+            recommendation_error=recommendation_error,
+            embedding=self.embedding,
+            embedding_dimension=len(self.embedding) if self.embedding else None,
+            embedding_status=self.embedding_status,  # Always include status, even if embedding failed
+            error=self.error,
+        )
 
 
 class IngestionPipeline:
@@ -105,7 +112,6 @@ class IngestionPipeline:
         recommendation_generator: Optional[Callable] = None,
         embedding_generator: Optional[EmbeddingGenerator] = None,
         vision_analyzer: Optional[VisionAnalyzer] = None,
-        storage_client: Optional[Callable] = None,
     ):
         """
         Initialize the ingestion pipeline with module dependencies.
@@ -115,7 +121,6 @@ class IngestionPipeline:
         :param recommendation_generator: Function for generating recommendations. Defaults to generate_recommendation.
         :param embedding_generator: EmbeddingGenerator instance. Defaults to new EmbeddingGenerator().
         :param vision_analyzer: VisionAnalyzer instance for multimodal understanding. Defaults to new VisionAnalyzer().
-        :param storage_client: Function for persisting documents. Defaults to persist_document.
         """
         # Set defaults for module dependencies
         self.ocr_extractor = ocr_extractor or extract_text_advanced
@@ -131,8 +136,6 @@ class IngestionPipeline:
             timeout=int(settings.VISION_TIMEOUT),
             enable_vision=settings.VISION_ENABLE
         )
-        
-        self.storage_client = storage_client or persist_document
         
         logger.info(f"IngestionPipeline initialized with module dependencies (Vision: {'Enabled' if settings.VISION_ENABLE else 'Disabled'})")
     
@@ -382,59 +385,42 @@ class IngestionPipeline:
     
     async def step_persist(self, state: PipelineState, is_error: bool = False) -> bool:
         """
-        Step 4: Persist document data to storage service and local storage.
+        Step 4: Generate document ID (storage logic removed).
+        
+        NOTE: Storage logic has been removed. This step only generates a document ID
+        for the API response. Actual persistence should be handled by the API layer.
         
         :param state: Pipeline state to update.
-        :param is_error: If True, save to error directory instead of documents
+        :param is_error: If True, indicates this is an error document
         :return: True if successful, False otherwise.
         """
+        import uuid
+        
         if is_error:
-            logger.warning("STEP 4 (Error Persistence): Saving failed document to error directory...")
+            logger.warning("STEP 4 (Persistence): Generating error document ID (storage disabled)...")
         else:
-            logger.info("STEP 4 (Persistence): Persisting document to storage service and local storage...")
+            logger.info("STEP 4 (Persistence): Generating document ID (storage disabled)...")
         
         try:
-            # Prepare document data for persistence
-            document_data = state.to_output_dict()
-            
-            # Add image_path to document_data so it can be saved to images/ directory
-            document_data["image_path"] = state.image_url
+            # Generate document ID for API response (storage logic removed)
+            doc_id = str(uuid.uuid4())
+            state.document_id = doc_id
+            state.processing_steps.append("Persistence")
             
             if is_error:
-                # Save to error directory with full context
-                error_info = {
-                    "status": state.status,
-                    "error": state.error,
-                    "failed_step": self._get_failed_step(state),
-                    "processing_steps": state.processing_steps
-                }
-                error_doc_id = save_error_document(document_data, error_info)
-                state.document_id = error_doc_id
-                logger.warning(f"⚠️  Failed document saved to error directory: {error_doc_id}")
-                logger.warning(f"    This document can be reviewed and retried later.")
-                return True
+                # Preserve error status - do not overwrite with "completed"
+                # The error status (e.g., "failed", "ocr_failed", "recommendation_failed") 
+                # should be preserved to indicate pipeline failure
+                logger.warning(f"⚠️  Error document ID generated: {doc_id}")
+                logger.warning(f"    Error: {state.error}")
+                logger.warning(f"    Failed step: {self._get_failed_step(state)}")
+                logger.warning(f"    Status preserved: {state.status}")
             else:
-                # Save to normal storage (tmp folder) - this generates and returns a UUID string
-                # The save_document function will also save the image to images/ directory
-                local_doc_id = save_document(document_data)
-                logger.info(f"✓ Document saved to local storage: {local_doc_id}")
-                
-                # Always use the local UUID as the document_id (local storage generates UUID strings)
-                # If remote storage returns an ID, we could use it, but for consistency, use local UUID
-                state.document_id = local_doc_id
-                
-                # Also persist using storage client (if available)
-                persisted_id = None
-                if self.storage_client:
-                    # Update document_data with the new document_id before sending to storage client
-                    document_data["document_id"] = local_doc_id
-                    persisted_id = await self.storage_client(document_data)
-                    # Note: We keep using local_doc_id (UUID string) even if persisted_id is returned
-                    # This ensures consistency with the saved document file
-                state.processing_steps.append("Persistence")
+                # Only set to "completed" if this is not an error document
                 state.status = "completed"
-                logger.info(f"STEP 4 (Persistence) Complete. Local Document ID: {local_doc_id}, Remote ID: {persisted_id}")
-                return True
+                logger.info(f"STEP 4 (Persistence) Complete. Document ID: {doc_id} (storage disabled)")
+            
+            return True
                 
         except Exception as e:
             state.status = "persistence_failed"

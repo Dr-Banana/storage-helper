@@ -12,13 +12,17 @@ logger = logging.getLogger(__name__)
 api_router = APIRouter()
 
 
-@api_router.post("/ingestion", response_model=IngestResponse)
+@api_router.post("/ingestion")
 async def process_document(request: IngestRequest):
     """
     [Ingestion Pipeline]
     Process a document image uploaded by the web client.
     Pipeline flow: OCR -> Cleaning -> Metadata Extraction -> Storage -> Location Recommendation
+    
+    Returns complete pipeline output including all processing results.
     """
+    from app.storage.pipeline_storage import PipelineStorage
+    
     try:
         # Call the ingestion pipeline
         result = await ingestion.run_ingestion_pipeline(
@@ -28,41 +32,12 @@ async def process_document(request: IngestRequest):
              file_type=request.file_type
         )
         
-        # Validate pipeline status
-        pipeline_status = result.get("status")
-        recommendation_error = result.get("recommendation_error")
-        recommendation_data = result.get("recommendation_data")
-
-        if pipeline_status != "completed" or recommendation_error or not recommendation_data:
-            error_detail = recommendation_error or result.get("error") or "Recommendation step failed."
-            logger.error(f"Ingestion pipeline failed: {error_detail}")
-            raise HTTPException(status_code=500, detail=error_detail)
-
-        # Extract location_id and category_code from recommendation
-        recommended_location_id = recommendation_data.get("location_id")
-        detected_type_code = recommendation_data.get("category_code")
+        # Get complete pipeline output using PipelineStorage
+        complete_output = PipelineStorage.get_pipeline_output(result)
         
-        # Get document_id from result (should be UUID string from local storage)
-        document_id = result.get("document_id")
-        if document_id is None:
-            # Fallback: try to get from saved document file if available
-            # This handles cases where document_id wasn't properly set in state
-            logger.warning("document_id not found in result, attempting to retrieve from saved document")
-            # For now, use empty string as fallback
-            document_id = ""
+        # Return complete pipeline output
+        return complete_output
         
-        # Ensure document_id is a string (UUID format)
-        document_id_str = str(document_id) if document_id else ""
-        
-        # Return response matching IngestResponse schema
-        return IngestResponse(
-            status="completed",
-            document_id=document_id_str,
-            detected_type_code=detected_type_code,
-            extracted_metadata=result.get("extracted_metadata", {}),
-            recommended_location_id=recommended_location_id,
-            recommended_location_reason=recommendation_data.get("recommendation_reason") if recommendation_data else None
-        )
     except Exception as e:
         logger.error(f"Error in ingestion pipeline: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Ingestion failed: {str(e)}")

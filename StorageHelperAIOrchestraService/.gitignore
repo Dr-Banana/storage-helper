@@ -51,18 +51,7 @@ htmlcov/
 *.log
 logs/
 
-# Temporary files
-tmp/documents/*
-tmp/embeddings/*
-tmp/images/*
-tmp/error/*
-!tmp/documents/.gitkeep
-!tmp/embeddings/.gitkeep
-!tmp/images/.gitkeep
-!tmp/error/.gitkeep
-tmp/index.json
-
 # Keep structure folders but ignore content
-tmp/Storage/document_categories.json
-tmp/Storage/locations.json
+# tmp/Storage/document_categories.json
+# tmp/Storage/locations.json
 
