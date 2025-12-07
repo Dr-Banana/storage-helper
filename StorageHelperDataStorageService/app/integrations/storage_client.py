@@ -34,7 +34,7 @@ class StorageClient:
             unique_filename = f"{uuid.uuid4()}{file_ext}"
             full_path = f"{folder}/{unique_filename}"
             
-            storage_dir = os.getenv("STORAGE_LOCAL_PATH", "/tmp/storage")
+            storage_dir = os.getenv("STORAGE_LOCAL_PATH", "./tmp")
             os.makedirs(os.path.join(storage_dir, os.path.dirname(full_path)), exist_ok=True)
             
             local_file_path = os.path.join(storage_dir, full_path)
