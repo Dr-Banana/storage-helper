@@ -1,0 +1,36 @@
+{
+  "document_categories": [
+    {
+      "id": 1,
+      "code": "MISC",
+      "name": "Miscellaneous Documents",
+      "description": "Documents that cannot be classified, unreadable scans, or uncategorized paperwork",
+      "created_at": "2025-11-24T13:41:13.989766Z",
+      "updated_at": "2025-11-24T13:41:13.989766Z"
+    },
+    {
+      "id": 2,
+      "code": "WORK",
+      "name": "Work Documents",
+      "description": "Work-related documents including employment contracts and work records",
+      "created_at": "2025-11-24T13:41:59.929396Z",
+      "updated_at": "2025-11-24T13:41:59.929396Z"
+    },
+    {
+      "id": 3,
+      "code": "LEG",
+      "name": "Legal Documents",
+      "description": "Legal documents including contracts, agreements, and legal papers, such as immigration notices and petitions.",
+      "created_at": "2025-11-24T13:45:35.869202Z",
+      "updated_at": "2025-11-24T13:45:35.869202Z"
+    },
+    {
+      "id": 4,
+      "code": "EDU",
+      "name": "Education Documents",
+      "description": "Education-related documents including diplomas, transcripts, certificates, and study materials.",
+      "created_at": "2025-12-03T22:25:57.987531Z",
+      "updated_at": "2025-12-03T22:25:57.987531Z"
+    }
+  ]
+}

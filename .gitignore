@@ -3,8 +3,8 @@ test_images/
 **/test_images/
 
 # Temporary files and directories
-tmp/
-**/tmp/
+# tmp/
+# **/tmp/
 __cache/
 __pycache__/
 env/

@@ -1,0 +1,41 @@
+{
+  "locations": [
+    {
+      "id": 1,
+      "name": "location 1",
+      "description": "description 1",
+      "photo_url": null,
+      "parent_id": null,
+      "created_at": "2024-01-15T10:00:00Z",
+      "updated_at": "2024-01-15T10:00:00Z"
+    },
+    {
+      "id": 2,
+      "name": "location 2",
+      "description": "description 2",
+      "photo_url": null,
+      "parent_id": null,
+      "created_at": "2024-01-15T10:00:00Z",
+      "updated_at": "2024-01-15T10:00:00Z"
+    },
+    {
+      "id": 3,
+      "name": "location 3",
+      "description": "description 3",
+      "photo_url": null,
+      "parent_id": null,
+      "created_at": "2024-01-15T10:00:00Z",
+      "updated_at": "2024-01-15T10:00:00Z"
+    },
+    {
+      "id": 4,
+      "name": "location 4",
+      "description": "description 4",
+      "photo_url": null,
+      "parent_id": null,
+      "created_at": "2024-01-15T10:00:00Z",
+      "updated_at": "2024-01-15T10:00:00Z"
+    }
+  ]
+}
+
