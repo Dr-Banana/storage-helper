@@ -5,6 +5,10 @@ import pytesseract
 import httpx
 import logging
 import asyncio
+import platform
+import shutil
+import subprocess
+import sys
 from typing import Optional, Union, Dict, Any, Tuple, List
 import numpy as np
 # Assuming app.core.config exists and imports settings
@@ -13,32 +17,187 @@ from app.core.config import settings
 # Configure logging
 logger = logging.getLogger(__name__)
 
-# --- Tesseract Path Configuration ---
-# 1. Define local deployment path (relative to the ocr.py file itself)
-# Simplified path: app/modules/tesseract/tesseract.exe
-TESSERACT_LOCAL_PATH = Path(__file__).parent / "tesseract" / "tesseract.exe"
+# --- Tesseract Path Configuration (Cross-platform) ---
+def get_tesseract_executable_name() -> str:
+    """
+    Get the Tesseract executable name based on the operating system.
+    
+    Returns:
+        str: 'tesseract.exe' for Windows, 'tesseract' for Linux/Mac
+    """
+    system = platform.system().lower()
+    if system == 'windows':
+        return 'tesseract.exe'
+    else:
+        return 'tesseract'
 
-TESSERACT_CMD_TO_USE = None
+def install_tesseract_auto() -> bool:
+    """
+    Attempt to automatically install Tesseract on Mac/Linux.
+    
+    Returns:
+        bool: True if installation was attempted (may still fail), False if not supported
+    """
+    system = platform.system().lower()
+    
+    if system == 'darwin':  # macOS
+        logger.info("🍎 Detected macOS - attempting to install Tesseract via Homebrew...")
+        try:
+            # Check if brew is available
+            brew_check = subprocess.run(['which', 'brew'], capture_output=True, text=True)
+            if brew_check.returncode != 0:
+                logger.error("❌ Homebrew not found. Please install Homebrew first:")
+                logger.error("   /bin/bash -c \"$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\"")
+                return False
+            
+            # Install tesseract
+            logger.info("📦 Installing Tesseract via Homebrew (this may take a few minutes)...")
+            result = subprocess.run(['brew', 'install', 'tesseract'], 
+                                 capture_output=True, text=True, timeout=300)
+            
+            if result.returncode == 0:
+                logger.info("✅ Tesseract installed successfully via Homebrew!")
+                return True
+            else:
+                logger.error(f"❌ Failed to install Tesseract: {result.stderr}")
+                return False
+                
+        except subprocess.TimeoutExpired:
+            logger.error("❌ Installation timeout. Please install manually: brew install tesseract")
+            return False
+        except FileNotFoundError:
+            logger.error("❌ Homebrew not found. Please install Homebrew first.")
+            return False
+        except Exception as e:
+            logger.error(f"❌ Error during installation: {e}")
+            logger.error("   Please install manually: brew install tesseract")
+            return False
+    
+    elif system == 'linux':
+        logger.info("🐧 Detected Linux - attempting to install Tesseract via package manager...")
+        
+        # Detect package manager and installation command
+        package_managers = [
+            ('apt-get', 'apt-get', ['sudo', 'apt-get', 'install', '-y', 'tesseract-ocr']),
+            ('yum', 'yum', ['sudo', 'yum', 'install', '-y', 'tesseract']),
+            ('dnf', 'dnf', ['sudo', 'dnf', 'install', '-y', 'tesseract']),
+            ('pacman', 'pacman', ['sudo', 'pacman', '-S', '--noconfirm', 'tesseract']),
+            ('zypper', 'zypper', ['sudo', 'zypper', 'install', '-y', 'tesseract-ocr']),
+        ]
+        
+        for pm_display, pm_binary, install_cmd in package_managers:
+            if shutil.which(pm_binary):
+                logger.info(f"📦 Detected {pm_display} - installing Tesseract...")
+                try:
+                    # For apt-get, update package list first
+                    if pm_binary == 'apt-get':
+                        logger.info("Updating package list...")
+                        update_result = subprocess.run(['sudo', 'apt-get', 'update'], 
+                                                     capture_output=True, text=True, timeout=60)
+                        if update_result.returncode != 0:
+                            logger.warning(f"⚠️ Package list update failed (may need sudo password): {update_result.stderr}")
+                    
+                    logger.info(f"Installing Tesseract (this may require sudo password)...")
+                    logger.info(f"Command: {' '.join(install_cmd)}")
+                    result = subprocess.run(install_cmd, 
+                                          capture_output=True, text=True, timeout=300)
+                    
+                    if result.returncode == 0:
+                        logger.info("✅ Tesseract installed successfully!")
+                        return True
+                    else:
+                        logger.error(f"❌ Installation failed: {result.stderr}")
+                        logger.error(f"   Please install manually: {' '.join(install_cmd)}")
+                        logger.error(f"   Or run: sudo {' '.join(install_cmd[1:])}")
+                        return False
+                        
+                except subprocess.TimeoutExpired:
+                    logger.error(f"❌ Installation timeout. Please install manually.")
+                    return False
+                except FileNotFoundError:
+                    logger.error(f"❌ {pm_binary} not found. Please install manually.")
+                    continue
+                except Exception as e:
+                    logger.error(f"❌ Error during installation: {e}")
+                    logger.error(f"   Please install manually: {' '.join(install_cmd)}")
+                    return False
+        
+        logger.error("❌ No supported package manager found (apt-get, yum, dnf, pacman, zypper)")
+        logger.error("   Please install Tesseract manually for your Linux distribution.")
+        return False
+    
+    else:
+        logger.warning(f"⚠️ Auto-installation not supported for {system}")
+        return False
 
-# 2. Search for Tesseract Path
-# Log the path being checked for debugging
-logger.info(f"Checking Tesseract local path: {TESSERACT_LOCAL_PATH.resolve()}")
+def find_tesseract_path() -> Optional[str]:
+    """
+    Find Tesseract executable path with cross-platform support.
+    Attempts automatic installation on Mac/Linux if not found.
+    
+    Priority order:
+    1. TESSERACT_CMD from settings (explicit configuration - highest priority)
+    2. System PATH (automatic detection - no configuration needed)
+    3. Local bundled executable (platform-specific fallback)
+    4. Auto-installation on Mac/Linux (if enabled)
+    
+    Returns:
+        Optional[str]: Path to Tesseract executable, or None if not found
+    """
+    # 1. Check explicit configuration first (if user explicitly configured it)
+    if settings.TESSERACT_CMD:
+        if Path(settings.TESSERACT_CMD).exists():
+            logger.info(f"✅ Using Tesseract from configuration: {settings.TESSERACT_CMD}")
+            return settings.TESSERACT_CMD
+        else:
+            logger.warning(f"⚠️ Configured Tesseract path not found: {settings.TESSERACT_CMD}")
+    
+    # 2. Check system PATH (automatic - no configuration needed)
+    # This works on Linux/Mac where Tesseract is typically installed via package manager
+    tesseract_in_path = shutil.which('tesseract')
+    if tesseract_in_path:
+        logger.info(f"✅ Using Tesseract from system PATH: {tesseract_in_path}")
+        logger.info(f"   (No configuration needed - automatically detected)")
+        return tesseract_in_path
+    
+    # 3. Check local bundled executable (platform-specific fallback)
+    # This is mainly for Windows where we bundle tesseract.exe
+    tesseract_name = get_tesseract_executable_name()
+    tesseract_local_path = Path(__file__).parent / "tesseract" / tesseract_name
+    
+    logger.info(f"Checking Tesseract local path: {tesseract_local_path.resolve()}")
+    if tesseract_local_path.exists():
+        logger.info(f"✅ Using bundled Tesseract: {tesseract_local_path}")
+        return str(tesseract_local_path)
+    
+    # 4. Attempt auto-installation on Mac/Linux
+    system = platform.system().lower()
+    if system in ['darwin', 'linux']:
+        logger.warning("⚠️ Tesseract not found. Attempting automatic installation...")
+        if install_tesseract_auto():
+            # After installation, check PATH again
+            tesseract_in_path = shutil.which('tesseract')
+            if tesseract_in_path:
+                logger.info(f"✅ Using newly installed Tesseract: {tesseract_in_path}")
+                return tesseract_in_path
+    
+    # Not found anywhere
+    logger.error("❌ Tesseract not found and auto-installation failed or not supported.")
+    logger.error("   Manual installation required:")
+    logger.error("   - Windows: Download from https://github.com/UB-Mannheim/tesseract/wiki")
+    logger.error("   - Mac: brew install tesseract")
+    logger.error("   - Linux: sudo apt-get install tesseract-ocr (Ubuntu/Debian)")
+    logger.error("   After installation, restart the application.")
+    return None
 
+# Initialize Tesseract Path
+TESSERACT_CMD_TO_USE = find_tesseract_path()
 
-if settings.TESSERACT_CMD:
-    # Prioritize the path from configuration settings (suitable for production)
-    TESSERACT_CMD_TO_USE = settings.TESSERACT_CMD
-elif TESSERACT_LOCAL_PATH.exists():
-    # If the local deployment path exists, use it
-    TESSERACT_CMD_TO_USE = str(TESSERACT_LOCAL_PATH)
-
-# 3. Initialize Tesseract Path:
 if TESSERACT_CMD_TO_USE:
     pytesseract.pytesseract.tesseract_cmd = TESSERACT_CMD_TO_USE
-    logger.info(f"✅ Successfully set Tesseract CMD: {TESSERACT_CMD_TO_USE}")
+    logger.info(f"✅ Tesseract CMD configured: {TESSERACT_CMD_TO_USE}")
 else:
-    # If config and local deployment paths are not found, rely on system PATH.
-    logger.warning("Tesseract CMD not configured, and local deployment path not found. Relying on system PATH.")
+    logger.warning("⚠️ Tesseract CMD not configured. OCR may fail if Tesseract is not in system PATH.")
 
 
 class OCRResult:
