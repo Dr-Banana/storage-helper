@@ -6,6 +6,7 @@ from app.models.document_category import DocumentCategory
 from app.models.storage_location import StorageLocation
 from app.models.event import Event
 from app.models.document import Document
+from app.models.document_page import DocumentPage
 from app.models.document_embedding import DocumentEmbedding
 from app.models.feedback_message import FeedbackMessage
 
@@ -15,6 +16,7 @@ __all__ = [
     "StorageLocation",
     "Event",
     "Document",
+    "DocumentPage",
     "DocumentEmbedding",
     "FeedbackMessage",
 ]

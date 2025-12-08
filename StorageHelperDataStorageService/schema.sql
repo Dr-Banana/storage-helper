@@ -71,18 +71,35 @@ CREATE TABLE document (
     -- Flexible metadata (per-type fields live here)
     metadata            JSON,          -- e.g. {"tax_year":2024,"issuer_name":"IRS","expiry_date":"2026-01-01"}
     -- File content
-    image_url           TEXT NOT NULL,
-    ocr_text            LONGTEXT,
+    image_url           TEXT,          -- Optional: URL to thumbnail or first page
     created_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     FOREIGN KEY (category_id) REFERENCES document_category(id) ON DELETE RESTRICT,
     FOREIGN KEY (owner_id)            REFERENCES user(id) ON DELETE CASCADE,
     FOREIGN KEY (event_id)            REFERENCES event(id) ON DELETE SET NULL,
-    FOREIGN KEY (current_location_id) REFERENCES storage_location(id) ON DELETE SET NULL
+    FOREIGN KEY (current_location_id) REFERENCES storage_location(id) ON DELETE SET NULL,
+    INDEX idx_owner_id (owner_id),
+    INDEX idx_category_id (category_id)
 );
 
 -- ============================================================
--- 6. document_embedding: semantic vector representation (for search)
+-- 6. document_page: pages within a document (e.g. pages in a PDF)
+-- ============================================================
+
+CREATE TABLE document_page (
+    id                  INT AUTO_INCREMENT PRIMARY KEY,
+    document_id         INT NOT NULL,
+    page_number     INT NOT NULL,
+    image_url       TEXT NOT NULL,
+    ocr_text        LONGTEXT,
+    created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    FOREIGN KEY (document_id) REFERENCES document(id) ON DELETE CASCADE,
+    UNIQUE KEY (document_id, page_number)
+);
+
+-- ============================================================
+-- 7. document_embedding: semantic vector representation (for search)
 -- ============================================================
 
 CREATE TABLE document_embedding (
@@ -92,7 +109,7 @@ CREATE TABLE document_embedding (
 );
 
 -- ============================================================
--- 7. feedback_message: user feedback used to improve the system
+-- 8. feedback_message: user feedback used to improve the system
 -- ============================================================
 
 CREATE TABLE feedback_message (

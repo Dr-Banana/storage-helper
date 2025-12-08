@@ -9,6 +9,8 @@ from app.models.document import Document
 from app.models.document_category import DocumentCategory
 from app.models.event import Event
 from app.models.document_embedding import DocumentEmbedding
+from app.models.document_page import DocumentPage
+from app.models.user import User
 from app.schemas.document import DocumentCreate, DocumentUpdate
 from app.integrations.storage_client import StorageClient, StorageException
 
@@ -297,3 +299,97 @@ class DocumentService:
             db.rollback()
             raise ValueError(f"Failed to update document: {str(e)}")
 
+    @staticmethod
+    def upload_document_page(
+        db: Session,
+        file_content: BytesIO,
+        filename: str,
+        owner_id: int,
+        page_number: int,
+        ocr_text: Optional[str] = None,
+        document_id: Optional[int] = None
+    ) -> tuple:
+        """
+        Upload a document page (with optional OCR text)
+        
+        Creates new document if document_id not provided, or adds page to existing document
+        
+        Args:
+            db: Database session
+            file_content: Image file content (BytesIO)
+            filename: Original filename
+            owner_id: Document owner user ID
+            page_number: Page number within document
+            ocr_text: Optional extracted OCR text for this page
+            document_id: Optional existing document ID. If None, creates new document
+            
+        Returns:
+            Tuple of (document_id, page_id)
+            
+        Raises:
+            ValueError: If operation fails
+        """
+        image_url = None
+        try:
+            # Verify user exists
+            user = db.query(User).filter(User.id == owner_id).first()
+            if not user:
+                raise ValueError(f"User {owner_id} not found")
+            
+            # Step 1: Upload image file to storage
+            image_url = StorageClient.upload_image(
+                file_content=file_content,
+                filename=filename,
+                folder=f"documents/{owner_id}/pages"
+            )
+            
+            # Step 2: Get or create document
+            if document_id:
+                # Verify document exists and belongs to owner
+                document = db.query(Document)\
+                    .filter(Document.id == document_id, Document.owner_id == owner_id).first()
+                if not document:
+                    raise ValueError(f"Document {document_id} not found or does not belong to user {owner_id}")
+            else:
+                # Create new document
+                document = Document(
+                    title=filename,
+                    owner_id=owner_id,
+                    image_url=None,  # Will be set to first page if needed
+                    category_id=None,
+                    event_id=None,
+                    doc_metadata={}
+                )
+                db.add(document)
+                db.flush()  # Get document.id
+                document_id = document.id
+            
+            # Step 3: Create document page record
+            page = DocumentPage(
+                document_id=document_id,
+                page_number=page_number,
+                image_url=image_url,
+                ocr_text=ocr_text
+            )
+            db.add(page)
+            
+            # Step 4: Update document thumbnail if first page
+            if page_number == 1:
+                document.image_url = image_url
+            
+            db.commit()
+            db.refresh(page)
+            
+            return (document_id, page.id)
+            
+        except Exception as e:
+            db.rollback()
+            
+            # Cleanup: delete uploaded file if save failed
+            if image_url:
+                try:
+                    StorageClient.delete_image(image_url)
+                except StorageException:
+                    pass  # Log but don't raise
+            
+            raise ValueError(f"Failed to upload document page: {str(e)}")

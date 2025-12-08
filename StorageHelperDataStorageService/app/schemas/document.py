@@ -13,8 +13,7 @@ class DocumentCreate(BaseModel):
     owner_id: int = Field(..., description="Document owner (user) ID")
     event_id: Optional[int] = Field(None, description="Associated event ID")
     current_location_id: Optional[int] = Field(None, description="Current storage location ID")
-    image_url: str = Field(..., description="URL or path to document image")
-    ocr_text: Optional[str] = Field(None, description="Extracted text from OCR")
+    image_url: Optional[str] = Field(None, description="URL or path to thumbnail/first page")
     metadata: Optional[Dict[str, Any]] = Field(None, description="Flexible metadata (tax_year, expiry_date, etc.)")
 
 
@@ -24,8 +23,7 @@ class DocumentUpdate(BaseModel):
     category_id: Optional[int] = Field(None, description="Document category ID")
     event_id: Optional[int] = Field(None, description="Associated event ID")
     current_location_id: Optional[int] = Field(None, description="Current storage location ID")
-    image_url: Optional[str] = Field(None, description="URL or path to document image")
-    ocr_text: Optional[str] = Field(None, description="Extracted text from OCR")
+    image_url: Optional[str] = Field(None, description="URL or path to thumbnail/first page")
     metadata: Optional[Dict[str, Any]] = Field(None, description="Flexible metadata")
 
 
@@ -37,8 +35,7 @@ class DocumentResponse(BaseModel):
     owner_id: int
     event_id: Optional[int] = None
     current_location_id: Optional[int] = None
-    image_url: str
-    ocr_text: Optional[str] = None
+    image_url: Optional[str] = None
     doc_metadata: Optional[Dict[str, Any]] = Field(None, alias="metadata")
     created_at: datetime
     updated_at: datetime
@@ -46,6 +43,25 @@ class DocumentResponse(BaseModel):
     class Config:
         from_attributes = True
         populate_by_name = True  # Allow both 'doc_metadata' and 'metadata'
+
+
+class DocumentWithPagesResponse(BaseModel):
+    """Schema for document response including all pages"""
+    id: int
+    title: Optional[str] = None
+    category_id: Optional[int] = None
+    owner_id: int
+    event_id: Optional[int] = None
+    current_location_id: Optional[int] = None
+    image_url: Optional[str] = None
+    doc_metadata: Optional[Dict[str, Any]] = Field(None, alias="metadata")
+    pages: Optional[list] = Field(None, description="List of document pages")
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+        populate_by_name = True
 
 
 class DocumentListResponse(BaseModel):

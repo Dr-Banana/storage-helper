@@ -3,6 +3,7 @@ User management routes
 """
 from sqlalchemy.orm import Session
 from fastapi import APIRouter, Depends, HTTPException, status
+from typing import List
 
 from app.core.database import get_db
 from app.services.user_service import UserService
@@ -156,4 +157,46 @@ def delete_user(user_id: int, db: Session = Depends(get_db)):
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to delete user: {str(e)}"
+        )
+
+
+@router.get(
+    "/{user_id}/documents",
+    response_model=dict,
+    summary="Get all document IDs for a user",
+    description="Retrieve all document IDs owned by a specific user"
+)
+def get_user_documents(user_id: int, db: Session = Depends(get_db)):
+    """
+    Get all document IDs for a specific user
+    
+    - **user_id**: The user's ID
+    
+    Returns a list of document IDs owned by the user
+    """
+    try:
+        # Verify user exists
+        user = UserService.get_user_by_id(db, user_id)
+        if not user:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"User with ID {user_id} not found"
+            )
+        
+        # Get all documents for the user
+        from app.models.document import Document
+        documents = db.query(Document.id).filter(Document.owner_id == user_id).all()
+        document_ids = [doc.id for doc in documents]
+        
+        return {
+            "user_id": user_id,
+            "total": len(document_ids),
+            "document_ids": document_ids
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to retrieve user documents: {str(e)}"
         )

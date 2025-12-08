@@ -24,92 +24,54 @@ router = APIRouter(prefix="/api/v1", tags=["public-api"])
     "/documents/upload-and-process",
     response_model=dict,
     status_code=status.HTTP_201_CREATED,
-    summary="Upload and register a new document",
+    summary="Upload document page with OCR result",
     description="""
-    Complete workflow: upload file to storage + create document record
+    Upload a document page with OCR text.
     
-    Called by AI Service to register new documents.
-    Returns document metadata for further processing (OCR, embedding, etc.)
+    - If document_id is provided, adds page to existing document
+    - If document_id is not provided, creates new document
+    
+    Returns document_id, page_id and status code
     """
 )
 def upload_and_process(
-    file: UploadFile = File(..., description="Document image file"),
+    file: UploadFile = File(..., description="Document page image file"),
     owner_id: int = Form(..., description="Document owner user ID"),
-    category: str = Form(..., description="Document category (TAX, VISA, MED, INS, etc.)"),
-    event_name: Optional[str] = Form(None, description="Associated event name"),
+    page_number: int = Form(..., description="Page number within document (1-indexed)"),
+    ocr_text: str = Form(..., description="OCR extracted text for this page"),
+    document_id: Optional[int] = Form(None, description="Optional existing document ID. If not provided, creates new document"),
     db: Session = Depends(get_db)
 ):
     """
-    Upload document file and create database record.
+    Upload a document page with OCR result.
     
-    Returns only essential metadata (id, url, owner_id).
-    Does not expose internal schema structure.
+    - **file**: Document page image file
+    - **owner_id**: Document owner user ID (required)
+    - **page_number**: Page number within document (required, 1-indexed)
+    - **ocr_text**: OCR extracted text for this page (required)
+    - **document_id**: Optional existing document ID. If not provided, creates new document
     """
     try:
         # Read file content
         file_content = BytesIO(file.file.read())
         
-        # Process document (upload + save)
-        document = DocumentService.process_new_document(
+        # Upload page and optionally create document
+        doc_id, page_id = DocumentService.upload_document_page(
             db=db,
             file_content=file_content,
             filename=file.filename,
             owner_id=owner_id,
-            category_code=category,
-            event_name=event_name
-        )
-        
-        # Return minimal response (hide internal schema)
-        return {
-            "id": document.id,
-            "filename": document.title,
-            "url": document.image_url,
-            "owner_id": document.owner_id,
-            "created_at": document.created_at.isoformat()
-        }
-        
-    except ValueError as e:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e)
-        )
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to process document: {str(e)}"
-        )
-
-
-@router.post(
-    "/documents/{document_id}/save-ocr-and-embedding",
-    response_model=dict,
-    summary="Save OCR text and vector embedding",
-    description="""
-    Called by AI Service after OCR and embedding generation.
-    
-    Saves extracted text and vector embeddings for semantic search.
-    """
-)
-def save_ocr_and_embedding(
-    document_id: int,
-    ocr_text: str = Form(..., description="Extracted text from OCR"),
-    embedding: List[float] = Form(..., description="Vector embedding"),
-    db: Session = Depends(get_db)
-):
-    """Save OCR text and embedding to document"""
-    try:
-        embedding_record = DocumentService.save_embedding_and_ocr(
-            db=db,
-            document_id=document_id,
+            page_number=page_number,
             ocr_text=ocr_text,
-            embedding=embedding
+            document_id=document_id
         )
         
+        # Return document_id, page_id and status
         return {
-            "document_id": document_id,
-            "status": "saved",
-            "ocr_length": len(ocr_text),
-            "embedding_dimensions": len(embedding)
+            "document_id": doc_id,
+            "page_id": page_id,
+            "status": "created" if not document_id else "updated",
+            "page_number": page_number
         }
         
     except ValueError as e:
@@ -120,119 +82,6 @@ def save_ocr_and_embedding(
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=str(e)
+            detail=f"Failed to upload document page: {str(e)}"
         )
 
-
-@router.get(
-    "/documents/{document_id}",
-    response_model=dict,
-    summary="Get document details",
-    description="Called by AI Service to retrieve document information"
-)
-def get_document_details(
-    document_id: int,
-    db: Session = Depends(get_db)
-):
-    """Get document details (minimal response, no schema details exposed)"""
-    try:
-        document = DocumentService.get_document_with_details(db, document_id)
-        
-        return {
-            "id": document.id,
-            "filename": document.title,
-            "url": document.image_url,
-            "owner_id": document.owner_id,
-            "ocr_text": document.ocr_text,
-            "created_at": document.created_at.isoformat()
-        }
-        
-    except ValueError as e:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=str(e)
-        )
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=str(e)
-        )
-
-
-@router.post(
-    "/documents/search-similar",
-    response_model=dict,
-    summary="Search documents by vector similarity",
-    description="Called by AI Service for semantic search"
-)
-def search_similar_documents(
-    embedding: List[float] = Form(..., description="Query embedding vector"),
-    limit: int = Form(10, description="Maximum results"),
-    owner_id: Optional[int] = Form(None, description="Filter by owner"),
-    db: Session = Depends(get_db)
-):
-    """Search documents by vector similarity"""
-    try:
-        documents = DocumentService.search_by_embedding(
-            db=db,
-            embedding=embedding,
-            limit=limit,
-            owner_id=owner_id
-        )
-        
-        return {
-            "count": len(documents),
-            "documents": [
-                {
-                    "id": doc.id,
-                    "filename": doc.title,
-                    "owner_id": doc.owner_id
-                }
-                for doc in documents
-            ]
-        }
-        
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=str(e)
-        )
-
-
-@router.patch(
-    "/documents/{document_id}/status",
-    response_model=dict,
-    summary="Update document processing status",
-    description="Called by AI Service to update document status"
-)
-def update_document_status(
-    document_id: int,
-    status_value: str = Form(..., description="Processing status"),
-    metadata: Optional[dict] = Form(None, description="Additional metadata"),
-    db: Session = Depends(get_db)
-):
-    """Update document status and metadata"""
-    try:
-        document = DocumentService.update_document_status(
-            db=db,
-            document_id=document_id,
-            status=status_value,
-            metadata_update=metadata
-        )
-        
-        return {
-            "id": document.id,
-            "status": status_value,
-            "updated_at": document.updated_at.isoformat()
-        }
-        
-    except ValueError as e:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=str(e)
-        )
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=str(e)
-        )

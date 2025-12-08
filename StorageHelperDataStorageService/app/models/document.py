@@ -3,6 +3,7 @@ Database model for Document
 """
 from datetime import datetime
 from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, JSON, func
+from sqlalchemy.orm import relationship
 
 from app.core.database import Base
 
@@ -22,12 +23,15 @@ class Document(Base):
     # e.g. {"tax_year": 2024, "issuer_name": "IRS", "expiry_date": "2026-01-01"}
     doc_metadata = Column("metadata", JSON, nullable=True)
     
-    # File content
-    image_url = Column(Text, nullable=False)  # URL or path to document image
-    ocr_text = Column(Text, nullable=True)  # Extracted text from OCR
+    # File content - thumbnail/first page for display
+    image_url = Column(Text, nullable=True)  # URL or path to thumbnail/first page
     
     created_at = Column(DateTime, default=func.now(), nullable=False)
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now(), nullable=False)
+    
+    # Relationship to document pages
+    pages = relationship("DocumentPage", back_populates="document", cascade="all, delete-orphan")
 
     def __repr__(self):
         return f"<Document(id={self.id}, title='{self.title}', owner_id={self.owner_id}, category_id={self.category_id})>"
+
