@@ -23,44 +23,56 @@ The ingestion pipeline orchestrates the complete document processing workflow fr
 - **Images**: JPG, JPEG, PNG, GIF, BMP, WEBP, TIFF
 - **PDFs**: Single or multi-page PDF documents (up to 10 pages processed for performance)
 
+**Batch Processing Support:**
+- **Single File**: Use `file_urls` with one element: `["file1.jpg"]`
+- **Multiple Files**: Use `file_urls` with multiple elements: `["file1.jpg", "file2.pdf", "file3.jpg"]`
+- **Multi-page PDFs**: Automatically split into individual pages with sequential page numbering
+- **Mixed Formats**: Supports combinations of images and PDFs in a single batch
+- **Document ID Management**: First page establishes `document_id`, all subsequent pages use the same ID
+
 #### Pipeline Architecture
 
 ```mermaid
 flowchart TD
-    Start([INGESTION PIPELINE<br/>app/pipelines/ingestion.py]) --> Input[INPUT<br/>• image_url file path<br/>• owner_id<br/>• document_id<br/>• file_type auto-detect<br/>State: PipelineState]
+    Start([INGESTION PIPELINE<br/>app/pipelines/ingestion.py]) --> Input["INPUT<br/>• file_urls: List of strings<br/>  - Single: one file URL<br/>  - Batch: multiple file URLs<br/>• owner_id<br/>• document_id: optional<br/>• file_type auto-detect<br/>State: PipelineState"]
     
-    Input --> FileType{File Type<br/>Detection}
+    Input --> BatchCheck{"Is Batch<br/>Processing?"}
     
-    FileType -->|Image| OCR[STEP 1: OCR IMAGE<br/>app/modules/ocr.py<br/>─────────────────<br/>• Load image from URL/path/bytes<br/>• Image preprocessing:<br/>  - RGB conversion<br/>  - Grayscale<br/>  - Contrast enhance<br/>  - Denoise & sharpen<br/>  - Binarization<br/>• Tesseract OCR PSM 1<br/>• Confidence scoring<br/>─────────────────<br/>PARALLEL: File Upload<br/>• Upload to DataStorageService<br/>  via HTTP API<br/>• POST /api/v1/documents/upload-and-process<br/>• Non-blocking, continues if fails<br/>─────────────────<br/>OUTPUT: OCRResult<br/>  - text cleaned<br/>  - confidence<br/>  - page_info<br/>OUTPUT: file_url if upload succeeds<br/>OUTPUT: file_upload_error if upload fails]
+    BatchCheck -->|Single File| FileType{"File Type<br/>Detection"}
+    BatchCheck -->|Multiple Files| BatchSplit["BATCH SPLIT<br/>app/pipelines/ingestion.py<br/>─────────────────<br/>• Split multi-page PDFs<br/>  into individual pages<br/>• Sequential page numbering<br/>• Handle mixed formats<br/>• Create page tasks<br/>─────────────────<br/>OUTPUT: page_tasks<br/>  List of tuples: page_num, file_path, type"]
     
-    FileType -->|PDF| PDFOCR[STEP 1: OCR PDF<br/>app/modules/pdf_processor.py<br/>app/modules/ocr.py<br/>─────────────────<br/>• Load PDF from source<br/>• Check for embedded text<br/>• If text-based PDF:<br/>  - Direct text extraction<br/>• If image-based PDF:<br/>  - Convert pages to images<br/>  - Run OCR on each page<br/>  - Combine results<br/>• Multi-page support max 10<br/>─────────────────<br/>PARALLEL: File Upload<br/>• Upload to DataStorageService<br/>  via HTTP API<br/>• POST /api/v1/documents/upload-and-process<br/>• Non-blocking, continues if fails<br/>─────────────────<br/>OUTPUT: OCRResult<br/>  - text combined pages<br/>  - confidence<br/>  - total_pages<br/>  - source_type: pdf<br/>OUTPUT: file_url if upload succeeds<br/>OUTPUT: file_upload_error if upload fails]
+    BatchSplit --> FileType
+    
+    FileType -->|Image| OCR["STEP 1: OCR IMAGE<br/>app/modules/ocr.py<br/>─────────────────<br/>• Load image from URL/path/bytes<br/>• Image preprocessing:<br/>  - RGB conversion<br/>  - Grayscale<br/>  - Contrast enhance<br/>  - Denoise & sharpen<br/>  - Binarization<br/>• Tesseract OCR PSM 1<br/>• Confidence scoring<br/>─────────────────<br/>OUTPUT: OCRResult<br/>  - text cleaned<br/>  - confidence<br/>  - page_info"]
+    
+    FileType -->|PDF| PDFOCR["STEP 1: OCR PDF<br/>app/modules/pdf_processor.py<br/>app/modules/ocr.py<br/>─────────────────<br/>• Load PDF from source<br/>• Check for embedded text<br/>• If text-based PDF:<br/>  - Direct text extraction<br/>• If image-based PDF:<br/>  - Convert pages to images<br/>  - Run OCR on each page<br/>  - Combine results<br/>• Multi-page support max 10<br/>─────────────────<br/>OUTPUT: OCRResult<br/>  - text combined pages<br/>  - confidence<br/>  - total_pages<br/>  - source_type: pdf"]
     
     PDFOCR --> Vision
-    OCR --> Vision[STEP 1B: VISION ENHANCEMENT<br/>app/modules/vision.py<br/>OPTIONAL - CONFIGURABLE]
+    OCR --> Vision["STEP 1B: VISION ENHANCEMENT<br/>app/modules/vision.py<br/>─────────────────<br/>MULTIMODAL AI UNDERSTANDING<br/>─────────────────<br/>• Gemini Vision API<br/>  gemini-2.0-flash-exp<br/>• Understands beyond OCR:<br/>  - Photos and product images<br/>  - Logos and branding<br/>  - Charts and diagrams<br/>  - Visual layout and context<br/>• Auto-trigger on low OCR<br/>  confidence configurable<br/>• Merges vision description<br/>  with OCR text<br/>─────────────────<br/>TRIGGER CONDITIONS:<br/>  - VISION_ENABLE=true<br/>  - Low OCR confidence OR<br/>  - Always-on mode<br/>─────────────────<br/>OUTPUT: VisionResult<br/>  - description text<br/>  - detected_elements<br/>  - confidence<br/>  - merged_with_ocr_text"]
     
-    Vision[STEP 1B: VISION ENHANCEMENT<br/>app/modules/vision.py<br/>─────────────────<br/>🔍 MULTIMODAL AI UNDERSTANDING<br/>─────────────────<br/>• Gemini Vision API<br/>  gemini-2.0-flash-exp<br/>• Understands beyond OCR:<br/>  - Photos & product images<br/>  - Logos & branding<br/>  - Charts & diagrams<br/>  - Visual layout & context<br/>• Auto-trigger on low OCR<br/>  confidence configurable<br/>• Merges vision description<br/>  with OCR text<br/>─────────────────<br/>TRIGGER CONDITIONS:<br/>  - VISION_ENABLE=true<br/>  - Low OCR confidence OR<br/>  - Always-on mode<br/>─────────────────<br/>OUTPUT: VisionResult<br/>  - description text<br/>  - detected_elements<br/>  - confidence<br/>  - merged_with_ocr_text]
+    Vision --> Cleaning["STEP 2: CLEANING<br/>app/modules/cleaning.py<br/>─────────────────<br/>• Whitespace removal<br/>• Line normalization<br/>• Garbage filtering<br/>• Special char handling<br/>─────────────────<br/>OUTPUT:<br/>  - cleaned_text<br/>  - cleaning_info"]
     
-    Vision --> Cleaning[STEP 2: CLEANING<br/>app/modules/cleaning.py]
-    
-    Cleaning[STEP 2: CLEANING<br/>app/modules/cleaning.py<br/>─────────────────<br/>• Whitespace removal<br/>• Line normalization<br/>• Garbage filtering<br/>• Special char handling<br/>─────────────────<br/>OUTPUT:<br/>  - cleaned_text<br/>  - cleaning_info]
+    Cleaning --> Upload["STEP 2B: FILE UPLOAD<br/>app/storage/pipeline_storage.py<br/>─────────────────<br/>• Upload to DataStorageService<br/>  via HTTP API<br/>• POST /api/v1/documents/upload-and-process<br/>• Parameters:<br/>  - file: image/PDF file<br/>  - owner_id<br/>  - page_number: 1-indexed<br/>  - ocr_text: cleaned_text<br/>  - document_id: optional<br/>• First page creates document<br/>• Subsequent pages use same ID<br/>• Non-blocking, continues if fails<br/>─────────────────<br/>OUTPUT: upload_result<br/>  - document_id: int<br/>  - page_id<br/>  - file_url<br/>OUTPUT: file_upload_error if fails"]
     
     OCR -->|Failure| Stop1([STOP - Error])
     PDFOCR -->|Failure| Stop1
     
     style FileType fill:#0000
+    style BatchCheck fill:#0000
+    style BatchSplit fill:#0000
     
-    Cleaning --> Parallel[STEP 3: PARALLEL EXECUTION<br/>asyncio.gather - concurrent]
+    Upload --> Parallel["STEP 3: PARALLEL EXECUTION<br/>asyncio.gather - concurrent"]
     
-    Parallel --> Recommendation[STEP 3A: RECOMMENDATION<br/>app/modules/recommendation.py<br/>─────────────────<br/>• Gemini 2.5 Flash LLM<br/>• Category classification<br/>• Location suggestion<br/>• Tags extraction<br/>• Structured JSON output<br/>─────────────────<br/>OUTPUT: recommendation_result<br/>  - category_code<br/>  - location_id<br/>  - location_name<br/>  - tags array<br/>  - reason]
+    Parallel --> Recommendation["STEP 3A: RECOMMENDATION<br/>app/modules/recommendation.py<br/>─────────────────<br/>• Gemini 2.5 Flash LLM<br/>• Category classification<br/>• Location suggestion<br/>• Tags extraction<br/>• Structured JSON output<br/>• For batch: uses combined<br/>  text from all pages<br/>─────────────────<br/>OUTPUT: recommendation_result<br/>  - category_id: int<br/>  - location_id: int<br/>  - recommendation_reason<br/>  - suggested_tags: array<br/>  - Note: category_code removed<br/>    use category_id only"]
     
-    Parallel --> Embedding[STEP 3B: EMBEDDING<br/>app/modules/embedding.py<br/>─────────────────<br/>• Text → Vector conversion<br/>• Gemini API embedContent<br/>  text-embedding-004<br/>• Task type: RETRIEVAL_DOCUMENT<br/>• Retry mechanism: max 3 attempts<br/>• Exponential backoff<br/>• For semantic search<br/>─────────────────<br/>OUTPUT:<br/>  - embedding vector<br/>  - List of float]
+    Parallel --> Embedding["STEP 3B: EMBEDDING<br/>app/modules/embedding.py<br/>─────────────────<br/>• Text → Vector conversion<br/>• Gemini API embedContent<br/>  text-embedding-004<br/>• Task type: RETRIEVAL_DOCUMENT<br/>• Retry mechanism: max 3 attempts<br/>• Exponential backoff<br/>• For semantic search<br/>─────────────────<br/>OUTPUT:<br/>  - embedding vector<br/>  - List of float"]
     
     Recommendation --> Merge{Merge Results}
     Embedding --> Merge
     
-    Merge --> Persistence[STEP 4: PERSISTENCE<br/>app/pipelines/ingestion.py<br/>─────────────────<br/>STORAGE LOGIC REMOVED:<br/>• Generate UUID for document_id<br/>• No local file storage<br/>• No remote API calls<br/>• Persistence handled by API layer<br/>─────────────────<br/>OUTPUT: document_id UUID string<br/>for API response]
+    Merge --> Persistence["STEP 4: PERSISTENCE<br/>app/pipelines/ingestion.py<br/>─────────────────<br/>STORAGE LOGIC REMOVED:<br/>• Generate UUID for document_id<br/>• No local file storage<br/>• No remote API calls<br/>• Persistence handled by API layer<br/>─────────────────<br/>OUTPUT: document_id UUID string<br/>for API response"]
     
-    Persistence --> Response[RESPONSE: Complete Pipeline Output<br/>─────────────────<br/>Returns full pipeline results via<br/>PipelineStorage get_pipeline_output<br/>• status: completed<br/>• document_id: UUID<br/>• file_url: URL of file in database<br/>• file_upload_error: Error if upload failed<br/>• extracted_text<br/>• ocr_confidence<br/>• vision_understanding<br/>• recommendation_data<br/>• embedding<br/>• All processing steps and metadata]
+    Persistence --> Response["RESPONSE: Complete Pipeline Output<br/>─────────────────<br/>Returns full pipeline results<br/>• status: success / partial_success / failed<br/>• document_id: int, not UUID string<br/>• recommendation: Dict with all recommendation data<br/>  - category_id: int, no category_code<br/>  - location_id: int, no location_name<br/>  - recommendation_reason<br/>  - suggested_tags<br/>• For batch processing:<br/>  - total_pages: int<br/>  - successful_pages: int<br/>  - failed_pages: int<br/>  - page_results: List of PageProcessingResult<br/>    Each page: page_number, status,<br/>    error, ocr_text, file_url<br/>• Single file: page_results = None"]
     
     style Start fill:#0000
     style Stop1 fill:#0000
@@ -75,9 +87,16 @@ flowchart TD
 2. **Dependency Injection**: All modules (OCR, vision, cleaning, recommendation, embedding, storage) are injected via constructor
 3. **State Management**: `PipelineState` dataclass tracks all processing results and metadata throughout the pipeline
 4. **Multimodal Intelligence**: Vision Enhancement (Step 1B) adds semantic understanding beyond OCR text extraction
-5. **Parallel Processing**: 
+5. **Batch Processing**: 
+   - **Unified API**: Single `/ingestion` endpoint handles both single and batch uploads
+   - **PDF Splitting**: Multi-page PDFs automatically split into individual pages with sequential numbering
+   - **Document ID Management**: First page processed synchronously to establish `document_id`, remaining pages processed in parallel using the same ID
+   - **Mixed Formats**: Supports combinations of images and PDFs in a single batch
+   - **Page-level Results**: Each page tracked individually with status, OCR text, and error information
+   - **Combined Recommendation**: All page texts combined for single recommendation and embedding generation
+6. **Parallel Processing**: 
    - Steps 3A (Recommendation) and 3B (Embedding) run concurrently using `asyncio.gather()`
-   - Step 1 (OCR) and file upload run in parallel for efficiency
+   - Batch processing: First page synchronous, remaining pages processed in parallel
 6. **Error Resilience**: 
    - Cleaning failure doesn't stop pipeline (falls back to raw OCR text)
    - Vision enhancement failure doesn't stop pipeline (graceful degradation to OCR-only)
@@ -87,11 +106,23 @@ flowchart TD
    - Upload task properly cancelled if OCR fails to prevent resource leaks
 7. **Storage Architecture**: 
    - **Local file storage removed**: No longer saves to tmp/documents/, tmp/embeddings/, tmp/images/, tmp/pdfs/, or index.json
-   - **File upload integration**: Files uploaded to DataStorageService via HTTP API during OCR step
+   - **File upload integration**: Files uploaded to DataStorageService via HTTP API after cleaning step
+   - **Upload API Format**: `POST /api/v1/documents/upload-and-process`
+     - Parameters: `file`, `owner_id`, `page_number`, `ocr_text` (cleaned_text), `document_id` (optional)
+     - First page: creates new document if `document_id` not provided
+     - Subsequent pages: use same `document_id` from first page
    - **API-only persistence**: Storage logic removed from pipeline; persistence handled by API layer
    - **Unified output management**: `PipelineStorage` class provides methods to format and return complete pipeline results
    - **Output schema**: `DocumentOutputSchema` class manages output structure and field inclusion
-   - **File upload error tracking**: `file_upload_error` field indicates upload failures without blocking AI processing
+   - **File upload error tracking**: Upload failures tracked per page without blocking AI processing
+8. **Response Format**:
+   - **Unified Structure**: Single response format for both single and batch processing
+   - **Document ID**: Integer type (not UUID string) for consistency with database
+   - **Recommendation Field**: All recommendation data in single `recommendation` Dict
+     - Uses `category_id` (int) instead of `category_code` (string) to save space
+     - Uses `location_id` (int) instead of `location_name` (string)
+     - Removed redundant fields: `detected_type_code`, `recommended_location_id`, `recommended_location_reason`
+   - **Batch Fields**: `total_pages`, `successful_pages`, `failed_pages`, `page_results` (only present for batch)
 8. **Comprehensive Logging**: Each step logs progress, timing, and results for debugging and monitoring
 
 #### Module Details
@@ -387,7 +418,78 @@ Step 4: Assemble → Add full details:
 ## 4. API Interface Contracts (Internal Draft)
 
 ### Endpoints
-The `WebService` will communicate with this service via these methods (or REST endpoints):
+
+#### POST `/api/v1/ingestion`
+**Unified ingestion endpoint for single and batch processing**
+
+**Request:**
+```json
+{
+  "document_id": null,  // Optional: existing document ID
+  "file_urls": ["file1.jpg", "file2.pdf"],  // List of file URLs (single: length 1)
+  "owner_id": 1,
+  "user_notes": "Optional user notes"
+}
+```
+
+**Response (Single File):**
+```json
+{
+  "status": "success",
+  "document_id": 6,
+  "recommendation": {
+    "category_id": 3,
+    "location_id": 1,
+    "recommendation_reason": "The document is...",
+    "suggested_tags": ["tag1", "tag2"]
+  },
+  "total_pages": null,
+  "successful_pages": null,
+  "failed_pages": null,
+  "page_results": null
+}
+```
+
+**Response (Batch Processing):**
+```json
+{
+  "status": "success",
+  "document_id": 6,
+  "recommendation": {
+    "category_id": 3,
+    "location_id": 1,
+    "recommendation_reason": "Combined analysis of all pages...",
+    "suggested_tags": ["tag1", "tag2"]
+  },
+  "total_pages": 3,
+  "successful_pages": 3,
+  "failed_pages": 0,
+  "page_results": [
+    {
+      "page_number": 1,
+      "status": "success",
+      "error": null,
+      "ocr_text": "Extracted text...",
+      "file_url": "http://..."
+    },
+    {
+      "page_number": 2,
+      "status": "success",
+      "error": null,
+      "ocr_text": "Extracted text...",
+      "file_url": "http://..."
+    }
+  ]
+}
+```
+
+**Key Features:**
+- **Unified API**: Single endpoint handles both single file (`file_urls` length 1) and batch processing
+- **PDF Splitting**: Multi-page PDFs automatically split into pages with sequential numbering
+- **Document ID**: Integer type, first page establishes ID, subsequent pages use same ID
+- **Recommendation**: All recommendation data in single `recommendation` field
+  - Uses IDs (`category_id`, `location_id`) instead of codes/names to save space
+  - Removed redundant fields for cleaner response
 
 ---
 
@@ -548,12 +650,57 @@ StorageHelperAIOrchestraService/
       - `STORAGE_SERVICE_URL` configures DataStorageService endpoint
       - Default: `http://localhost:8000/internal` (extracted to `http://localhost:8000` for public API)
     - **Dependencies**: Added `aiofiles==24.1.0` for async file reading
+*   **Batch Processing Implementation** (December 6, 2025):
+    - **Unified Ingestion API**: Single `/ingestion` endpoint handles both single and batch uploads
+      - Request format: `file_urls: List[str]` (single file = list with one element)
+      - Automatically routes to single-file or batch processing pipeline
+    - **PDF Splitting**: Multi-page PDFs automatically split into individual pages
+      - Sequential page numbering (1-indexed)
+      - Temporary file management for PDF page images
+      - Supports multiple PDFs, multiple images, or mixed formats in single batch
+    - **Document ID Management**: 
+      - First page processed synchronously to establish `document_id`
+      - Subsequent pages processed in parallel using the same `document_id`
+      - Ensures all pages belong to the same document
+    - **Page-level Processing**: Each page tracked individually
+      - Status: 'success', 'failed', 'skipped'
+      - OCR text, file URL, error messages per page
+      - Combined text from all pages used for single recommendation/embedding
+    - **Response Format**: Unified response structure
+      - `document_id`: Integer type (not UUID string)
+      - `recommendation`: Single Dict containing all recommendation data
+      - Batch fields: `total_pages`, `successful_pages`, `failed_pages`, `page_results`
+*   **API Response Format Refactoring** (December 6, 2025):
+    - **Simplified Response Structure**: 
+      - Removed `detected_type_code` field (use `category_id` in recommendation)
+      - Removed `recommended_location_id` and `recommended_location_reason` (moved to recommendation)
+      - Renamed `extracted_metadata` to `recommendation` (contains all recommendation data)
+      - Removed `category_code` from recommendation (use `category_id` only to save space)
+    - **ID-based Fields**: 
+      - Use `category_id` (int) instead of `category_code` (string)
+      - Use `location_id` (int) instead of `location_name` (string)
+      - Removed redundant name/code fields to reduce response size
+    - **Unified Recommendation Field**: All recommendation information consolidated in single `recommendation` Dict
+      - Includes: `category_id`, `location_id`, `recommendation_reason`, `suggested_tags`, etc.
+      - Normalized location fields: prefers `location_id` over `suggested_location_id`
+      - Removes `location_name` and `suggested_location_name` fields
+*   **File Upload API Integration** (December 6, 2025):
+    - **Updated Upload Format**: Modified to match new DataStorageService API
+      - Endpoint: `POST /api/v1/documents/upload-and-process`
+      - Parameters: `file`, `owner_id`, `page_number`, `ocr_text` (cleaned_text), `document_id` (optional)
+      - Response: `document_id` (int), `page_id`
+    - **Upload Timing**: Moved from OCR step to after Cleaning step
+      - Ensures `cleaned_text` is available for upload
+      - Uses `cleaning_info.cleaned_text` from PipelineStorage
+    - **Document ID Handling**: 
+      - If `document_id` provided: uses it for all pages
+      - If empty: first page creates new document, subsequent pages use returned ID
+      - Properly extracts `document_id` from upload response (key: `'document_id'`, not `'id'`)
 *   **Pending Work**: 
     - Feedback handler implementation (endpoint exists, storage logic removed, needs API integration)
     - Comprehensive test suite (unit and integration tests)
     - Production deployment configurations
     - Performance testing and cost analysis for Vision API usage
-    - API layer persistence implementation (currently pipeline only generates UUID)
 
 ---
 
