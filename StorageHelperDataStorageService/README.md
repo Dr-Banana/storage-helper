@@ -130,3 +130,17 @@ docker-compose exec mysql mysql -uroot -proot storage_helper
 ```
 
 For more details, see `db_local_setup_guide.md` and `STORAGE_PROTOCOL_USAGE.md`.
+
+---
+
+## API & Database Documentation
+
+For comprehensive documentation on all API endpoints and database schema, see:
+- **[API & Database Documentation](./API_DATABASE_DOCUMENTATION.md)** - Complete reference guide
+
+This document includes:
+- All HTTP API endpoints with request/response examples
+- Full database schema with table descriptions
+- Data relationships and design decisions
+- Common query patterns
+- Environment configuration
