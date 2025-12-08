@@ -217,6 +217,9 @@ class PipelineStorage:
         self,
         file_path: str,
         owner_id: int,
+        page_number: int = 1,
+        ocr_text: str = "",
+        document_id: Optional[Union[int, str]] = None,
         category: str = "UNKNOWN",
         event_name: Optional[str] = None
     ) -> Optional[Dict[str, Any]]:
@@ -229,10 +232,20 @@ class PipelineStorage:
         [API: POST /api/v1/documents/upload-and-process]
         Service: DataStorageService (separate microservice)
         
+        New API format:
+        - file * (binary): Document page image file
+        - owner_id * (integer): Document owner user ID
+        - page_number * (integer): Page number within document (1-indexed)
+        - ocr_text * (string): OCR extracted text for this page
+        - document_id (optional): Existing document ID. If not provided, creates new document
+        
         :param file_path: Local file path or URL to the document file
         :param owner_id: Document owner user ID
-        :param category: Document category (TAX, VISA, MED, INS, etc.)
-        :param event_name: Optional associated event name
+        :param page_number: Page number within document (1-indexed)
+        :param ocr_text: OCR extracted text for this page
+        :param document_id: Optional existing document ID. If not provided, creates new document
+        :param category: Document category (TAX, VISA, MED, INS, etc.) - deprecated, kept for backward compatibility
+        :param event_name: Optional associated event name - deprecated, kept for backward compatibility
         :return: Response dictionary with id, filename, url, owner_id, created_at, or None if failed
         """
         url = "/api/v1/documents/upload-and-process"
@@ -252,11 +265,20 @@ class PipelineStorage:
                 "file": (filename, file_content, self._get_content_type(file_path))
             }
             data = {
-                "owner_id": owner_id,
-                "category": category
+                "owner_id": str(owner_id),  # Convert to string for form data
+                "page_number": str(page_number),  # Convert to string for form data
+                "ocr_text": ocr_text
             }
+            
+            # Add document_id only if provided (not None)
+            if document_id is not None:
+                data["document_id"] = str(document_id)
+            
+            # Legacy parameters (deprecated but kept for backward compatibility)
+            if category and category != "UNKNOWN":
+                logger.warning("'category' parameter is deprecated in new API format")
             if event_name:
-                data["event_name"] = event_name
+                logger.warning("'event_name' parameter is deprecated in new API format")
             
             # Upload to DataStorageService via HTTP API (microservice communication)
             # Note: This endpoint is at /api/v1, not /internal
@@ -275,7 +297,10 @@ class PipelineStorage:
                 response.raise_for_status()
                 
                 result = response.json()
-                logger.info(f"Document file uploaded successfully. ID: {result.get('id')}, URL: {result.get('url')}")
+                # API returns document_id, not id
+                document_id = result.get('document_id')
+                page_id = result.get('page_id')
+                logger.info(f"Document file uploaded successfully. Document ID: {document_id}, Page ID: {page_id}")
                 return result
                 
         except httpx.ConnectError as e:

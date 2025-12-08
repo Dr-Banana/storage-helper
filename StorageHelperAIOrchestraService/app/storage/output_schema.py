@@ -181,7 +181,17 @@ class DocumentOutputSchema:
         if self.should_include(OutputField.FILE_TYPE):
             output[self.get_field_name(OutputField.FILE_TYPE)] = file_type or "image"
         if self.should_include(OutputField.DOCUMENT_ID):
-            output[self.get_field_name(OutputField.DOCUMENT_ID)] = str(document_id) if document_id is not None else None
+            # Keep document_id as int (or convert from string if needed)
+            if document_id is not None:
+                if isinstance(document_id, str):
+                    try:
+                        output[self.get_field_name(OutputField.DOCUMENT_ID)] = int(document_id)
+                    except (ValueError, TypeError):
+                        output[self.get_field_name(OutputField.DOCUMENT_ID)] = document_id
+                else:
+                    output[self.get_field_name(OutputField.DOCUMENT_ID)] = document_id
+            else:
+                output[self.get_field_name(OutputField.DOCUMENT_ID)] = None
         if self.should_include(OutputField.FILE_URL) and file_url:
             output[self.get_field_name(OutputField.FILE_URL)] = file_url
         if self.should_include(OutputField.FILE_UPLOAD_ERROR) and file_upload_error:

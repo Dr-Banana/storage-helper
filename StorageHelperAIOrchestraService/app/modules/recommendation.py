@@ -34,7 +34,6 @@ class RecommendationGenerator:
     STORAGE_DIR = Path(__file__).parent.parent.parent / "tmp" / "Storage"
     DOCUMENT_CATEGORIES_FILE = STORAGE_DIR / "document_categories.json"
     LOCATIONS_FILE = STORAGE_DIR / "locations.json"
-    INDEX_FILE = STORAGE_DIR.parent / "index.json"
 
     # Define the mandatory structured output schema for the recommendation
     RECOMMENDATION_SCHEMA = {
@@ -130,72 +129,21 @@ class RecommendationGenerator:
             return []
 
     def load_location_mappings(self) -> List[Dict[str, Any]]:
-        """Load category-to-location mappings, stored in index.json."""
-        try:
-            return self.load_location_mappings_from_index()
-        except Exception as e:
-            logger.error(f"Error loading location mappings: {e}")
-            return []
-
-    def load_location_mappings_from_index(self) -> List[Dict[str, Any]]:
-        """Extract location mappings from index.json if available."""
-        try:
-            if not self.INDEX_FILE.exists():
-                return []
-            with open(self.INDEX_FILE, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-            mappings = data.get("location_mappings")
-            if isinstance(mappings, list):
-                return mappings
-            return []
-        except Exception as e:
-            logger.error(f"Error loading location mappings from index: {e}")
-            return []
-
-    def save_location_mappings(self, mappings: List[Dict[str, Any]]) -> None:
-        """Persist the full list of location mappings to index.json."""
-        try:
-            index_data = {}
-            if self.INDEX_FILE.exists():
-                with open(self.INDEX_FILE, 'r', encoding='utf-8') as f:
-                    index_data = json.load(f)
-                    if not isinstance(index_data, dict):
-                        index_data = {}
-            index_data["location_mappings"] = mappings
-            with open(self.INDEX_FILE, 'w', encoding='utf-8') as f:
-                json.dump(index_data, f, indent=2, ensure_ascii=False)
-        except Exception as e:
-            logger.error(f"Failed to persist location mappings to index: {e}")
+        """Load category-to-location mappings. Returns empty list (index.json support removed)."""
+        # index.json support has been removed - always return empty list
+        return []
 
     def ensure_location_mapping(self, category_id: Optional[int], location_id: Optional[int], priority: int = 8) -> None:
         """
-        Persist a mapping between category and location if it doesn't already exist.
+        Ensure a mapping between category and location exists (no-op, index.json support removed).
 
         :param category_id: Category ID to map
         :param location_id: Location ID to assign
         :param priority: Priority score for the mapping
         """
-        if category_id is None or location_id is None:
-            return
-
-        mappings = self.load_location_mappings()
-        for mapping in mappings:
-            if mapping.get("category_id") == category_id and mapping.get("location_id") == location_id:
-                return  # Mapping already exists
-
-        next_id = max((m.get("id", 0) for m in mappings), default=0) + 1
-        now = datetime.now().isoformat() + "Z"
-        mappings.append({
-            "id": next_id,
-            "location_id": location_id,
-            "document_type_id": None,
-            "category_id": category_id,
-            "priority": priority,
-            "is_allowed": True,
-            "created_at": now,
-            "updated_at": now
-        })
-        self.save_location_mappings(mappings)
+        # index.json support has been removed - this method is now a no-op
+        # Location mappings are no longer persisted to local files
+        pass
 
     @staticmethod
     def get_used_location_ids(mappings: List[Dict[str, Any]]) -> set:
