@@ -7,7 +7,7 @@ from typing import List, Dict, Any, Optional
 import logging
 
 from app.storage.pipeline_storage import get_all_embeddings, get_embedding, get_document
-from app.modules.embedding import EmbeddingGenerator
+from app.modules.embedding import EmbeddingGenerator, EmbeddingResult
 
 logger = logging.getLogger(__name__)
 
@@ -145,10 +145,11 @@ class SearchEngine:
             self.embedding_generator = EmbeddingGenerator()
         
         try:
-            query_embedding = await self.embedding_generator.generate(query)
-            if not query_embedding:
-                logger.error("Failed to generate query embedding")
+            embedding_result = await self.embedding_generator.generate(query)
+            if not embedding_result.is_successful:
+                logger.error(f"Failed to generate query embedding: {embedding_result.error}")
                 return []
+            query_embedding = embedding_result.vector
         except Exception as e:
             logger.error(f"Error generating query embedding: {e}")
             return []

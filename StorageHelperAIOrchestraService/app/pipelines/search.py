@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 
 # Import module types
 from app.modules.query_processor import QueryProcessor, normalize_query
-from app.modules.embedding import EmbeddingGenerator
+from app.modules.embedding import EmbeddingGenerator, EmbeddingResult
 from app.modules.search_engine import SearchEngine, run_similarity_search
 from app.modules.assembler import ResultAssembler, assemble_search_results
 
@@ -107,16 +107,17 @@ class SearchPipeline:
         logger.info("STEP 2 (Embedding): Generating query embedding...")
         
         try:
-            state.query_embedding = await self.embedding_generator.generate(state.normalized_query)
+            embedding_result = await self.embedding_generator.generate(state.normalized_query)
             
-            if not state.query_embedding:
+            if not embedding_result.is_successful:
                 state.status = "failed"
-                state.error = "Embedding generation failed, returned empty vector."
-                logger.error("STEP 2 (Embedding) Failed: Empty vector returned.")
+                state.error = embedding_result.error or "Embedding generation failed, returned empty vector."
+                logger.error(f"STEP 2 (Embedding) Failed: {state.error}")
                 return False
             
+            state.query_embedding = embedding_result.vector
             state.processing_steps.append("Embedding")
-            logger.info(f"STEP 2 (Embedding) Complete. Vector dimension: {len(state.query_embedding)}")
+            logger.info(f"STEP 2 (Embedding) Complete. Vector dimension: {embedding_result.dimension}")
             state.status = "embedding_generated"
             return True
             

@@ -2,10 +2,72 @@ import httpx
 import json
 import logging
 import asyncio
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
+from dataclasses import dataclass
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class EmbeddingResult:
+    """
+    Data structure for embedding generation results.
+    Encapsulates the embedding vector along with metadata and status information.
+    """
+    vector: List[float]  # The embedding vector
+    dimension: int  # Dimension of the embedding vector
+    status: str = "success"  # Status: "success", "failed", "pending"
+    model_name: Optional[str] = None  # Model used for generation
+    task_type: Optional[str] = None  # Task type used (e.g., "RETRIEVAL_DOCUMENT")
+    error: Optional[str] = None  # Error message if generation failed
+    raw_response: Optional[Dict[str, Any]] = None  # Full API response (optional)
+    
+    def __post_init__(self):
+        """Validate and set dimension if not provided."""
+        if self.dimension is None and self.vector:
+            self.dimension = len(self.vector)
+        elif self.dimension is None:
+            self.dimension = 0
+    
+    @property
+    def is_successful(self) -> bool:
+        """Check if embedding generation was successful."""
+        return self.status == "success" and len(self.vector) > 0
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary format for serialization."""
+        return {
+            "vector": self.vector,
+            "dimension": self.dimension,
+            "status": self.status,
+            "model_name": self.model_name,
+            "task_type": self.task_type,
+            "error": self.error,
+        }
+    
+    @classmethod
+    def create_failed(cls, error: str, model_name: Optional[str] = None, task_type: Optional[str] = None) -> "EmbeddingResult":
+        """Create a failed EmbeddingResult."""
+        return cls(
+            vector=[],
+            dimension=0,
+            status="failed",
+            model_name=model_name,
+            task_type=task_type,
+            error=error
+        )
+    
+    @classmethod
+    def create_pending(cls, model_name: Optional[str] = None, task_type: Optional[str] = None) -> "EmbeddingResult":
+        """Create a pending EmbeddingResult."""
+        return cls(
+            vector=[],
+            dimension=0,
+            status="pending",
+            model_name=model_name,
+            task_type=task_type
+        )
 
 
 class EmbeddingGenerator:
@@ -38,19 +100,23 @@ class EmbeddingGenerator:
         self.timeout = timeout
         self._api_url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model_name}:embedContent?key={self.api_key}"
     
-    async def generate(self, text: str) -> List[float]:
+    async def generate(self, text: str) -> EmbeddingResult:
         """
         Generate vector representation (embedding) for the given text.
         Uses the configured model and task type to call Gemini API's embedContent endpoint.
         
         :param text: Document text to generate embedding for.
-        :return: List of floats representing the embedding vector.
+        :return: EmbeddingResult containing the embedding vector and metadata.
         :raises Exception: If API call fails or returns invalid data after all retries.
         """
         # Validate input text
         if not text or not text.strip():
-            logger.warning("Attempted to generate embedding for empty or whitespace text. Returning empty vector.")
-            return []
+            logger.warning("Attempted to generate embedding for empty or whitespace text. Returning failed result.")
+            return EmbeddingResult.create_failed(
+                error="Empty or whitespace text provided",
+                model_name=self.model_name,
+                task_type=self.task_type
+            )
         
         # Construct request payload
         payload = {
@@ -68,6 +134,7 @@ class EmbeddingGenerator:
         
         # Implement exponential backoff retry
         delay = 1
+        last_error = "Unknown error"
         
         for attempt in range(self.max_retries):
             try:
@@ -83,7 +150,14 @@ class EmbeddingGenerator:
                     
                     if embedding_values and isinstance(embedding_values, list):
                         logger.info(f"Embedding successful. Vector dimension: {len(embedding_values)}")
-                        return embedding_values
+                        return EmbeddingResult(
+                            vector=embedding_values,
+                            dimension=len(embedding_values),
+                            status="success",
+                            model_name=self.model_name,
+                            task_type=self.task_type,
+                            raw_response=result
+                        )
                     else:
                         error_message = "Embedding response missing 'values' or invalid structure."
                         logger.error(error_message)
@@ -92,32 +166,43 @@ class EmbeddingGenerator:
                         
             except httpx.HTTPError as e:
                 logger.error(f"HTTP Error on Embedding API call (Attempt {attempt + 1}/{self.max_retries}): {e}")
+                last_error = str(e)
             except Exception as e:
                 logger.error(f"Error processing Embedding response (Attempt {attempt + 1}/{self.max_retries}): {e}")
+                last_error = str(e)
                 
             if attempt < self.max_retries - 1:
                 await asyncio.sleep(delay)
                 delay *= 2  # Exponential backoff
         
-        # If all retries fail, raise fatal exception
-        logger.critical("Failed to generate embedding after all retries.")
-        raise Exception("Embedding generation failed due to repeated API errors.")
+        # If all retries fail, return failed result instead of raising exception
+        error_msg = f"Embedding generation failed after {self.max_retries} retries: {last_error}"
+        logger.critical(error_msg)
+        return EmbeddingResult.create_failed(
+            error=error_msg,
+            model_name=self.model_name,
+            task_type=self.task_type
+        )
     
-    async def generate_batch(self, texts: List[str]) -> List[List[float]]:
+    async def generate_batch(self, texts: List[str]) -> List[EmbeddingResult]:
         """
         Generate embeddings for multiple texts in batch.
         
         :param texts: List of document texts to generate embeddings for.
-        :return: List of embedding vectors (each is a list of floats).
+        :return: List of EmbeddingResult objects.
         """
         results = []
         for text in texts:
             try:
-                embedding = await self.generate(text)
-                results.append(embedding)
+                embedding_result = await self.generate(text)
+                results.append(embedding_result)
             except Exception as e:
                 logger.error(f"Failed to generate embedding for text (length: {len(text)}): {e}")
-                results.append([])  # Append empty list on failure
+                results.append(EmbeddingResult.create_failed(
+                    error=str(e),
+                    model_name=self.model_name,
+                    task_type=self.task_type
+                ))
         return results
 
 
@@ -125,12 +210,12 @@ class EmbeddingGenerator:
 _default_generator = EmbeddingGenerator()
 
 # Backward compatibility: export the generate method as a module-level function
-async def generate_embedding(text: str) -> List[float]:
+async def generate_embedding(text: str) -> EmbeddingResult:
     """
     Backward compatibility wrapper for generate_embedding function.
     Uses the default EmbeddingGenerator instance.
     
     :param text: Document text to generate embedding for.
-    :return: List of floats representing the embedding vector.
+    :return: EmbeddingResult containing the embedding vector and metadata.
     """
     return await _default_generator.generate(text)

@@ -65,7 +65,7 @@ flowchart TD
     
     Parallel --> Recommendation["STEP 3A: RECOMMENDATION<br/>app/modules/recommendation.py<br/>─────────────────<br/>• Gemini 2.5 Flash LLM<br/>• Category classification<br/>• Location suggestion<br/>• Tags extraction<br/>• Structured JSON output<br/>• For batch: uses combined<br/>  text from all pages<br/>─────────────────<br/>OUTPUT: recommendation_result<br/>  - category_id: int<br/>  - location_id: int<br/>  - recommendation_reason<br/>  - suggested_tags: array<br/>  - Note: category_code removed<br/>    use category_id only"]
     
-    Parallel --> Embedding["STEP 3B: EMBEDDING<br/>app/modules/embedding.py<br/>─────────────────<br/>• Text → Vector conversion<br/>• Gemini API embedContent<br/>  text-embedding-004<br/>• Task type: RETRIEVAL_DOCUMENT<br/>• Retry mechanism: max 3 attempts<br/>• Exponential backoff<br/>• For semantic search<br/>─────────────────<br/>OUTPUT:<br/>  - embedding vector<br/>  - List of float"]
+    Parallel --> Embedding["STEP 3B: EMBEDDING<br/>app/modules/embedding.py<br/>─────────────────<br/>• Text → Vector conversion<br/>• Gemini API embedContent<br/>  text-embedding-004<br/>• Task type: RETRIEVAL_DOCUMENT<br/>• Retry mechanism: max 3 attempts<br/>• Exponential backoff<br/>• Returns EmbeddingResult object<br/>• For semantic search<br/>─────────────────<br/>OUTPUT: EmbeddingResult<br/>  - vector: List[float]<br/>  - dimension: int<br/>  - status: str<br/>  - model_name, task_type<br/>  - error (if failed)"]
     
     Recommendation --> Merge{Merge Results}
     Embedding --> Merge
@@ -202,25 +202,54 @@ The `EmbeddingGenerator` class (`app/modules/embedding.py`) is a critical compon
   - `RETRIEVAL_DOCUMENT` for document ingestion
   - `RETRIEVAL_QUERY` for search queries (configurable)
 
+**🆕 EmbeddingResult Class:**
+- **Encapsulation**: Embedding output is now encapsulated in `EmbeddingResult` dataclass
+  - `vector`: List[float] - The embedding vector
+  - `dimension`: int - Vector dimension
+  - `status`: str - "success", "failed", or "pending"
+  - `model_name`: Optional[str] - Model used for generation
+  - `task_type`: Optional[str] - Task type used
+  - `error`: Optional[str] - Error message if generation failed
+  - `raw_response`: Optional[Dict] - Full API response
+- **Benefits**:
+  - Better type safety and encapsulation
+  - Consistent with `OCRResult` and `VisionResult` design patterns
+  - Easier to extend with additional metadata
+  - Structured error handling
+- **Helper Methods**:
+  - `is_successful`: Property to check if embedding generation was successful
+  - `to_dict()`: Convert to dictionary for serialization
+  - `create_failed()`: Class method to create failed result
+  - `create_pending()`: Class method to create pending result
+
 **Key Features:**
 1. **Retry Mechanism**: Implements exponential backoff with configurable max retries (default: 3)
    - Initial delay: 1 second
    - Exponential backoff: delay doubles after each failure
+   - Returns `EmbeddingResult` with failed status instead of raising exception
 2. **Error Handling**: 
    - HTTP errors are caught and retried
    - Invalid responses trigger retries
-   - Empty/whitespace text returns empty vector (no API call)
-3. **Batch Processing**: `generate_batch()` method supports multiple texts
+   - Empty/whitespace text returns `EmbeddingResult.create_failed()`
+   - All failures return structured `EmbeddingResult` instead of raising exceptions
+3. **Batch Processing**: `generate_batch()` method returns `List[EmbeddingResult]`
 4. **Configurability**: 
    - Custom model name
    - API key injection
    - Task type selection
    - Timeout settings (default: 30s)
 
+**🆕 Temporary Debug Function:**
+- `save_embedding_result_to_local()`: Temporary debugging function to save `EmbeddingResult` to local filesystem
+  - Saves to `tmp/embeddings/` directory
+  - File naming: `SUCCESS_YYYYMMDD_HHMMSS_mmm.json` or `FAILED_YYYYMMDD_HHMMSS_mmm.json`
+  - Includes full embedding vector, metadata, text preview, and error information
+  - ⚠️ **Note**: This is a temporary function for debugging and will be removed in the future
+
 **Performance Considerations:**
 - Asynchronous implementation using `httpx.AsyncClient`
 - Timeout protection prevents hanging requests
-- Graceful degradation on failures (logs errors, returns empty vector)
+- Graceful degradation on failures (returns failed `EmbeddingResult` instead of raising exception)
 
 **Integration Pattern:**
 ```python
@@ -230,7 +259,14 @@ generator = EmbeddingGenerator(
     api_key="",  # Configured via environment
     task_type="RETRIEVAL_DOCUMENT"
 )
-embedding = await generator.generate(text)
+embedding_result = await generator.generate(text)
+
+# Check if successful
+if embedding_result.is_successful:
+    vector = embedding_result.vector
+    dimension = embedding_result.dimension
+else:
+    error = embedding_result.error
 ```
 
 #### PDF Processing Details
@@ -277,9 +313,9 @@ flowchart TD
     
     Input --> Normalize[STEP 1: QUERY NORMALIZATION<br/>app/modules/query_processor.py<br/>─────────────────<br/>• Trim whitespace<br/>• Remove extra spaces<br/>• Normalize formatting<br/>─────────────────<br/>EXAMPLE:<br/>INPUT: '  Where is my  W2?  '<br/>OUTPUT: 'Where is my W2?']
     
-    Normalize --> EmbedGen[STEP 2: EMBEDDING GENERATION<br/>app/modules/embedding.py<br/>─────────────────<br/>• Convert query to vector<br/>• Same model as document embedding<br/>• Gemini API text-embedding-004<br/>• Task type: RETRIEVAL_QUERY<br/>• Configurable vector dimension<br/>• Retry with exponential backoff<br/>─────────────────<br/>OUTPUT:<br/>  - query_embedding<br/>  - List of float]
+    Normalize --> EmbedGen[STEP 2: EMBEDDING GENERATION<br/>app/modules/embedding.py<br/>─────────────────<br/>• Convert query to vector<br/>• Same model as document embedding<br/>• Gemini API text-embedding-004<br/>• Task type: RETRIEVAL_QUERY<br/>• Configurable vector dimension<br/>• Retry with exponential backoff<br/>• Returns EmbeddingResult object<br/>─────────────────<br/>OUTPUT: EmbeddingResult<br/>  - vector: List[float]<br/>  - dimension: int<br/>  - status: str<br/>  - Extract vector for search]
     
-    EmbedGen --> Search[STEP 3: SIMILARITY SEARCH<br/>app/modules/search_engine.py<br/>─────────────────<br/>• Load all document embeddings<br/>  filter by owner_id if provided<br/>• Calculate cosine similarity<br/>  for each document<br/>• Rank by similarity score<br/>  1.0 = perfect match<br/>• Filter by min_score threshold<br/>• Return top_k results<br/>─────────────────<br/>OUTPUT: similarity_results<br/>document_id and score pairs<br/>sorted by score descending]
+    EmbedGen --> Search[STEP 3: SIMILARITY SEARCH<br/>app/modules/search_engine.py<br/>─────────────────<br/>• Extract vector from EmbeddingResult<br/>• Load all document embeddings<br/>  filter by owner_id if provided<br/>• Calculate cosine similarity<br/>  for each document<br/>• Rank by similarity score<br/>  1.0 = perfect match<br/>• Filter by min_score threshold<br/>• Return top_k results<br/>─────────────────<br/>OUTPUT: similarity_results<br/>document_id and score pairs<br/>sorted by score descending]
     
     Search --> Assemble[STEP 4: RESULT ASSEMBLY<br/>app/modules/assembler.py<br/>─────────────────<br/>For each search result:<br/>• Load full document data<br/>• Extract title first 100 chars<br/>• Extract snippet first 300 chars<br/>• Get preview image URL<br/>• Load location information<br/>  from locations.json:<br/>  - Location name<br/>  - Description<br/>  - Photo URL<br/>─────────────────<br/>OUTPUT: assembled_results<br/>SearchResultItem:<br/>  - document_id UUID<br/>  - score 0.0-1.0<br/>  - title, snippet<br/>  - preview_image_url<br/>  - created_at<br/>  - location: LocationInfo]
     
@@ -557,6 +593,14 @@ StorageHelperAIOrchestraService/
     - Robust retry mechanism with exponential backoff (max 3 attempts, 30s timeout)
     - Batch processing support for multiple documents
     - Asynchronous implementation for non-blocking operations
+    - **🆕 EmbeddingResult Class** (December 8, 2025):
+      - Encapsulated embedding output in `EmbeddingResult` dataclass for better type safety
+      - Consistent with `OCRResult` and `VisionResult` design patterns
+      - Includes vector, dimension, status, model_name, task_type, and error information
+      - Helper methods: `is_successful`, `to_dict()`, `create_failed()`, `create_pending()`
+      - Updated `PipelineState` to use `embedding_result: Optional[EmbeddingResult]` instead of separate `embedding` and `embedding_status` fields
+      - All embedding generation methods now return `EmbeddingResult` instead of `List[float]`
+      - Temporary debug function `save_embedding_result_to_local()` for debugging (saves to `tmp/embeddings/`)
 *   **Search Implementation**: Semantic vector search using cosine similarity
     - Vector embeddings enable meaning-based matching (not just keywords)
     - Cosine similarity algorithm for document ranking (0.0-1.0 score)
@@ -696,11 +740,29 @@ StorageHelperAIOrchestraService/
       - If `document_id` provided: uses it for all pages
       - If empty: first page creates new document, subsequent pages use returned ID
       - Properly extracts `document_id` from upload response (key: `'document_id'`, not `'id'`)
+*   **Embedding Architecture Enhancement** (December 8, 2025):
+    - **EmbeddingResult Class**: Refactored embedding output to use structured `EmbeddingResult` class
+      - Better encapsulation: vector, dimension, status, metadata all in one object
+      - Type safety: replaces raw `List[float]` with structured dataclass
+      - Consistent design: matches `OCRResult` and `VisionResult` patterns
+      - Error handling: structured error information instead of exceptions
+    - **PipelineState Update**: 
+      - Changed from `embedding: Optional[list]` and `embedding_status: str` to `embedding_result: Optional[EmbeddingResult]`
+      - Simplified state management with single field
+    - **Temporary Debug Function**: 
+      - Added `save_embedding_result_to_local()` for debugging embedding generation
+      - Saves to `tmp/embeddings/` with timestamp and status prefix
+      - Includes full vector, metadata, text preview, and error information
+      - ⚠️ **Note**: Temporary function, will be removed in future
+    - **Backward Compatibility**: 
+      - Updated all embedding usage throughout codebase (ingestion, search, search_engine)
+      - Maintained API compatibility with proper error handling
 *   **Pending Work**: 
     - Feedback handler implementation (endpoint exists, storage logic removed, needs API integration)
     - Comprehensive test suite (unit and integration tests)
     - Production deployment configurations
     - Performance testing and cost analysis for Vision API usage
+    - **Embedding Strategy Decision**: Consider page-level vs document-level embedding strategy for multi-page documents and incremental updates
 
 ---
 

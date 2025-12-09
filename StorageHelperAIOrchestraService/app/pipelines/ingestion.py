@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from app.modules.ocr import OCRResult, extract_text_advanced
 from app.modules.cleaning import process_text
 from app.modules.recommendation import generate_recommendation
-from app.modules.embedding import EmbeddingGenerator
+from app.modules.embedding import EmbeddingGenerator, EmbeddingResult
 from app.modules.vision import VisionAnalyzer, VisionResult
 # Storage logic removed - pipeline only processes, does not persist
 from app.storage.output_schema import DocumentOutputSchema, default_output_schema
@@ -30,8 +30,7 @@ class PipelineState:
     cleaned_text: Optional[str] = None
     cleaning_info: Optional[Dict[str, Any]] = None
     recommendation_result: Optional[Dict[str, Any]] = None
-    embedding: Optional[list] = None
-    embedding_status: str = "pending"
+    embedding_result: Optional[EmbeddingResult] = None
     
     # File storage
     file_url: Optional[str] = None  # URL of file stored in database (from upload-and-process API)
@@ -75,6 +74,15 @@ class PipelineState:
             else:
                 recommendation_error = self.recommendation_result.get("error")
         
+        # Prepare embedding data
+        embedding = None
+        embedding_dimension = None
+        embedding_status = None
+        if self.embedding_result:
+            embedding = self.embedding_result.vector if self.embedding_result.is_successful else None
+            embedding_dimension = self.embedding_result.dimension if self.embedding_result.is_successful else None
+            embedding_status = self.embedding_result.status
+        
         # Build output using schema
         return schema.build_output(
             status=self.status,
@@ -93,9 +101,9 @@ class PipelineState:
             recommendation_status=recommendation_status,
             recommendation_data=recommendation_data,
             recommendation_error=recommendation_error,
-            embedding=self.embedding,
-            embedding_dimension=len(self.embedding) if self.embedding else None,
-            embedding_status=self.embedding_status,  # Always include status, even if embedding failed
+            embedding=embedding,
+            embedding_dimension=embedding_dimension,
+            embedding_status=embedding_status,  # Always include status, even if embedding failed
             error=self.error,
         )
 
@@ -439,26 +447,34 @@ class IngestionPipeline:
         
         if not text_to_use:
             logger.error("Cannot generate embedding without text.")
+            state.embedding_result = EmbeddingResult.create_failed(
+                error="No text available for embedding generation"
+            )
+            state.status = "embedding_failed"
             return False
         
         logger.info("STEP 3 (Embedding): Generating document vector embedding...")
         
         try:
-            state.embedding = await self.embedding_generator.generate(text_to_use)
+            state.embedding_result = await self.embedding_generator.generate(text_to_use)
             
-            if state.embedding:
-                state.embedding_status = "success"
+            if state.embedding_result.is_successful:
                 state.processing_steps.append("Embedding")
-                logger.info(f"STEP 3 (Embedding) Complete. Vector dimension: {len(state.embedding)}")
+                logger.info(f"STEP 3 (Embedding) Complete. Vector dimension: {state.embedding_result.dimension}")
                 return True
             else:
-                state.embedding_status = "failed"
-                state.error = "Embedding generation failed, returned empty vector."
-                logger.error("STEP 3 (Embedding) Failed: Empty vector returned.")
+                state.status = "embedding_failed"
+                state.error = state.embedding_result.error or "Embedding generation failed, returned empty vector."
+                logger.error(f"STEP 3 (Embedding) Failed: {state.error}")
                 return False
                 
         except Exception as e:
-            state.embedding_status = "failed"
+            state.status = "embedding_failed"
+            state.embedding_result = EmbeddingResult.create_failed(
+                error=f"Embedding step failed: {str(e)}",
+                model_name=self.embedding_generator.model_name,
+                task_type=self.embedding_generator.task_type
+            )
             state.error = f"Embedding step failed: {str(e)}"
             logger.error(f"STEP 3 (Embedding) Failed: {e}", exc_info=True)
             return False
@@ -952,9 +968,9 @@ async def run_batch_ingestion_pipeline(
             response["recommendation"] = rec_data
         
         # Add embedding info if available
-        if embedding_result:
-            response["embedding"] = embedding_result
-            response["embedding_dimension"] = len(embedding_result) if embedding_result else None
+        if embedding_result and isinstance(embedding_result, EmbeddingResult) and embedding_result.is_successful:
+            response["embedding"] = embedding_result.vector
+            response["embedding_dimension"] = embedding_result.dimension
         
         logger.info(f"Batch ingestion complete: {successful_pages}/{total_pages} pages successful, document_id={final_document_id if final_document_id else 'None'}")
         return response
