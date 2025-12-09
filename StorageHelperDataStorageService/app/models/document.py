@@ -24,7 +24,7 @@ class Document(Base):
     doc_metadata = Column("metadata", JSON, nullable=True)
     
     # File content - thumbnail/first page for display
-    image_url = Column(Text, nullable=True)  # URL or path to thumbnail/first page
+    image_url = Column(Text, nullable=False)  # URL or path to thumbnail/first page
     
     created_at = Column(DateTime, default=func.now(), nullable=False)
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now(), nullable=False)

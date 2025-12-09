@@ -48,22 +48,25 @@ echo ""
 
 # Check if MySQL container exists and clean up if needed
 echo "🔍 Checking MySQL container status..."
-if docker ps -a | grep -q "storage-helper-db"; then
-    echo "ℹ️  Found existing container"
-    if docker ps | grep -q "storage-helper-db"; then
-        echo "✅ Container is running"
-    else
-        echo "🔄 Container exists but not running, removing it..."
-        docker rm storage-helper-db 2>/dev/null || true
-    fi
-else
-    echo "✅ No existing container found"
-fi
+
+# Force complete cleanup with docker-compose down -v (removes volumes)
+echo "🛑 Bringing down docker-compose (will remove volumes)..."
+docker-compose down -v 2>&1 || true
+
+# Additional cleanup in case docker volume is still there
+echo "🗑️  Removing any remaining data volumes..."
+docker volume rm storage-helper-db-data 2>/dev/null || true
+docker volume rm mysql_data 2>/dev/null || true
+docker volume rm storage-helper-data 2>/dev/null || true
+
+# Clean up any orphaned containers
+echo "🧹 Cleaning up orphaned containers..."
+docker rm -f storage-helper-db 2>/dev/null || true
 
 echo ""
 
-# Start MySQL container
-echo "🚀 Starting database container..."
+# Start MySQL container with fresh data
+echo "🚀 Starting database container with MySQL 9.0..."
 docker-compose up -d mysql 2>&1 || {
     echo "⚠️  Could not start via docker-compose, trying direct docker commands..."
     docker rm -f storage-helper-db 2>/dev/null || true

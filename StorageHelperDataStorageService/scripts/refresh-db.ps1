@@ -51,31 +51,29 @@ Write-Host ""
 
 # Check if MySQL container exists and clean up if needed
 Write-Host "🔍 Checking MySQL container status..."
+
+# Force complete cleanup with docker-compose down -v (removes volumes)
+Write-Host "🛑 Bringing down docker-compose (will remove volumes)..."
 $ErrorActionPreference = "Continue"
-$containerExists = docker ps -a --filter "name=storage-helper-db" --quiet
+docker-compose down -v 2>&1 | Out-Null
 $ErrorActionPreference = "Stop"
 
-if ($containerExists) {
-    Write-Host "ℹ️  Found existing container"
-    
-    $ErrorActionPreference = "Continue"
-    $containerRunning = docker ps --filter "name=storage-helper-db" --quiet
-    $ErrorActionPreference = "Stop"
-    
-    if ($containerRunning) {
-        Write-Host "✅ Container is running"
-    } else {
-        Write-Host "🔄 Container exists but not running, removing it..."
-        docker rm storage-helper-db 2>&1 | Out-Null
-    }
-} else {
-    Write-Host "✅ No existing container found"
-}
+# Additional cleanup in case docker volume is still there
+Write-Host "🗑️  Removing any remaining data volumes..."
+$ErrorActionPreference = "Continue"
+docker volume rm storage-helper-db-data 2>&1 | Out-Null
+docker volume rm mysql_data 2>&1 | Out-Null
+docker volume rm storage-helper-data 2>&1 | Out-Null
+
+# Clean up any orphaned containers
+Write-Host "🧹 Cleaning up orphaned containers..."
+docker rm -f storage-helper-db 2>&1 | Out-Null
+$ErrorActionPreference = "Stop"
 
 Write-Host ""
 
 # Start MySQL container
-Write-Host "🚀 Starting database container..."
+Write-Host "🚀 Starting database container with MySQL 9.0..."
 $ErrorActionPreference = "Continue"
 docker-compose up -d mysql 2>&1 | Out-Null
 $startResult = $LASTEXITCODE

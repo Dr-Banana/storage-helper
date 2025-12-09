@@ -2,7 +2,7 @@ version: '3.8'
 
 services:
   mysql:
-    image: mysql:8.0
+    image: mysql:9.0
     container_name: storage-helper-db
     environment:
       MYSQL_ROOT_PASSWORD: root

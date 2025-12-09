@@ -104,7 +104,7 @@ CREATE TABLE document_page (
 
 CREATE TABLE document_embedding (
     document_id     INT PRIMARY KEY,
-    embedding       JSON NOT NULL,    -- e.g. [0.123, -0.98, ...]
+    embedding       VECTOR(768) NOT NULL,    -- 768-dimensional vector for semantic search
     FOREIGN KEY (document_id) REFERENCES document(id) ON DELETE CASCADE
 );
 
