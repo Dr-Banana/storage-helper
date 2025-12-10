@@ -437,7 +437,7 @@ class IngestionPipeline:
     
     async def step_embedding(self, state: PipelineState) -> bool:
         """
-        Step 3: Generate vector embedding for semantic search.
+        Step 3: Generate vector embedding for document representation.
         
         :param state: Pipeline state to update.
         :return: True if successful, False otherwise.
@@ -612,6 +612,43 @@ class IngestionPipeline:
             logger.error(f"Embedding task failed: {embedding_result}")
         
         logger.info("STEP 3: Recommendation and Embedding completed (parallel execution)")
+        
+        # Step 3C: Save embedding to DataStorageService via API
+        # This should be done after pages are processed (document_id is available)
+        if state.document_id and state.embedding_result and state.embedding_result.is_successful:
+            try:
+                # Convert document_id to int if needed
+                doc_id = state.document_id
+                if isinstance(doc_id, str):
+                    try:
+                        doc_id = int(doc_id)
+                    except (ValueError, TypeError):
+                        logger.warning(f"Could not convert document_id '{doc_id}' to int for embedding save")
+                        doc_id = None
+                
+                if doc_id and isinstance(doc_id, int):
+                    embedding_vector = state.embedding_result.vector
+                    if embedding_vector and len(embedding_vector) == 768:
+                        save_success = await self.pipeline_storage.save_document_embedding(
+                            document_id=doc_id,
+                            embedding=embedding_vector
+                        )
+                        if save_success:
+                            logger.info(f"Document embedding saved successfully via API for document_id={doc_id}")
+                        else:
+                            logger.warning(f"Failed to save document embedding via API for document_id={doc_id}")
+                    else:
+                        logger.warning(f"Embedding vector dimension mismatch: expected 768, got {len(embedding_vector) if embedding_vector else 0}")
+                else:
+                    logger.warning(f"Invalid document_id for embedding save: {state.document_id}")
+            except Exception as e:
+                logger.error(f"Error saving document embedding via API: {e}", exc_info=True)
+                # Don't fail the pipeline if embedding save fails
+        else:
+            if not state.document_id:
+                logger.warning("Cannot save embedding: document_id not available")
+            elif not state.embedding_result or not state.embedding_result.is_successful:
+                logger.warning("Cannot save embedding: embedding generation failed or not successful")
         
         # Step 4: Persistence
         if not skip_persist:
@@ -918,6 +955,43 @@ async def run_batch_ingestion_pipeline(
             if isinstance(embedding_result, Exception):
                 logger.error(f"Embedding failed: {embedding_result}")
                 embedding_result = None
+        
+        # Step 3C: Save embedding to DataStorageService via API
+        # This should be done after pages are processed (document_id is available)
+        if final_document_id and embedding_result and isinstance(embedding_result, EmbeddingResult) and embedding_result.is_successful:
+            try:
+                # Convert document_id to int if needed
+                doc_id = final_document_id
+                if isinstance(doc_id, str):
+                    try:
+                        doc_id = int(doc_id)
+                    except (ValueError, TypeError):
+                        logger.warning(f"Could not convert document_id '{doc_id}' to int for embedding save")
+                        doc_id = None
+                
+                if doc_id and isinstance(doc_id, int):
+                    embedding_vector = embedding_result.vector
+                    if embedding_vector and len(embedding_vector) == 768:
+                        save_success = await pipeline.pipeline_storage.save_document_embedding(
+                            document_id=doc_id,
+                            embedding=embedding_vector
+                        )
+                        if save_success:
+                            logger.info(f"Document embedding saved successfully via API for document_id={doc_id}")
+                        else:
+                            logger.warning(f"Failed to save document embedding via API for document_id={doc_id}")
+                    else:
+                        logger.warning(f"Embedding vector dimension mismatch: expected 768, got {len(embedding_vector) if embedding_vector else 0}")
+                else:
+                    logger.warning(f"Invalid document_id for embedding save: {final_document_id}")
+            except Exception as e:
+                logger.error(f"Error saving document embedding via API: {e}", exc_info=True)
+                # Don't fail the pipeline if embedding save fails
+        else:
+            if not final_document_id:
+                logger.warning("Cannot save embedding: document_id not available")
+            elif not embedding_result or not (isinstance(embedding_result, EmbeddingResult) and embedding_result.is_successful):
+                logger.warning("Cannot save embedding: embedding generation failed or not successful")
         
         # Build response
         # Convert document_id to int if it's a string (from API response)

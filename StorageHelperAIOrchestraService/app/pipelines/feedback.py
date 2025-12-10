@@ -1,4 +1,7 @@
 from app.api.schemas import FeedbackRequest
+import logging
+
+logger = logging.getLogger(__name__)
 
 async def handle_feedback(request: FeedbackRequest) -> bool:
     """

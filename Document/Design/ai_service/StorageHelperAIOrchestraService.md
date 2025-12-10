@@ -7,9 +7,10 @@
 **Core Responsibilities:**
 1.  **Orchestration**: Managing the lifecycle of a document processing request through modular, testable pipelines.
 2.  **Ingestion Pipeline**: Image/PDF $\to$ OCR/Text Extraction $\to$ Text Cleaning $\to$ [Parallel: LLM Recommendation + Vector Embedding] $\to$ Persistence.
-3.  **Search Pipeline**: User Query $\to$ Normalization $\to$ Vector Embedding $\to$ Cosine Similarity Search $\to$ Result Assembly (with Location context & previews).
-4.  **Recommendation Engine**: LLM-powered (Gemini 2.5 Flash) intelligent document categorization and storage location suggestion with structured output.
-5.  **Multi-Format Support**: Handles both image files (JPG, PNG, etc.) and PDF documents with intelligent processing.
+3.  **Recommendation Engine**: LLM-powered (Gemini 2.5 Flash) intelligent document categorization and storage location suggestion with structured output.
+4.  **Multi-Format Support**: Handles both image files (JPG, PNG, etc.) and PDF documents with intelligent processing.
+
+**Note:** Search functionality has been moved to StorageHelperDataStorageService backend for centralized processing.
 
 ---
 
@@ -70,7 +71,9 @@ flowchart TD
     Recommendation --> Merge{Merge Results}
     Embedding --> Merge
     
-    Merge --> Persistence["STEP 4: PERSISTENCE<br/>app/pipelines/ingestion.py<br/>─────────────────<br/>STORAGE LOGIC REMOVED:<br/>• Generate UUID for document_id<br/>• No local file storage<br/>• No remote API calls<br/>• Persistence handled by API layer<br/>─────────────────<br/>OUTPUT: document_id UUID string<br/>for API response"]
+    Merge --> SaveEmbedding["STEP 3C: SAVE EMBEDDING<br/>app/storage/pipeline_storage.py<br/>─────────────────<br/>• Save embedding to DataStorageService<br/>  via HTTP API<br/>• POST /api/documents/{document_id}/embedding<br/>• Executed after pages processed<br/>  (document_id available)<br/>• Validates 768-dimensional vector<br/>• Request format:<br/>  document_id: int<br/>  embedding: List[float]<br/>• Non-blocking, continues if fails<br/>• Called in both single and batch<br/>  processing pipelines<br/>─────────────────<br/>OUTPUT: save_success: bool<br/>Logs success/failure status"]
+    
+    SaveEmbedding --> Persistence["STEP 4: PERSISTENCE<br/>app/pipelines/ingestion.py<br/>─────────────────<br/>STORAGE LOGIC REMOVED:<br/>• Generate UUID for document_id<br/>• No local file storage<br/>• No remote API calls<br/>• Persistence handled by API layer<br/>─────────────────<br/>OUTPUT: document_id UUID string<br/>for API response"]
     
     Persistence --> Response["RESPONSE: Complete Pipeline Output<br/>─────────────────<br/>Returns full pipeline results<br/>• status: success / partial_success / failed<br/>• document_id: int, not UUID string<br/>• recommendation: Dict with all recommendation data<br/>  - category_id: int, no category_code<br/>  - location_id: int, no location_name<br/>  - recommendation_reason<br/>  - suggested_tags<br/>• For batch processing:<br/>  - total_pages: int<br/>  - successful_pages: int<br/>  - failed_pages: int<br/>  - page_results: List of PageProcessingResult<br/>    Each page: page_number, status,<br/>    error, ocr_text, file_url<br/>• Single file: page_results = None"]
     
@@ -115,6 +118,13 @@ flowchart TD
    - **Unified output management**: `PipelineStorage` class provides methods to format and return complete pipeline results
    - **Output schema**: `DocumentOutputSchema` class manages output structure and field inclusion
    - **File upload error tracking**: Upload failures tracked per page without blocking AI processing
+   - **🆕 Embedding persistence**: Embeddings automatically saved to DataStorageService after generation
+     - **API Endpoint**: `POST /api/documents/{document_id}/embedding`
+     - **Timing**: Executed after pages processed (document_id available) and embedding generation succeeds
+     - **Format**: `{"document_id": int, "embedding": List[float]}` (768 dimensions)
+     - **Validation**: Ensures 768-dimensional vector before saving
+     - **Error handling**: Save failures logged but don't stop pipeline execution
+     - **Integration**: Called automatically in both single-file and batch processing pipelines
 8. **Response Format**:
    - **Unified Structure**: Single response format for both single and batch processing
    - **Document ID**: Integer type (not UUID string) for consistency with database
@@ -193,14 +203,14 @@ VISION_MODEL = "gemini-2.0-flash-exp"
 
 #### Embedding Module Implementation Details
 
-The `EmbeddingGenerator` class (`app/modules/embedding.py`) is a critical component for semantic search functionality:
+The `EmbeddingGenerator` class (`app/modules/embedding.py`) is a critical component for generating document embeddings:
 
 **API Configuration:**
 - **Endpoint**: Gemini API `embedContent` endpoint
 - **Model**: `text-embedding-004` (Google's production embedding model)
-- **Task Types**: 
+- **Task Type**: 
   - `RETRIEVAL_DOCUMENT` for document ingestion
-  - `RETRIEVAL_QUERY` for search queries (configurable)
+  - Embeddings are saved to DataStorageService for future search use
 
 **🆕 EmbeddingResult Class:**
 - **Encapsulation**: Embedding output is now encapsulated in `EmbeddingResult` dataclass
@@ -239,17 +249,32 @@ The `EmbeddingGenerator` class (`app/modules/embedding.py`) is a critical compon
    - Task type selection
    - Timeout settings (default: 30s)
 
-**🆕 Temporary Debug Function:**
-- `save_embedding_result_to_local()`: Temporary debugging function to save `EmbeddingResult` to local filesystem
-  - Saves to `tmp/embeddings/` directory
-  - File naming: `SUCCESS_YYYYMMDD_HHMMSS_mmm.json` or `FAILED_YYYYMMDD_HHMMSS_mmm.json`
-  - Includes full embedding vector, metadata, text preview, and error information
-  - ⚠️ **Note**: This is a temporary function for debugging and will be removed in the future
-
 **Performance Considerations:**
 - Asynchronous implementation using `httpx.AsyncClient`
 - Timeout protection prevents hanging requests
 - Graceful degradation on failures (returns failed `EmbeddingResult` instead of raising exception)
+
+**🆕 Embedding Persistence:**
+- **Automatic Saving**: After embedding generation, embeddings are automatically saved to DataStorageService
+- **API Endpoint**: `POST /api/documents/{document_id}/embedding`
+- **Timing**: Executed after pages are processed (document_id available) and embedding generation succeeds
+- **Format**: 
+  ```json
+  {
+    "document_id": 123,
+    "embedding": [0.123, -0.456, 0.789, ...]  // 768 dimensions
+  }
+  ```
+- **Validation**: 
+  - Ensures embedding vector is exactly 768 dimensions
+  - Validates document_id is available and valid
+- **Error Handling**: 
+  - Save failures are logged but don't stop pipeline execution
+  - Comprehensive error handling for connection, HTTP, and timeout errors
+- **Integration**: 
+  - Implemented in `PipelineStorage.save_document_embedding()` method
+  - Called automatically in both single-file and batch processing pipelines
+  - Non-blocking: Pipeline continues even if embedding save fails
 
 **Integration Pattern:**
 ```python
@@ -298,78 +323,65 @@ The `pdf_processor` module (`app/modules/pdf_processor.py`) handles PDF document
 - **Vision Enhancement Failure**: 🆕 Continue with OCR text only (graceful degradation), log warning
 - **Cleaning Failure**: Continue with raw OCR text, log warning
 - **Recommendation Failure**: Log error, continue to completion with partial data
-- **Embedding Failure**: Log error, continue to completion (search won't find this document)
+- **Embedding Failure**: Log error, continue to completion
 - **Persistence Step**: Only generates UUID for document_id; actual persistence handled by API layer
 
-### 2.2 Search Flow
+### 2.2 Search Functionality (Future Implementation)
 
-The search pipeline enables semantic document discovery using natural language queries. Implemented in `app/pipelines/search.py` with vector similarity matching.
+**🔄 Architecture Change:** Search functionality has been moved to `StorageHelperDataStorageService` backend for centralized processing and better performance.
 
-#### Pipeline Architecture
-
-```mermaid
-flowchart TD
-    Start([SEARCH PIPELINE<br/>app/pipelines/search.py]) --> Input[INPUT<br/>• query<br/>• owner_id<br/>• top_k<br/>State: SearchPipelineState]
-    
-    Input --> Normalize[STEP 1: QUERY NORMALIZATION<br/>app/modules/query_processor.py<br/>─────────────────<br/>• Trim whitespace<br/>• Remove extra spaces<br/>• Normalize formatting<br/>─────────────────<br/>EXAMPLE:<br/>INPUT: '  Where is my  W2?  '<br/>OUTPUT: 'Where is my W2?']
-    
-    Normalize --> EmbedGen[STEP 2: EMBEDDING GENERATION<br/>app/modules/embedding.py<br/>─────────────────<br/>• Convert query to vector<br/>• Same model as document embedding<br/>• Gemini API text-embedding-004<br/>• Task type: RETRIEVAL_QUERY<br/>• Configurable vector dimension<br/>• Retry with exponential backoff<br/>• Returns EmbeddingResult object<br/>─────────────────<br/>OUTPUT: EmbeddingResult<br/>  - vector: List[float]<br/>  - dimension: int<br/>  - status: str<br/>  - Extract vector for search]
-    
-    EmbedGen --> Search[STEP 3: SIMILARITY SEARCH<br/>app/modules/search_engine.py<br/>─────────────────<br/>• Extract vector from EmbeddingResult<br/>• Load all document embeddings<br/>  filter by owner_id if provided<br/>• Calculate cosine similarity<br/>  for each document<br/>• Rank by similarity score<br/>  1.0 = perfect match<br/>• Filter by min_score threshold<br/>• Return top_k results<br/>─────────────────<br/>OUTPUT: similarity_results<br/>document_id and score pairs<br/>sorted by score descending]
-    
-    Search --> Assemble[STEP 4: RESULT ASSEMBLY<br/>app/modules/assembler.py<br/>─────────────────<br/>For each search result:<br/>• Load full document data<br/>• Extract title first 100 chars<br/>• Extract snippet first 300 chars<br/>• Get preview image URL<br/>• Load location information<br/>  from locations.json:<br/>  - Location name<br/>  - Description<br/>  - Photo URL<br/>─────────────────<br/>OUTPUT: assembled_results<br/>SearchResultItem:<br/>  - document_id UUID<br/>  - score 0.0-1.0<br/>  - title, snippet<br/>  - preview_image_url<br/>  - created_at<br/>  - location: LocationInfo]
-    
-    Assemble --> Response[RESPONSE: SearchResponse<br/>─────────────────<br/>results: SearchResultItem array<br/><br/>EXAMPLE:<br/>'Where is my W2?' returns:<br/>document_id: 'abc-123'<br/>score: 0.89<br/>title: 'W-2 Wage and Tax...'<br/>location:<br/>  id: 2<br/>  name: 'Tax Documents Drawer'<br/>  photo_url: '/img/drawer.jpg']
-    
-    style Start fill:#0000
-    style Response fill:#0000
+**Future Search Flow:**
+```
+User Query (Text) 
+    ↓
+AIOrchestraService: Generate Query Embedding
+    ↓
+POST /api/documents/search (to DataStorageService)
+    Request: {
+      "query_embedding": [0.23, -0.45, 0.67, ...],  // 768-dim vector
+      "owner_id": 1,
+      "top_k": 10
+    }
+    ↓
+DataStorageService: Vector Similarity Search
+    - Load document embeddings from database
+    - Calculate cosine similarity
+    - Rank and filter results
+    ↓
+Response: {
+      "results": [
+        {
+          "document_id": 123,
+          "score": 0.89,
+          "title": "...",
+          "snippet": "...",
+          "location_id": 2,
+          ...
+        }
+      ]
+    }
 ```
 
-#### Key Design Features
+**Implementation Location:**
+- **Query Embedding Generation**: `StorageHelperAIOrchestraService` (using existing `EmbeddingGenerator` with `RETRIEVAL_QUERY` task type)
+- **Search API Endpoint**: `StorageHelperDataStorageService` - should implement `POST /api/documents/search` endpoint
+- **Vector Similarity Search**: `StorageHelperDataStorageService` - should use MySQL VECTOR type for efficient similarity search
+- **Result Assembly**: `StorageHelperDataStorageService` - should join with document and location tables to return complete results
 
-1. **Semantic Search**: Uses vector embeddings for meaning-based matching, not just keyword search
-2. **Cosine Similarity**: Measures document relevance by vector angle (0.0-1.0 score)
-3. **Owner Isolation**: Optional owner_id filtering ensures multi-user privacy
-4. **Rich Results**: Returns complete context including location photos and document previews
-5. **Modular Pipeline**: Each step is independent and testable with dependency injection
-6. **Performance Optimized**: 
-   - Location data cached during result assembly
-   - Results pre-sorted from search engine
-   - Configurable top_k to limit processing
+**Integration Points:**
+1. **AIOrchestraService** will generate query embeddings using `EmbeddingGenerator.generate()` with `task_type="RETRIEVAL_QUERY"`
+2. **AIOrchestraService** will call `POST /api/documents/search` on DataStorageService with the query embedding vector
+3. **DataStorageService** will handle all search logic including:
+   - Vector similarity calculation (using MySQL VECTOR functions)
+   - Document metadata retrieval
+   - Location information joining
+   - Result ranking and filtering
 
-#### Search Quality Factors
-
-| Factor | Impact | Implementation |
-|--------|--------|----------------|
-| **OCR Quality** | Higher confidence → Better searchability | Image preprocessing in ingestion |
-| **Text Cleaning** | Removes noise → Cleaner embeddings | Whitespace/garbage removal |
-| **Embedding Model** | Better model → More accurate matching | Gemini text-embedding-004 (production-grade) |
-| **Query Normalization** | Consistent formatting → Reliable results | Whitespace trimming |
-| **Similarity Threshold** | Adjustable precision/recall tradeoff | min_score parameter (default: 0.0) |
-
-#### Example Search Flow
-
-```
-User Query: "medical bills from last year"
-    ↓
-Step 1: Normalize → "medical bills from last year"
-    ↓
-Step 2: Embed → [0.23, -0.45, 0.67, ..., 0.12] (768-dim)
-    ↓
-Step 3: Search → Find documents with embeddings:
-    - Doc A (medical invoice): similarity = 0.87
-    - Doc B (hospital bill): similarity = 0.82
-    - Doc C (prescription): similarity = 0.76
-    ↓
-Step 4: Assemble → Add full details:
-    [
-      { doc_id: "...", title: "Hospital Invoice 2024", 
-        location: "Medical Files Cabinet", score: 0.87 },
-      { doc_id: "...", title: "Insurance Bill Q4", 
-        location: "Medical Files Cabinet", score: 0.82 },
-      ...
-    ]
-```
+**Benefits:**
+- Centralized search processing in data layer
+- Direct database access for better performance
+- Simplified architecture (search logic in one place)
+- Embeddings already stored in DataStorageService database
 
 ---
 
@@ -415,20 +427,7 @@ Step 4: Assemble → Add full details:
   - ✅ Local storage integration for document persistence
   - ✅ Embedding generation and storage support
 
-### 3.3 Search & Recommendation (Target: Dec 18–24)
-- [x] **AI-06**: Implement `Query Normalization`: Trim, lowercase, stop-words
-  - ✅ Implementation in `app/modules/query_processor.py`
-  - ✅ Whitespace normalization and query cleaning
-- [x] **AI-07**: Implement `Search Logic`: DB query execution (Text match)
-  - ✅ Vector similarity search implemented in `app/modules/search_engine.py`
-  - ✅ Cosine similarity calculation for semantic search
-  - ✅ Embedding-based document matching
-  - ✅ Owner-based filtering and top-k ranking
-- [x] **AI-08**: Implement `Result Assembler`: Formatting response with Document + Location Image URL
-  - ✅ Implementation in `app/modules/assembler.py`
-  - ✅ Enriches search results with document metadata
-  - ✅ Includes location information (name, description, photo URL)
-  - ✅ Generates title snippets from extracted text
+### 3.3 Recommendation (Target: Dec 18–24)
 - [x] **AI-09**: Implement `Location Recommendation`: Rule-based logic (Keyword $\to$ LocationID)
   - ✅ Advanced LLM-based recommendation in `app/modules/recommendation.py`
   - ✅ Uses Gemini 2.5 Flash for intelligent category and location suggestions
@@ -445,9 +444,10 @@ Step 4: Assemble → Add full details:
   - ⚠️ No integration tests found in codebase
 
 ### Summary
-**Completion Status: 15/17 tasks completed (88%)**
-- **Completed:** Core ingestion pipeline, search pipeline, and recommendation system
+**Completion Status: 12/14 tasks completed (86%)**
+- **Completed:** Core ingestion pipeline and recommendation system
 - **Remaining:** Feedback handler implementation and comprehensive testing suite
+- **Note:** Search functionality moved to StorageHelperDataStorageService backend
 
 ---
 
@@ -545,21 +545,17 @@ StorageHelperAIOrchestraService/
 │   │   └── config.py           # Service configuration
 │   ├── modules/                # Business logic modules
 │   │   ├── __init__.py
-│   │   ├── assembler.py        # Search result assembly
 │   │   ├── cleaning.py         # Text cleaning & normalization
 │   │   ├── embedding.py        # Vector embedding generation
 │   │   ├── ocr.py              # OCR engine wrapper (image + PDF)
 │   │   ├── pdf_processor.py    # PDF processing & conversion
-│   │   ├── query_processor.py  # Query normalization
 │   │   ├── recommendation.py   # Location recommendation logic
-│   │   ├── search_engine.py    # Search execution & ranking
 │   │   ├── vision.py           # 🆕 Vision AI for multimodal understanding
 │   │   └── tesseract/          # Tesseract OCR binaries & data
 │   ├── pipelines/              # Orchestration workflows
 │   │   ├── __init__.py
 │   │   ├── feedback.py         # User feedback processing
-│   │   ├── ingestion.py        # Document ingestion pipeline
-│   │   └── search.py           # Search pipeline
+│   │   └── ingestion.py        # Document ingestion pipeline
 │   └── storage/                # Pipeline output storage management
 │       ├── __init__.py
 │       ├── pipeline_storage.py # Unified storage handler for pipeline results (API-based)
@@ -601,12 +597,6 @@ StorageHelperAIOrchestraService/
       - Updated `PipelineState` to use `embedding_result: Optional[EmbeddingResult]` instead of separate `embedding` and `embedding_status` fields
       - All embedding generation methods now return `EmbeddingResult` instead of `List[float]`
       - Temporary debug function `save_embedding_result_to_local()` for debugging (saves to `tmp/embeddings/`)
-*   **Search Implementation**: Semantic vector search using cosine similarity
-    - Vector embeddings enable meaning-based matching (not just keywords)
-    - Cosine similarity algorithm for document ranking (0.0-1.0 score)
-    - Local storage implementation for MVP (file-based)
-    - Result assembly includes location context and preview images
-    - Owner-based filtering for multi-user privacy
 *   **Pipeline Architecture**: Implemented modular, testable pipeline design
     - Dependency injection for all modules (OCR, cleaning, embedding, storage)
     - State management pattern for tracking processing steps
@@ -757,6 +747,49 @@ StorageHelperAIOrchestraService/
     - **Backward Compatibility**: 
       - Updated all embedding usage throughout codebase (ingestion, search, search_engine)
       - Maintained API compatibility with proper error handling
+    - **Temporary Debug Function Removed**: 
+      - `save_embedding_result_to_local()` function has been removed from codebase
+      - Embeddings are now persisted directly to DataStorageService via API
+*   **Embedding Persistence Integration** (December 8, 2025):
+    - **New Feature**: Added automatic embedding saving to DataStorageService after pages processing
+    - **Implementation**: 
+      - Added `save_document_embedding()` method to `PipelineStorage` class
+      - Calls `/api/documents/{document_id}/embedding` API endpoint
+      - Validates 768-dimensional embedding vector before saving
+      - Request format: `{"document_id": int, "embedding": List[float]}`
+    - **Pipeline Integration**: 
+      - **Single File Processing**: Called in `run_ingestion_pipeline()` after embedding generation
+      - **Batch Processing**: Called in `run_batch_ingestion_pipeline()` after all pages processed
+      - Execution timing: After `step_upload_file()` completes (document_id available) and embedding generation succeeds
+      - Non-blocking: Embedding save failure doesn't stop pipeline execution
+    - **Error Handling**: 
+      - Validates document_id is available and convertible to int
+      - Validates embedding vector is 768 dimensions
+      - Comprehensive error logging for connection, HTTP, and timeout errors
+      - Graceful degradation: Pipeline continues even if embedding save fails
+    - **Key Features**: 
+      - Automatic persistence: Embeddings saved immediately after generation
+      - Consistent format: 768-dimensional vectors stored in standardized format
+      - API-based: Pure HTTP communication with DataStorageService (no direct dependencies)
+       - Supports both single-file and batch processing workflows
+*   **Search Functionality Migration** (December 8, 2025):
+    - **Architecture Change**: Search functionality moved to StorageHelperDataStorageService backend
+    - **Rationale**: Centralized search processing in data storage layer for better performance and maintainability
+    - **Removed Components**: 
+      - Search pipeline (`app/pipelines/search.py`)
+      - Search engine module (`app/modules/search_engine.py`)
+      - Query processor module (`app/modules/query_processor.py`)
+      - Result assembler module (`app/modules/assembler.py`)
+      - Search API endpoint (`/api/v1/search`)
+    - **Impact**: 
+      - Embeddings are still generated during ingestion for future search use
+      - Search queries will be handled by StorageHelperDataStorageService
+      - Embedding generation remains in AIOrchestraService for document processing
+    - **Future Implementation**: 
+      - Query embedding generation will be done in AIOrchestraService using `EmbeddingGenerator` with `RETRIEVAL_QUERY` task type
+      - Search API endpoint `POST /api/documents/search` should be implemented in StorageHelperDataStorageService
+      - Vector similarity search should use MySQL VECTOR type for efficient similarity calculation
+      - Result assembly should join with document and location tables in DataStorageService
 *   **Pending Work**: 
     - Feedback handler implementation (endpoint exists, storage logic removed, needs API integration)
     - Comprehensive test suite (unit and integration tests)

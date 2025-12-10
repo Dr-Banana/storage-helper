@@ -112,7 +112,6 @@ class PipelineStorage:
     
     Handles storage of all pipeline output results including:
     - Ingestion pipeline results (OCR text, vision analysis, recommendations, embeddings)
-    - Search pipeline results
     - Document metadata and files
     - Error documents from failed pipeline executions
     - Location data for recommendations
@@ -384,6 +383,87 @@ class PipelineStorage:
         
         logger.info(f"Embedding for document {doc_id} will be saved via API (local file save disabled)")
         return True
+    
+    async def save_document_embedding(
+        self,
+        document_id: Union[int, str],
+        embedding: List[float]
+    ) -> bool:
+        """
+        Save document embedding vector via DataStorageService API.
+        
+        [API: POST /api/documents/{document_id}/embedding]
+        Service: DataStorageService (separate microservice)
+        
+        API format:
+        - document_id (path parameter): Document ID
+        - Body: {
+            "document_id": int,
+            "embedding": List[float]  # 768-dimensional vector
+          }
+        
+        :param document_id: Document ID (int or str that can be converted to int)
+        :param embedding: Embedding vector (must be 768 dimensions)
+        :return: True if saved successfully, False otherwise
+        """
+        # Convert document_id to int if needed
+        try:
+            doc_id_int = int(document_id) if isinstance(document_id, str) else document_id
+        except (ValueError, TypeError):
+            logger.error(f"Invalid document_id format: {document_id}")
+            return False
+        
+        # Validate embedding dimensions
+        if not embedding or len(embedding) != 768:
+            logger.error(f"Embedding must be 768 dimensions, got {len(embedding) if embedding else 0}")
+            return False
+        
+        url = f"/api/documents/{doc_id_int}/embedding"
+        
+        # Prepare request body
+        payload = {
+            "document_id": doc_id_int,
+            "embedding": embedding
+        }
+        
+        try:
+            # Extract base URL from STORAGE_SERVICE_URL
+            # e.g., "http://localhost:8000" from "http://localhost:8000/internal"
+            base_url = settings.STORAGE_SERVICE_URL.replace("/internal", "").rstrip("/")
+            
+            # Validate base URL
+            if not base_url or not base_url.startswith(("http://", "https://")):
+                logger.error(f"Invalid STORAGE_SERVICE_URL configuration: {settings.STORAGE_SERVICE_URL}")
+                return False
+            
+            logger.debug(f"Saving embedding to DataStorageService at: {base_url}{url}")
+            
+            async with httpx.AsyncClient(base_url=base_url, timeout=30.0) as client:
+                response = await client.post(url, json=payload)
+                response.raise_for_status()
+                
+                result = response.json()
+                status = result.get("status", "unknown")
+                logger.info(f"Document embedding saved successfully. Document ID: {doc_id_int}, Status: {status}")
+                return True
+                
+        except httpx.ConnectError as e:
+            error_msg = f"Cannot connect to DataStorageService at {base_url}. Service may be down or URL incorrect."
+            logger.error(f"Connection error saving document embedding: {error_msg}")
+            logger.debug(f"Full error: {e}")
+            return False
+        except httpx.HTTPStatusError as e:
+            error_msg = f"HTTP {e.response.status_code}: {e.response.text[:200]}"
+            logger.error(f"Failed to save document embedding via API: {error_msg}")
+            return False
+        except httpx.TimeoutException as e:
+            error_msg = f"Timeout connecting to DataStorageService at {base_url}"
+            logger.error(f"Timeout saving document embedding: {error_msg}")
+            return False
+        except Exception as e:
+            error_msg = f"Unexpected error: {str(e)}"
+            logger.error(f"Error saving document embedding via API: {error_msg}", exc_info=True)
+            return False
     
     async def update_document_metadata(
         self,

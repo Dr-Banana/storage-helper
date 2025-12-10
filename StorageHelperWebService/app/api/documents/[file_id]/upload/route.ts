@@ -3,28 +3,30 @@ import { readFile } from "fs/promises"
 import { join } from "path"
 
 /**
- * Temporary file serving endpoint
+ * Document file serving endpoint
  * Serves files from tmp/uploads directory
+ * 
+ * Route: GET /api/documents/{file_id}/upload
  */
 export async function GET(
   request: NextRequest,
-  { params }: { params: { filename: string } }
+  { params }: { params: { file_id: string } }
 ) {
   try {
-    const filename = params.filename
+    const fileId = params.file_id
     
     // Security: prevent path traversal
-    if (filename.includes("..") || filename.includes("/") || filename.includes("\\")) {
-      return NextResponse.json({ error: "Invalid filename" }, { status: 400 })
+    if (fileId.includes("..") || fileId.includes("/") || fileId.includes("\\")) {
+      return NextResponse.json({ error: "Invalid file_id" }, { status: 400 })
     }
     
-    const filePath = join(process.cwd(), "tmp", "uploads", filename)
+    const filePath = join(process.cwd(), "tmp", "uploads", fileId)
     
     try {
       const fileBuffer = await readFile(filePath)
       
       // Determine content type from extension
-      const ext = filename.split(".").pop()?.toLowerCase()
+      const ext = fileId.split(".").pop()?.toLowerCase()
       const contentTypeMap: Record<string, string> = {
         jpg: "image/jpeg",
         jpeg: "image/jpeg",
@@ -45,7 +47,7 @@ export async function GET(
       return NextResponse.json({ error: "File not found" }, { status: 404 })
     }
   } catch (error) {
-    console.error("Error serving temp file:", error)
+    console.error("Error serving document file:", error)
     return NextResponse.json({ error: "Internal server error" }, { status: 500 })
   }
 }

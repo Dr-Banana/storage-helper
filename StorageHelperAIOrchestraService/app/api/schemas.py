@@ -6,16 +6,6 @@ from datetime import datetime
 # Shared / Base Models
 # ==========================================
 
-class LocationInfo(BaseModel):
-    """
-    对应 SQL 表: storage_location
-    前端展示位置时的核心信息
-    """
-    id: int
-    name: str = Field(..., description="e.g. 'Bedroom desk, left drawer #2'")
-    description: Optional[str] = None
-    photo_url: Optional[str] = Field(None, description="URL to the photo of the cabinet/drawer")
-
 class DocumentMetadata(BaseModel):
     """
     对应 SQL 表: document -> metadata (JSON)
@@ -72,38 +62,7 @@ class IngestResponse(BaseModel):
     page_results: Optional[List[PageProcessingResult]] = Field(None, description="Processing results for each page (for batch processing)")
 
 # ==========================================
-# 2. Search Pipeline (搜索文档)
-# ==========================================
-
-class SearchRequest(BaseModel):
-    query: str = Field(..., description="Natural language query, e.g. 'Where is my W2?'")
-    owner_id: Optional[int] = Field(None, description="Filter by user.id")
-    top_k: int = 5
-    filters: Optional[Dict[str, Any]] = Field(default_factory=dict, description="e.g. {'year': 2024, 'type': 'TAX_W2'}")
-
-class SearchResultItem(BaseModel):
-    """
-    单个搜索结果，聚合了 document + storage_location 的信息
-    """
-    document_id: str  # Changed to str to support UUID format
-    title: Optional[str] = None
-    
-    # 关键信息
-    snippet: Optional[str] = Field(None, description="Relevant text snippet from OCR")
-    preview_image_url: str = Field(..., description="Thumbnail of the document")
-    file_type: Optional[str] = Field("image", description="File type: 'image' or 'pdf'")
-    
-    # 物理位置信息 (MVP 核心目标：告诉用户在哪里)
-    location: Optional[LocationInfo] = None
-    
-    score: float = Field(..., description="Similarity score 0-1")
-    created_at: Optional[datetime] = None
-
-class SearchResponse(BaseModel):
-    results: List[SearchResultItem]
-
-# ==========================================
-# 3. Feedback (用户反馈)
+# 2. Feedback (用户反馈)
 # ==========================================
 
 class FeedbackRequest(BaseModel):

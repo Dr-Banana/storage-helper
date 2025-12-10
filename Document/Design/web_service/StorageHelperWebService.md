@@ -103,12 +103,15 @@ flowchart TD
     AuthCheck -->|Unauthorized| AuthError[401 Unauthorized]
     AuthCheck -->|Authorized| Route{Route<br/>Type}
     
-    Route -->|Document Upload| UploadAPI[Upload API<br/>POST /api/v1/documents/upload]
+    Route -->|Document Upload| UploadAPI[Upload API<br/>POST /api/upload]
     Route -->|Document Search| SearchAPI[Search API<br/>POST /api/v1/search]
     Route -->|Document List| DocumentsAPI[Documents API<br/>GET /api/v1/documents]
     Route -->|Location CRUD| LocationsAPI[Locations API<br/>CRUD Operations]
+    Route -->|File Access| FileAPI["File Service<br/>GET /api/documents/[file_id]/upload"]
     
+    UploadAPI --> FileAPI
     UploadAPI --> AIOrchestra[AI Orchestration Service<br/>POST /api/v1/ingestion]
+    FileAPI --> FileStorage[File Storage<br/>tmp/uploads directory]
     SearchAPI --> AIOrchestra2[AI Orchestration Service<br/>POST /api/v1/search]
     DocumentsAPI --> DataStorage[Data Storage Service<br/>GET /api/v1/documents]
     LocationsAPI --> DataStorage2[Data Storage Service<br/>GET /api/v1/locations]
@@ -156,8 +159,11 @@ sequenceDiagram
     User->>Frontend: Select files (drag & drop)
     Frontend->>Frontend: Validate file types/size
     Frontend->>User: Show upload progress
-    Frontend->>API Gateway: POST /api/v1/documents/upload
-    API Gateway->>AI Service: POST /api/v1/ingestion
+    Frontend->>API Gateway: POST /api/upload
+    API Gateway->>API Gateway: Save files to tmp/uploads
+    API Gateway->>API Gateway: Generate file URLs<br/>(/api/documents/[file_id]/upload)
+    API Gateway->>AI Service: POST /api/v1/ingestion<br/>(with file URLs)
+    AI Service->>API Gateway: GET /api/documents/[file_id]/upload<br/>(fetch files)
     AI Service->>AI Service: OCR + Processing (Batch)
     Note over AI Service: PDF split into pages<br/>Vision enhancement<br/>Combined recommendation
     AI Service->>Data Service: Upload files
@@ -467,7 +473,7 @@ sequenceDiagram
   - ✅ File upload component (multiple file selection, batch upload, validation, notes)
   - ✅ Document list view (document IDs and page IDs display)
   - ✅ BFF API route for file upload (/api/upload with batch support)
-  - ✅ Temporary file service (/api/temp-file/[filename])
+  - ✅ Document file service (/api/documents/{file_id}/upload)
   - ✅ API integration with AI Service (batch ingestion) and DataStorage Service (documents, pages)
 - **In Progress**: 
   - 🔄 Upload progress bar
@@ -529,7 +535,7 @@ Response:
 
 #### Document Upload Endpoint
 
-**POST `/api/v1/documents/upload`**
+**POST `/api/upload`** (BFF Route)
 ```json
 Request (multipart/form-data):
 {
@@ -553,6 +559,33 @@ Response:
   "failed_pages": 0,
   "page_results": [...]
 }
+```
+
+**Note**: This endpoint is a BFF (Backend For Frontend) route that:
+- Accepts file uploads from the frontend
+- Saves files temporarily to `tmp/uploads` directory
+- Creates HTTP URLs using `/api/documents/{file_id}/upload` format
+- Forwards file URLs to AI Service for processing
+- Automatically cleans up temporary files after processing
+
+#### Document File Service Endpoint
+
+**GET `/api/documents/{file_id}/upload`**
+```
+Route: GET /api/documents/{file_id}/upload
+
+Description:
+Serves uploaded files from temporary storage for AI Service processing.
+
+Parameters:
+- file_id: string - Unique file identifier (temporary filename)
+
+Response:
+- File content with appropriate Content-Type header
+- Security: Prevents path traversal attacks
+- Content-Type: Auto-detected from file extension
+
+Note: Files are served from tmp/uploads directory and cleaned up after processing.
 ```
 
 #### Document Search Endpoint
@@ -689,9 +722,10 @@ StorageHelperWebService/
 │   ├── api/                     # API Routes (BFF)
 │   │   ├── upload/
 │   │   │   └── route.ts         # File upload endpoint (batch support)
-│   │   └── temp-file/
-│   │       └── [filename]/
-│   │           └── route.ts     # Temporary file serving endpoint
+│   │   └── documents/
+│   │       └── [file_id]/
+│   │           └── upload/
+│   │               └── route.ts  # Document file serving endpoint
 │   ├── login/
 │   │   └── page.tsx             # Login page (English UI)
 │   ├── layout.tsx               # Root layout
@@ -772,12 +806,13 @@ StorageHelperWebService/
   - **BFF API Route**: Created `/api/upload` route that:
     - Accepts multiple file uploads via FormData
     - Saves files to temporary directory (`tmp/uploads`)
-    - Creates HTTP URLs for AI Service access (`/api/temp-file/[filename]`)
+    - Creates HTTP URLs for AI Service access (`/api/documents/{file_id}/upload`)
     - Forwards all file URLs to AI Service batch ingestion API
     - Automatically cleans up temporary files after processing
     - Returns batch processing results (total_pages, successful_pages, failed_pages)
-  - **Temporary File Service**: Created `/api/temp-file/[filename]` endpoint:
+  - **Document File Service**: Created `/api/documents/{file_id}/upload` endpoint:
     - Serves files from `tmp/uploads` directory
+    - Route format: `GET /api/documents/{file_id}/upload`
     - Security: Prevents path traversal attacks
     - Content-Type detection based on file extension
   - **Document List Component**:

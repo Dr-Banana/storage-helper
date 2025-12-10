@@ -64,7 +64,7 @@ export async function POST(request: NextRequest) {
       tempFiles.push(tempFilePath)
       
       // Create HTTP URL for AI Service to access the file
-      const fileUrl = `${protocol}://${host}/api/temp-file/${tempFileName}`
+      const fileUrl = `${protocol}://${host}/api/documents/${tempFileName}/upload`
       fileUrls.push(fileUrl)
     }
 
