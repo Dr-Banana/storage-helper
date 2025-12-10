@@ -34,7 +34,7 @@ CREATE TABLE storage_location (
     name            VARCHAR(100) NOT NULL,         -- e.g. "Bedroom desk, left drawer #2"
     description     TEXT,
     photo_url       TEXT,
-    parent_id       INT,                           -- For hierarchical locations (optional)
+    parent_id       INT,
     created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     FOREIGN KEY (parent_id) REFERENCES storage_location(id) ON DELETE SET NULL

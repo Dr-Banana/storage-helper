@@ -2,7 +2,7 @@
 Database model for StorageLocation
 """
 from datetime import datetime
-from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, func
+from sqlalchemy import Column, Integer, String, Text
 
 from app.core.database import Base
 
@@ -15,9 +15,6 @@ class StorageLocation(Base):
     name = Column(String(100), nullable=False, index=True)  # e.g. "Bedroom desk, left drawer #2"
     description = Column(Text, nullable=True)
     photo_url = Column(Text, nullable=True)
-    parent_id = Column(Integer, ForeignKey("storage_location.id", ondelete="SET NULL"), nullable=True)  # For hierarchical locations
-    created_at = Column(DateTime, default=func.now(), nullable=False)
-    updated_at = Column(DateTime, default=func.now(), onupdate=func.now(), nullable=False)
 
     def __repr__(self):
-        return f"<StorageLocation(id={self.id}, name='{self.name}', parent_id={self.parent_id})>"
+        return f"<StorageLocation(id={self.id}, name='{self.name}')>"
