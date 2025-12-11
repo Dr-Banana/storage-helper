@@ -324,7 +324,7 @@ class DocumentService:
             document_id: Optional existing document ID. If None, creates new document
             
         Returns:
-            Tuple of (document_id, page_id)
+            Tuple of (document_id, page_id, image_url)
             
         Raises:
             ValueError: If operation fails
@@ -380,7 +380,7 @@ class DocumentService:
             db.commit()
             db.refresh(page)
             
-            return (document_id, page.id)
+            return (document_id, page.id, image_url)
             
         except Exception as e:
             db.rollback()

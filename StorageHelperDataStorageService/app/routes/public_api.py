@@ -56,7 +56,7 @@ def upload_and_process(
         file_content = BytesIO(file.file.read())
         
         # Upload page and optionally create document
-        doc_id, page_id = DocumentService.upload_document_page(
+        doc_id, page_id, image_url = DocumentService.upload_document_page(
             db=db,
             file_content=file_content,
             filename=file.filename,
@@ -66,10 +66,11 @@ def upload_and_process(
             document_id=document_id
         )
         
-        # Return document_id, page_id and status
+        # Return document_id, page_id, image_url and status
         return {
             "document_id": doc_id,
             "page_id": page_id,
+            "image_url": image_url,
             "status": "created" if not document_id else "updated",
             "page_number": page_number
         }

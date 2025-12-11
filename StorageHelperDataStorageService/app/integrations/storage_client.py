@@ -42,8 +42,8 @@ class StorageClient:
             with open(local_file_path, 'wb') as f:
                 f.write(file_content.getvalue())
             
-            # Return file path
-            return f"file://{local_file_path}"
+            # Return file path without file:// prefix
+            return local_file_path
             
         except Exception as e:
             raise StorageException(f"Failed to upload image: {str(e)}")
@@ -54,17 +54,21 @@ class StorageClient:
         Delete image from local filesystem
         
         Args:
-            image_url: File URL (file:// path)
+            image_url: File path (without file:// prefix)
             
         Returns:
             True if deleted, False otherwise
         """
         try:
+            # Handle both with and without file:// prefix for compatibility
             if image_url.startswith("file://"):
                 local_path = image_url.replace("file://", "")
-                if os.path.exists(local_path):
-                    os.remove(local_path)
-                    return True
+            else:
+                local_path = image_url
+            
+            if os.path.exists(local_path):
+                os.remove(local_path)
+                return True
             return False
         except Exception as e:
             raise StorageException(f"Failed to delete image: {str(e)}")

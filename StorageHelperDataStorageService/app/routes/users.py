@@ -200,3 +200,108 @@ def get_user_documents(user_id: int, db: Session = Depends(get_db)):
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to retrieve user documents: {str(e)}"
         )
+
+
+@router.get(
+    "/{user_id}/categories",
+    response_model=dict,
+    summary="Get all categories for a user's documents",
+    description="Retrieve all unique document categories owned by a specific user"
+)
+def get_user_categories(user_id: int, db: Session = Depends(get_db)):
+    """
+    Get all unique document categories for a user's documents
+    
+    - **user_id**: The user's ID
+    
+    Returns a list of unique categories for the user's documents
+    """
+    try:
+        # Verify user exists
+        user = UserService.get_user_by_id(db, user_id)
+        if not user:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"User with ID {user_id} not found"
+            )
+        
+        # Get all unique categories for the user's documents
+        from app.models.document import Document
+        from app.models.document_category import DocumentCategory
+        
+        categories = db.query(DocumentCategory).filter(
+            DocumentCategory.id.in_(
+                db.query(Document.category_id).filter(
+                    Document.owner_id == user_id
+                ).distinct()
+            )
+        ).all()
+        
+        return {
+            "user_id": user_id,
+            "total": len(categories),
+            "categories": [
+                {"id": c.id, "code": c.code, "name": c.name, "description": c.description}
+                for c in categories
+            ]
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to retrieve user categories: {str(e)}"
+        )
+
+
+@router.get(
+    "/{user_id}/locations",
+    response_model=dict,
+    summary="Get all storage locations for a user's documents",
+    description="Retrieve all unique storage locations where a user's documents are stored"
+)
+def get_user_locations(user_id: int, db: Session = Depends(get_db)):
+    """
+    Get all unique storage locations for a user's documents
+    
+    - **user_id**: The user's ID
+    
+    Returns a list of unique storage locations for the user's documents
+    """
+    try:
+        # Verify user exists
+        user = UserService.get_user_by_id(db, user_id)
+        if not user:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"User with ID {user_id} not found"
+            )
+        
+        # Get all unique storage locations for the user's documents
+        from app.models.document import Document
+        from app.models.storage_location import StorageLocation
+        
+        locations = db.query(StorageLocation).filter(
+            StorageLocation.id.in_(
+                db.query(Document.current_location_id).filter(
+                    Document.owner_id == user_id,
+                    Document.current_location_id.isnot(None)
+                ).distinct()
+            )
+        ).all()
+        
+        return {
+            "user_id": user_id,
+            "total": len(locations),
+            "locations": [
+                {"id": loc.id, "name": loc.name, "description": loc.description, "photo_url": loc.photo_url}
+                for loc in locations
+            ]
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to retrieve user locations: {str(e)}"
+        )
