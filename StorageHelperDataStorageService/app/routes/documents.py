@@ -3,8 +3,10 @@ Document management routes
 """
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
+from sqlalchemy import text
 from fastapi import APIRouter, Depends, HTTPException, status
 from typing import List
+import json
 
 from app.core.database import get_db
 from app.models.document import Document
@@ -123,17 +125,32 @@ def update_document_embedding(
             DocumentEmbedding.document_id == document_id
         ).first()
         
+        # Use raw SQL with STRING_TO_VECTOR to properly insert VECTOR type
+        # MySQL VECTOR type requires STRING_TO_VECTOR('[0.1, 0.2, ...]') format
+        embedding_json_str = json.dumps(embedding_request.embedding)
+        
         if existing_embedding:
-            # Update existing embedding
-            existing_embedding.embedding = embedding_request.embedding
+            # Update existing embedding using raw SQL with STRING_TO_VECTOR
+            sql = """
+                UPDATE document_embedding 
+                SET embedding = STRING_TO_VECTOR(:embedding_json)
+                WHERE document_id = :document_id
+            """
+            db.execute(text(sql), {
+                "document_id": document_id,
+                "embedding_json": embedding_json_str
+            })
             action = "updated"
         else:
-            # Create new embedding
-            new_embedding = DocumentEmbedding(
-                document_id=document_id,
-                embedding=embedding_request.embedding
-            )
-            db.add(new_embedding)
+            # Insert new embedding using raw SQL with STRING_TO_VECTOR
+            sql = """
+                INSERT INTO document_embedding (document_id, embedding)
+                VALUES (:document_id, STRING_TO_VECTOR(:embedding_json))
+            """
+            db.execute(text(sql), {
+                "document_id": document_id,
+                "embedding_json": embedding_json_str
+            })
             action = "created"
         
         db.commit()

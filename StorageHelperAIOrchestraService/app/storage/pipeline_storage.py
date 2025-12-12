@@ -413,18 +413,43 @@ class PipelineStorage:
             logger.error(f"Invalid document_id format: {document_id}")
             return False
         
-        # Validate embedding dimensions
-        if not embedding or len(embedding) != 768:
-            logger.error(f"Embedding must be 768 dimensions, got {len(embedding) if embedding else 0}")
-            return False
-        
         url = f"/api/documents/{doc_id_int}/embedding"
         
-        # Prepare request body
+        # Ensure embedding is a list of floats (not string or other format)
+        # Convert to list FIRST before validating dimensions
+        # This handles JSON string inputs like '[0.1, 0.2, ...]'
+        if isinstance(embedding, str):
+            import json
+            try:
+                embedding = json.loads(embedding)
+            except json.JSONDecodeError:
+                logger.error(f"Invalid embedding format: cannot parse JSON string")
+                return False
+        elif not isinstance(embedding, list):
+            logger.error(f"Invalid embedding format: expected list, got {type(embedding)}")
+            return False
+        
+        # Ensure all elements are floats
+        try:
+            embedding_list = [float(x) for x in embedding]
+        except (ValueError, TypeError) as e:
+            logger.error(f"Invalid embedding format: all elements must be floats. Error: {str(e)}")
+            return False
+        
+        # Validate dimensions AFTER conversion to list
+        # Now we can correctly check the list length, not string length
+        if not embedding_list or len(embedding_list) != 768:
+            logger.error(f"Embedding must be 768 dimensions, got {len(embedding_list) if embedding_list else 0}")
+            return False
+        
+        # Prepare request body - ensure it's a proper list of floats
         payload = {
             "document_id": doc_id_int,
-            "embedding": embedding
+            "embedding": embedding_list  # Explicitly use the converted list
         }
+        
+        # Debug: Log the payload type
+        logger.debug(f"Sending embedding: type={type(payload['embedding'])}, length={len(payload['embedding'])}, first 3 values={payload['embedding'][:3]}")
         
         try:
             # Extract base URL from STORAGE_SERVICE_URL

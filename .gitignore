@@ -2,6 +2,8 @@
 test_images/
 **/test_images/
 
+.cursor
+
 # Temporary files and directories
 # tmp/
 # **/tmp/

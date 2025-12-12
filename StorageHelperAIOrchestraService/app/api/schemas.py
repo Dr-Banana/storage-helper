@@ -42,6 +42,8 @@ class PageProcessingResult(BaseModel):
     error: Optional[str] = Field(None, description="Error message if failed")
     ocr_text: Optional[str] = Field(None, description="Extracted OCR text for this page")
     file_url: Optional[str] = Field(None, description="URL of uploaded file")
+    document_id: Optional[int] = Field(None, description="Document ID for this page")
+    page_id: Optional[int] = Field(None, description="Page ID (if available)")
 
 
 class IngestResponse(BaseModel):
@@ -60,6 +62,9 @@ class IngestResponse(BaseModel):
     successful_pages: Optional[int] = Field(None, description="Number of successfully processed pages (for batch processing)")
     failed_pages: Optional[int] = Field(None, description="Number of failed pages (for batch processing)")
     page_results: Optional[List[PageProcessingResult]] = Field(None, description="Processing results for each page (for batch processing)")
+    
+    # Embedding保存错误（如果embedding保存失败）
+    embedding_save_error: Optional[str] = Field(None, description="Error message if embedding save failed")
 
 # ==========================================
 # 2. Feedback (用户反馈)

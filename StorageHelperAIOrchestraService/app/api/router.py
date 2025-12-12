@@ -1,4 +1,5 @@
 from fastapi import APIRouter, HTTPException, BackgroundTasks
+from fastapi.responses import JSONResponse
 import logging
 from app.api.schemas import (
     IngestRequest, IngestResponse, 
@@ -32,97 +33,60 @@ async def process_document(request: IngestRequest):
     
     Returns complete pipeline output including all processing results.
     """
-    from app.storage.pipeline_storage import PipelineStorage
-    from app.pipelines.ingestion import run_batch_ingestion_pipeline
+    from app.pipelines.ingestion import run_unified_ingestion_pipeline
     
     try:
         # Validate file_urls
         if not request.file_urls or len(request.file_urls) == 0:
             raise HTTPException(status_code=400, detail="file_urls cannot be empty")
         
-        # Determine if this is a single file or batch request
-        if len(request.file_urls) == 1:
-            # Single file processing
-            single_file_url = request.file_urls[0]
-            logger.info(f"Processing single file: {single_file_url}")
-            result = await ingestion.run_ingestion_pipeline(
-                image_url=single_file_url, 
-                owner_id=request.owner_id,
-                document_id=request.document_id,
-                file_type=request.file_type
+        # Use unified ingestion pipeline for both single and multiple files
+        # This ensures consistent response format with total_pages, successful_pages, failed_pages, page_results
+        logger.info(f"Processing {len(request.file_urls)} file(s) using unified pipeline")
+        result = await run_unified_ingestion_pipeline(
+            file_urls=request.file_urls,
+            owner_id=request.owner_id,
+            document_id=request.document_id,
+            file_type=request.file_type  # Pass file_type parameter for single file uploads
+        )
+        
+        # Extract data from unified pipeline result
+        recommendation_data = result.get("recommendation", {})
+        embedding_save_error = result.get("embedding_save_error")
+        status = result.get("status", "success")
+        
+        # Normalize status: map "completed" to "success" for consistency
+        if status == "completed":
+            status = "success"
+        
+        # Adjust status based on embedding save result
+        # Note: run_unified_ingestion_pipeline already handles status adjustment internally
+        # We only need to handle edge cases here
+        # Status from unified pipeline is already "success", "partial_success", or "failed"
+        # No need to check for "recommendation_failed" or "embedding_failed" as unified pipeline doesn't return those
+        
+        response = IngestResponse(
+            status=status,
+            document_id=result.get("document_id"),
+            recommendation=recommendation_data,
+            total_pages=result.get("total_pages"),
+            successful_pages=result.get("successful_pages"),
+            failed_pages=result.get("failed_pages"),
+            page_results=result.get("page_results"),
+            embedding_save_error=embedding_save_error
+        )
+        
+        # Only return HTTP 500 for complete failures, not partial successes
+        # If embedding_save_error exists but status is "partial_success" or "success",
+        # it means document processing succeeded but embedding save failed - this is partial success, not complete failure
+        # HTTP 500 should only be returned when status is "failed" (complete failure)
+        if status == "failed":
+            return JSONResponse(
+                status_code=500,
+                content=response.model_dump()
             )
-            
-            # Get complete pipeline output using PipelineStorage
-            complete_output = PipelineStorage.get_pipeline_output(result)
-            
-            # Convert to IngestResponse format
-            # Ensure document_id is int, not string
-            doc_id = complete_output.get("document_id")
-            if doc_id is not None:
-                if isinstance(doc_id, str):
-                    try:
-                        doc_id = int(doc_id)
-                    except (ValueError, TypeError):
-                        logger.warning(f"Could not convert document_id '{doc_id}' to int")
-                        doc_id = None
-            
-            # Extract recommendation data from complete_output
-            # recommendation_data contains all recommendation info
-            recommendation_data = complete_output.get("recommendation_data", {})
-            if not recommendation_data:
-                # Fallback: try to construct from old fields (for backward compatibility)
-                recommendation_data = {}
-                # Note: category_code is not included - use category_id only
-                if complete_output.get("recommended_location_id"):
-                    recommendation_data["location_id"] = complete_output.get("recommended_location_id")
-                if complete_output.get("recommended_location_reason"):
-                    recommendation_data["recommendation_reason"] = complete_output.get("recommended_location_reason")
-                if complete_output.get("extracted_metadata"):
-                    recommendation_data.update(complete_output.get("extracted_metadata", {}))
-            
-            # Normalize recommendation: ensure location_id is used instead of location_name
-            if recommendation_data:
-                if "location_name" in recommendation_data:
-                    recommendation_data.pop("location_name")
-                if "suggested_location_name" in recommendation_data:
-                    recommendation_data.pop("suggested_location_name")
-                # Ensure location_id is set (prefer location_id over suggested_location_id)
-                if "suggested_location_id" in recommendation_data and "location_id" not in recommendation_data:
-                    recommendation_data["location_id"] = recommendation_data.pop("suggested_location_id")
-                # Remove category_code (use category_id only to save space)
-                recommendation_data.pop("category_code", None)
-            
-            return IngestResponse(
-                status=complete_output.get("status", "success"),
-                document_id=doc_id,
-                recommendation=recommendation_data,
-                total_pages=None,
-                successful_pages=None,
-                failed_pages=None,
-                page_results=None
-            )
-        else:
-            # Batch processing (multiple files)
-            logger.info(f"Processing {len(request.file_urls)} files in batch mode")
-            result = await run_batch_ingestion_pipeline(
-                file_urls=request.file_urls,
-                owner_id=request.owner_id,
-                document_id=request.document_id
-            )
-            
-            # Convert batch result to IngestResponse format
-            # Extract recommendation data (should already be normalized in batch processing)
-            recommendation_data = result.get("recommendation", {})
-            
-            return IngestResponse(
-                status=result.get("status", "success"),
-                document_id=result.get("document_id"),
-                recommendation=recommendation_data,
-                total_pages=result.get("total_pages"),
-                successful_pages=result.get("successful_pages"),
-                failed_pages=result.get("failed_pages"),
-                page_results=result.get("page_results")
-            )
+        
+        return response
         
     except HTTPException:
         raise

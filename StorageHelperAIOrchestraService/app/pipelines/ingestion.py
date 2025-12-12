@@ -21,7 +21,7 @@ class PipelineState:
     """State container for pipeline execution data."""
     image_url: str
     owner_id: int
-    document_id: Optional[Union[int, str]] = None  # Can be int (from DB) or str (UUID from local storage)
+    document_id: Optional[Union[int, str]] = None  # Document ID from backend API (int from DB)
     file_type: Optional[str] = None  # "image" or "pdf"
     
     # Processing results
@@ -34,7 +34,9 @@ class PipelineState:
     
     # File storage
     file_url: Optional[str] = None  # URL of file stored in database (from upload-and-process API)
+    page_id: Optional[int] = None  # Page ID from database (from upload-and-process API)
     file_upload_error: Optional[str] = None  # Error message if file upload failed
+    embedding_save_error: Optional[str] = None  # Error message if embedding save failed
     
     # Pipeline metadata
     processing_steps: list = field(default_factory=list)
@@ -84,7 +86,7 @@ class PipelineState:
             embedding_status = self.embedding_result.status
         
         # Build output using schema
-        return schema.build_output(
+        output_dict = schema.build_output(
             status=self.status,
             owner_id=self.owner_id,
             source=self.image_url,
@@ -106,6 +108,12 @@ class PipelineState:
             embedding_status=embedding_status,  # Always include status, even if embedding failed
             error=self.error,
         )
+        
+        # Add embedding_save_error if present (not in schema yet, add directly)
+        if self.embedding_save_error:
+            output_dict["embedding_save_error"] = self.embedding_save_error
+        
+        return output_dict
 
 
 class IngestionPipeline:
@@ -357,7 +365,9 @@ class IngestionPipeline:
             if upload_result:
                 # API returns document_id, not id
                 returned_document_id = upload_result.get("document_id")
+                returned_page_id = upload_result.get("page_id")
                 state.file_url = upload_result.get("url") or upload_result.get("image_url")
+                state.page_id = returned_page_id  # Store page_id from API response
                 
                 # Update document_id if we got one from the upload
                 # For first page: use returned document_id if we didn't have one
@@ -371,7 +381,7 @@ class IngestionPipeline:
                         # This shouldn't happen, but log a warning
                         logger.warning(f"Document ID mismatch: state has {state.document_id}, API returned {returned_document_id}")
                 
-                logger.info(f"File uploaded successfully. URL: {state.file_url}, Document ID: {state.document_id}")
+                logger.info(f"File uploaded successfully. URL: {state.file_url}, Document ID: {state.document_id}, Page ID: {state.page_id}")
                 state.processing_steps.append("File Upload")
                 return True
             else:
@@ -481,40 +491,52 @@ class IngestionPipeline:
     
     async def step_persist(self, state: PipelineState, is_error: bool = False) -> bool:
         """
-        Step 4: Generate document ID (storage logic removed).
+        Step 4: Use document ID from upload API (storage logic removed).
         
-        NOTE: Storage logic has been removed. This step only generates a document ID
-        for the API response. Actual persistence should be handled by the API layer.
+        NOTE: Storage logic has been removed. This step uses the document_id
+        returned from /api/v1/documents/upload-and-process API. All document_id
+        management is handled by the backend. If document_id is not available
+        (e.g., upload failed), it remains None.
         
         :param state: Pipeline state to update.
         :param is_error: If True, indicates this is an error document
         :return: True if successful, False otherwise.
         """
-        import uuid
-        
-        if is_error:
-            logger.warning("STEP 4 (Persistence): Generating error document ID (storage disabled)...")
-        else:
-            logger.info("STEP 4 (Persistence): Generating document ID (storage disabled)...")
-        
         try:
-            # Generate document ID for API response (storage logic removed)
-            doc_id = str(uuid.uuid4())
-            state.document_id = doc_id
+            # Use document_id from upload API if available
+            # This is the document_id returned by /api/v1/documents/upload-and-process
+            # All document_id management is handled by the backend - we don't generate any IDs
+            doc_id = state.document_id
+            if doc_id:
+                if is_error:
+                    logger.warning(f"STEP 4 (Persistence): Using document ID from upload API: {doc_id} (error document)")
+                else:
+                    logger.info(f"STEP 4 (Persistence): Using document ID from upload API: {doc_id}")
+            else:
+                # No document_id available (upload may have failed)
+                if is_error:
+                    logger.warning(f"STEP 4 (Persistence): No document ID available (upload failed or not executed)")
+                else:
+                    logger.warning(f"STEP 4 (Persistence): No document ID available (upload may have failed)")
+            
             state.processing_steps.append("Persistence")
             
             if is_error:
                 # Preserve error status - do not overwrite with "completed"
                 # The error status (e.g., "failed", "ocr_failed", "recommendation_failed") 
                 # should be preserved to indicate pipeline failure
-                logger.warning(f"⚠️  Error document ID generated: {doc_id}")
+                logger.warning(f"⚠️  Error document processing complete")
+                logger.warning(f"    Document ID: {doc_id if doc_id else 'None (upload failed)'}")
                 logger.warning(f"    Error: {state.error}")
                 logger.warning(f"    Failed step: {self._get_failed_step(state)}")
                 logger.warning(f"    Status preserved: {state.status}")
             else:
                 # Only set to "completed" if this is not an error document
                 state.status = "completed"
-                logger.info(f"STEP 4 (Persistence) Complete. Document ID: {doc_id} (storage disabled)")
+                if doc_id:
+                    logger.info(f"STEP 4 (Persistence) Complete. Document ID: {doc_id}")
+                else:
+                    logger.warning(f"STEP 4 (Persistence) Complete. No document ID (upload may have failed)")
             
             return True
                 
@@ -615,7 +637,10 @@ class IngestionPipeline:
         
         # Step 3C: Save embedding to DataStorageService via API
         # This should be done after pages are processed (document_id is available)
+        # Only track embedding_save_error when a save operation is actually attempted and fails
+        # Do not set error when save wasn't attempted due to missing preconditions
         if state.document_id and state.embedding_result and state.embedding_result.is_successful:
+            # All preconditions met - attempt to save embedding
             try:
                 # Convert document_id to int if needed
                 doc_id = state.document_id
@@ -623,12 +648,15 @@ class IngestionPipeline:
                     try:
                         doc_id = int(doc_id)
                     except (ValueError, TypeError):
-                        logger.warning(f"Could not convert document_id '{doc_id}' to int for embedding save")
+                        # Precondition check failed - cannot convert document_id
+                        # Don't set embedding_save_error as no save was attempted
+                        logger.warning(f"Could not convert document_id '{doc_id}' to int for embedding save - skipping save")
                         doc_id = None
                 
                 if doc_id and isinstance(doc_id, int):
                     embedding_vector = state.embedding_result.vector
                     if embedding_vector and len(embedding_vector) == 768:
+                        # Actually attempt to save - this is where we track failures
                         save_success = await self.pipeline_storage.save_document_embedding(
                             document_id=doc_id,
                             embedding=embedding_vector
@@ -636,19 +664,32 @@ class IngestionPipeline:
                         if save_success:
                             logger.info(f"Document embedding saved successfully via API for document_id={doc_id}")
                         else:
-                            logger.warning(f"Failed to save document embedding via API for document_id={doc_id}")
+                            # Save was attempted but failed - track this as an error
+                            error_msg = f"Failed to save document embedding via API for document_id={doc_id}"
+                            logger.warning(error_msg)
+                            state.embedding_save_error = error_msg
                     else:
-                        logger.warning(f"Embedding vector dimension mismatch: expected 768, got {len(embedding_vector) if embedding_vector else 0}")
+                        # Precondition check failed - dimension mismatch
+                        # Don't set embedding_save_error as no save was attempted
+                        logger.warning(f"Embedding vector dimension mismatch: expected 768, got {len(embedding_vector) if embedding_vector else 0} - skipping save")
                 else:
-                    logger.warning(f"Invalid document_id for embedding save: {state.document_id}")
+                    # Precondition check failed - invalid document_id
+                    # Don't set embedding_save_error as no save was attempted
+                    logger.warning(f"Invalid document_id for embedding save: {state.document_id} - skipping save")
             except Exception as e:
-                logger.error(f"Error saving document embedding via API: {e}", exc_info=True)
-                # Don't fail the pipeline if embedding save fails
+                # Exception during save attempt - track as error
+                # This exception occurred during the save attempt, so it's a real failure
+                error_msg = f"Error saving document embedding via API: {str(e)}"
+                logger.error(error_msg, exc_info=True)
+                state.embedding_save_error = error_msg
+                # Don't fail the pipeline if embedding save fails, but track the error
         else:
+            # Save wasn't attempted due to missing preconditions - don't set embedding_save_error
+            # These are expected conditions, not errors
             if not state.document_id:
-                logger.warning("Cannot save embedding: document_id not available")
+                logger.info("Skipping embedding save: document_id not available (this is expected for failed page processing)")
             elif not state.embedding_result or not state.embedding_result.is_successful:
-                logger.warning("Cannot save embedding: embedding generation failed or not successful")
+                logger.info("Skipping embedding save: embedding generation failed or not successful (this is expected when embedding generation fails)")
         
         # Step 4: Persistence
         if not skip_persist:
@@ -696,25 +737,27 @@ async def run_ingestion_pipeline(
     return await _default_pipeline.run(image_url, owner_id, document_id, file_type=file_type)
 
 
-async def run_batch_ingestion_pipeline(
+async def run_unified_ingestion_pipeline(
     file_urls: List[str],
     owner_id: int,
-    document_id: Optional[int] = None
+    document_id: Optional[int] = None,
+    file_type: Optional[str] = None
 ) -> Dict[str, Any]:
     """
-    Batch ingestion pipeline for processing multiple files (PDFs, images, or mixed).
+    Unified ingestion pipeline for processing files (single or multiple PDFs, images, or mixed).
     
-    This function:
-    1. Processes multiple files (PDFs are split into pages, images are treated as single pages)
+    This function handles both single file and batch processing:
+    1. Processes files (PDFs are split into pages, images are treated as single pages)
     2. Assigns page numbers sequentially across all files
     3. Creates a document on the first page, uses the same document_id for subsequent pages
     4. Processes all pages in parallel (OCR + Cleaning + Upload)
     5. Runs Recommendation and Embedding on combined text from all pages
     
-    :param file_urls: List of file URLs to process (images or PDFs)
+    :param file_urls: List of file URLs to process (images or PDFs). Can be single file [url] or multiple files [url1, url2, ...]
     :param owner_id: ID of the user who owns the document
     :param document_id: Optional existing document ID
-    :return: Dictionary containing batch processing results
+    :param file_type: Optional file type override ("image" or "pdf"). Only used for single file uploads to override auto-detection.
+    :return: Dictionary containing processing results with total_pages, successful_pages, failed_pages, page_results
     """
     from app.modules.ocr import detect_file_type
     from app.modules.pdf_processor import convert_pdf_to_images
@@ -723,7 +766,7 @@ async def run_batch_ingestion_pipeline(
     import os
     from PIL import Image
     
-    logger.info(f"Starting batch ingestion for {len(file_urls)} files, owner_id={owner_id}, document_id={document_id}")
+    logger.info(f"Starting unified ingestion for {len(file_urls)} files, owner_id={owner_id}, document_id={document_id}")
     
     pipeline = _default_pipeline
     page_tasks = []  # List of (page_number, file_path, file_type) tuples
@@ -732,11 +775,20 @@ async def run_batch_ingestion_pipeline(
     
     try:
         # Step 1: Process all files and split PDFs into pages
-        for file_url in file_urls:
-            file_type = detect_file_type(file_url)
-            logger.info(f"Processing file: {file_url} (type: {file_type})")
+        for idx, file_url in enumerate(file_urls):
+            # Use provided file_type for single file uploads, otherwise auto-detect
+            if len(file_urls) == 1 and file_type:
+                # Single file with explicit file_type override
+                detected_type = file_type
+                logger.info(f"Processing file: {file_url} (type: {detected_type} - user specified)")
+            else:
+                # Auto-detect file type (for multiple files or when file_type not provided)
+                detected_type = detect_file_type(file_url)
+                logger.info(f"Processing file: {file_url} (type: {detected_type} - auto-detected)")
             
-            if file_type == "pdf":
+            file_type_for_task = detected_type
+            
+            if detected_type == "pdf":
                 # Split PDF into pages
                 try:
                     pdf_result = await convert_pdf_to_images(file_url, dpi=300)
@@ -803,7 +855,8 @@ async def run_batch_ingestion_pipeline(
                     "status": "failed",
                     "error": error_msg,
                     "ocr_text": None,
-                    "file_url": None
+                    "file_url": None,
+                    "page_id": None
                 }
             
             if not file_path:
@@ -812,7 +865,8 @@ async def run_batch_ingestion_pipeline(
                     "status": "failed",
                     "error": "File path is None",
                     "ocr_text": None,
-                    "file_url": None
+                    "file_url": None,
+                    "page_id": None
                 }
             
             try:
@@ -831,7 +885,9 @@ async def run_batch_ingestion_pipeline(
                         "status": "failed",
                         "error": state.error or "OCR failed",
                         "ocr_text": None,
-                        "file_url": None
+                        "file_url": None,
+                        "document_id": None,
+                        "page_id": None
                     }
                 
                 # Step 1B: Vision Enhancement (optional)
@@ -854,7 +910,8 @@ async def run_batch_ingestion_pipeline(
                     "error": state.file_upload_error if not upload_success else None,
                     "ocr_text": cleaned_text,
                     "file_url": state.file_url,
-                    "document_id": state.document_id  # Return document_id for first page
+                    "document_id": state.document_id,  # Return document_id for first page
+                    "page_id": state.page_id  # Return page_id from upload
                 }
                 
             except Exception as e:
@@ -865,7 +922,8 @@ async def run_batch_ingestion_pipeline(
                     "error": str(e),
                     "ocr_text": None,
                     "file_url": None,
-                    "document_id": None
+                    "document_id": None,
+                    "page_id": None
                 }
         
         # Step 2A: Process first page synchronously to establish document_id
@@ -912,7 +970,8 @@ async def run_batch_ingestion_pipeline(
                         "error": str(result),
                         "ocr_text": None,
                         "file_url": None,
-                        "document_id": None
+                        "document_id": None,
+                        "page_id": None
                     })
                 else:
                     page_results.append(result)
@@ -958,7 +1017,11 @@ async def run_batch_ingestion_pipeline(
         
         # Step 3C: Save embedding to DataStorageService via API
         # This should be done after pages are processed (document_id is available)
+        # Only track embedding_save_error when a save operation is actually attempted and fails
+        # Do not set error when save wasn't attempted due to missing preconditions
+        embedding_save_error = None
         if final_document_id and embedding_result and isinstance(embedding_result, EmbeddingResult) and embedding_result.is_successful:
+            # All preconditions met - attempt to save embedding
             try:
                 # Convert document_id to int if needed
                 doc_id = final_document_id
@@ -966,12 +1029,15 @@ async def run_batch_ingestion_pipeline(
                     try:
                         doc_id = int(doc_id)
                     except (ValueError, TypeError):
-                        logger.warning(f"Could not convert document_id '{doc_id}' to int for embedding save")
+                        # Precondition check failed - cannot convert document_id
+                        # Don't set embedding_save_error as no save was attempted
+                        logger.warning(f"Could not convert document_id '{doc_id}' to int for embedding save - skipping save")
                         doc_id = None
                 
                 if doc_id and isinstance(doc_id, int):
                     embedding_vector = embedding_result.vector
                     if embedding_vector and len(embedding_vector) == 768:
+                        # Actually attempt to save - this is where we track failures
                         save_success = await pipeline.pipeline_storage.save_document_embedding(
                             document_id=doc_id,
                             embedding=embedding_vector
@@ -979,19 +1045,32 @@ async def run_batch_ingestion_pipeline(
                         if save_success:
                             logger.info(f"Document embedding saved successfully via API for document_id={doc_id}")
                         else:
-                            logger.warning(f"Failed to save document embedding via API for document_id={doc_id}")
+                            # Save was attempted but failed - track this as an error
+                            error_msg = f"Failed to save document embedding via API for document_id={doc_id}"
+                            logger.warning(error_msg)
+                            embedding_save_error = error_msg
                     else:
-                        logger.warning(f"Embedding vector dimension mismatch: expected 768, got {len(embedding_vector) if embedding_vector else 0}")
+                        # Precondition check failed - dimension mismatch
+                        # Don't set embedding_save_error as no save was attempted
+                        logger.warning(f"Embedding vector dimension mismatch: expected 768, got {len(embedding_vector) if embedding_vector else 0} - skipping save")
                 else:
-                    logger.warning(f"Invalid document_id for embedding save: {final_document_id}")
+                    # Precondition check failed - invalid document_id
+                    # Don't set embedding_save_error as no save was attempted
+                    logger.warning(f"Invalid document_id for embedding save: {final_document_id} - skipping save")
             except Exception as e:
-                logger.error(f"Error saving document embedding via API: {e}", exc_info=True)
-                # Don't fail the pipeline if embedding save fails
+                # Exception during save attempt - track as error
+                # This exception occurred during the save attempt, so it's a real failure
+                error_msg = f"Error saving document embedding via API: {str(e)}"
+                logger.error(error_msg, exc_info=True)
+                embedding_save_error = error_msg
+                # Don't fail the pipeline if embedding save fails, but track the error
         else:
+            # Save wasn't attempted due to missing preconditions - don't set embedding_save_error
+            # These are expected conditions, not errors
             if not final_document_id:
-                logger.warning("Cannot save embedding: document_id not available")
+                logger.info("Skipping embedding save: document_id not available (this is expected for failed page processing)")
             elif not embedding_result or not (isinstance(embedding_result, EmbeddingResult) and embedding_result.is_successful):
-                logger.warning("Cannot save embedding: embedding generation failed or not successful")
+                logger.info("Skipping embedding save: embedding generation failed or not successful (this is expected when embedding generation fails)")
         
         # Build response
         # Convert document_id to int if it's a string (from API response)
@@ -1009,14 +1088,24 @@ async def run_batch_ingestion_pipeline(
                 logger.warning(f"Unexpected document_id type: {type(final_document_id)}")
                 document_id_int = None
         
+        # Determine status: consider both page processing and embedding save
+        base_status = "success" if failed_pages == 0 else ("partial_success" if successful_pages > 0 else "failed")
+        # If embedding save failed, downgrade status (success -> partial_success, partial_success stays partial_success)
+        if embedding_save_error and base_status == "success":
+            base_status = "partial_success"
+        
         response = {
-            "status": "success" if failed_pages == 0 else ("partial_success" if successful_pages > 0 else "failed"),
+            "status": base_status,
             "document_id": document_id_int,
             "total_pages": total_pages,
             "successful_pages": successful_pages,
             "failed_pages": failed_pages,
             "page_results": processed_results
         }
+        
+        # Add embedding save error if present
+        if embedding_save_error:
+            response["embedding_save_error"] = embedding_save_error
         
         # Add recommendation data if available
         if recommendation_result and recommendation_result.get("status") == "llm_success":
