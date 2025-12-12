@@ -17,12 +17,16 @@ CREATE TABLE user (
 
 CREATE TABLE document_category (
     id              INT AUTO_INCREMENT PRIMARY KEY,
-    code            VARCHAR(50) NOT NULL UNIQUE,   -- e.g. "TAX", "VISA", "MED", "INS"
+    user_id         INT NOT NULL,                  -- Owner of this category
+    code            VARCHAR(50) NOT NULL,           -- e.g. "TAX", "VISA", "MED", "INS"
     name            VARCHAR(100) NOT NULL,         -- display name, e.g. "Tax Documents", "Immigration Documents"
     description     TEXT,
     classification  TEXT,                      -- e.g. virtual/physical (placeholder)
     created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+    updated_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES user(id) ON DELETE CASCADE,
+    UNIQUE KEY (user_id, code),                     -- Unique code per user
+    INDEX idx_user_id (user_id)
 );
 
 -- ============================================================
@@ -31,9 +35,14 @@ CREATE TABLE document_category (
 
 CREATE TABLE storage_location (
     id              INT AUTO_INCREMENT PRIMARY KEY,
+    user_id         INT NOT NULL,                  -- Owner of this location
     name            VARCHAR(100) NOT NULL,         -- e.g. "Bedroom desk, left drawer #2"
     description     TEXT,
-    photo_url       TEXT
+    photo_url       TEXT,
+    created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES user(id) ON DELETE CASCADE,
+    INDEX idx_user_id (user_id)
 );
 
 -- ============================================================

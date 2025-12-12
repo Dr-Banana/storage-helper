@@ -8,8 +8,16 @@ from typing import List
 from app.core.database import get_db
 from app.services.user_service import UserService
 from app.schemas.user import UserCreate, UserUpdate, UserResponse, UserListResponse
+from app.schemas.category import CategoryCreate
+from app.schemas.location import LocationCreate
+from pydantic import BaseModel
 
 router = APIRouter(prefix="/users", tags=["users"])
+
+
+class EmptyResponse(BaseModel):
+    """Empty response model"""
+    pass
 
 
 @router.post(
@@ -225,16 +233,11 @@ def get_user_categories(user_id: int, db: Session = Depends(get_db)):
                 detail=f"User with ID {user_id} not found"
             )
         
-        # Get all unique categories for the user's documents
-        from app.models.document import Document
+        # Get all categories for the user
         from app.models.document_category import DocumentCategory
         
         categories = db.query(DocumentCategory).filter(
-            DocumentCategory.id.in_(
-                db.query(Document.category_id).filter(
-                    Document.owner_id == user_id
-                ).distinct()
-            )
+            DocumentCategory.user_id == user_id
         ).all()
         
         return {
@@ -277,17 +280,11 @@ def get_user_locations(user_id: int, db: Session = Depends(get_db)):
                 detail=f"User with ID {user_id} not found"
             )
         
-        # Get all unique storage locations for the user's documents
-        from app.models.document import Document
+        # Get all storage locations for the user
         from app.models.storage_location import StorageLocation
         
         locations = db.query(StorageLocation).filter(
-            StorageLocation.id.in_(
-                db.query(Document.current_location_id).filter(
-                    Document.owner_id == user_id,
-                    Document.current_location_id.isnot(None)
-                ).distinct()
-            )
+            StorageLocation.user_id == user_id
         ).all()
         
         return {
@@ -304,4 +301,123 @@ def get_user_locations(user_id: int, db: Session = Depends(get_db)):
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to retrieve user locations: {str(e)}"
+        )
+
+
+@router.post(
+    "/{user_id}/categories",
+    response_model=EmptyResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Create a new category for a user",
+    description="Create a new document category for a specific user"
+)
+def create_user_category(
+    user_id: int,
+    category_data: CategoryCreate,
+    db: Session = Depends(get_db)
+) -> dict:
+    """
+    Create a new category for a specific user
+    
+    - **user_id**: The user's ID
+    - **category_data**: Category information (code, name, description, classification)
+    
+    Returns nothing on success, error message on failure
+    """
+    try:
+        # Verify user exists
+        user = UserService.get_user_by_id(db, user_id)
+        if not user:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"User with ID {user_id} not found"
+            )
+        
+        from app.models.document_category import DocumentCategory
+        
+        # Check if category with this code already exists for this user
+        existing_category = db.query(DocumentCategory).filter(
+            DocumentCategory.user_id == user_id,
+            DocumentCategory.code == category_data.code
+        ).first()
+        
+        if existing_category:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Category with code '{category_data.code}' already exists for user {user_id}"
+            )
+        
+        # Create new category
+        new_category = DocumentCategory(
+            user_id=user_id,
+            code=category_data.code,
+            name=category_data.name,
+            description=category_data.description,
+            classification=category_data.classification
+        )
+        db.add(new_category)
+        db.commit()
+        
+        return {}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to create user category: {str(e)}"
+        )
+
+
+@router.post(
+    "/{user_id}/locations",
+    response_model=EmptyResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Create a new location for a user",
+    description="Create a new storage location for a specific user"
+)
+def create_user_location(
+    user_id: int,
+    location_data: LocationCreate,
+    db: Session = Depends(get_db)
+) -> dict:
+    """
+    Create a new storage location for a specific user
+    
+    - **user_id**: The user's ID
+    - **location_data**: Location information (name, description, photo_url)
+    
+    Returns nothing on success, error message on failure
+    """
+    try:
+        # Verify user exists
+        user = UserService.get_user_by_id(db, user_id)
+        if not user:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"User with ID {user_id} not found"
+            )
+        
+        from app.models.storage_location import StorageLocation
+        
+        # Create new location
+        new_location = StorageLocation(
+            user_id=user_id,
+            name=location_data.name,
+            description=location_data.description,
+            photo_url=location_data.photo_url
+        )
+        db.add(new_location)
+        db.commit()
+        
+        return {}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to create user location: {str(e)}"
         )

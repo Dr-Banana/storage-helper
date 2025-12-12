@@ -2,7 +2,8 @@
 Database model for StorageLocation
 """
 from datetime import datetime
-from sqlalchemy import Column, Integer, String, Text
+from sqlalchemy import Column, Integer, String, Text, DateTime, func, ForeignKey
+from sqlalchemy.orm import relationship
 
 from app.core.database import Base
 
@@ -12,9 +13,12 @@ class StorageLocation(Base):
     __tablename__ = "storage_location"
 
     id = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey("user.id", ondelete="CASCADE"), nullable=False, index=True)
     name = Column(String(100), nullable=False, index=True)  # e.g. "Bedroom desk, left drawer #2"
     description = Column(Text, nullable=True)
     photo_url = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=func.now(), nullable=False)
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now(), nullable=False)
 
     def __repr__(self):
-        return f"<StorageLocation(id={self.id}, name='{self.name}')>"
+        return f"<StorageLocation(id={self.id}, user_id={self.user_id}, name='{self.name}')>"

@@ -68,10 +68,14 @@ class DocumentService:
             
             # Step 2: Get or create category
             doc_category = db.query(DocumentCategory)\
-                .filter(DocumentCategory.code == category_code).first()
+                .filter(
+                    DocumentCategory.code == category_code,
+                    DocumentCategory.user_id == owner_id
+                ).first()
             if not doc_category:
                 # Auto-create new category
                 doc_category = DocumentCategory(
+                    user_id=owner_id,
                     code=category_code,
                     name=category_code.title(),
                     description=f"Auto-created from document upload"
