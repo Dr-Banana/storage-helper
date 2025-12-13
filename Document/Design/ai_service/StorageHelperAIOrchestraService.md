@@ -64,7 +64,7 @@ flowchart TD
     
     Upload --> Parallel["STEP 3: PARALLEL EXECUTION<br/>asyncio.gather - concurrent"]
     
-    Parallel --> Recommendation["STEP 3A: RECOMMENDATION<br/>app/modules/recommendation.py<br/>─────────────────<br/>• Gemini 2.5 Flash LLM<br/>• Category classification<br/>• Location suggestion<br/>• Tags extraction<br/>• Structured JSON output<br/>• For batch: uses combined<br/>  text from all pages<br/>─────────────────<br/>OUTPUT: recommendation_result<br/>  - category_id: int<br/>  - location_id: int<br/>  - recommendation_reason<br/>  - suggested_tags: array<br/>  - Note: category_code removed<br/>    use category_id only"]
+    Parallel --> Recommendation["STEP 3A: RECOMMENDATION<br/>app/modules/recommendation.py<br/>─────────────────<br/>• Gemini 2.5 Flash LLM<br/>• Category classification<br/>• Location suggestion<br/>• Tags extraction<br/>• Structured JSON output<br/>• For batch: uses combined<br/>  text from all pages<br/>• Fetches user data via API:<br/>  - GET /api/users/{user_id}/categories<br/>  - GET /api/users/{user_id}/locations<br/>• Creates new categories via API:<br/>  - POST /api/users/{user_id}/categories<br/>─────────────────<br/>OUTPUT: recommendation_result<br/>  - category_id: int<br/>  - location_id: int<br/>  - recommendation_reason<br/>  - suggested_tags: array<br/>  - Note: category_code removed<br/>    use category_id only"]
     
     Parallel --> Embedding["STEP 3B: EMBEDDING<br/>app/modules/embedding.py<br/>─────────────────<br/>• Text → Vector conversion<br/>• Gemini API embedContent<br/>  text-embedding-004<br/>• Task type: RETRIEVAL_DOCUMENT<br/>• Retry mechanism: max 3 attempts<br/>• Exponential backoff<br/>• Returns EmbeddingResult object<br/>• For semantic search<br/>─────────────────<br/>OUTPUT: EmbeddingResult<br/>  - vector: List[float]<br/>  - dimension: int<br/>  - status: str<br/>  - model_name, task_type<br/>  - error (if failed)"]
     
@@ -109,6 +109,11 @@ flowchart TD
    - Upload task properly cancelled if OCR fails to prevent resource leaks
 7. **Storage Architecture**: 
    - **Local file storage removed**: No longer saves to tmp/documents/, tmp/embeddings/, tmp/images/, tmp/pdfs/, or index.json
+   - **🆕 API-based category and location management**: Categories and locations now fetched and saved via API instead of local JSON files
+     - **Categories**: `GET /api/users/{user_id}/categories` (fetch), `POST /api/users/{user_id}/categories` (create)
+     - **Locations**: `GET /api/users/{user_id}/locations` (fetch)
+     - **User isolation**: Each user has independent categories and locations stored in database
+     - **No local files**: Removed `tmp/Storage/document_categories.json` and `tmp/Storage/locations.json` dependencies
    - **File upload integration**: Files uploaded to DataStorageService via HTTP API after cleaning step
    - **Upload API Format**: `POST /api/v1/documents/upload-and-process`
      - Parameters: `file`, `owner_id`, `page_number`, `ocr_text` (cleaned_text), `document_id` (optional)
@@ -143,7 +148,7 @@ flowchart TD
 | **PDF Processor** | `app/modules/pdf_processor.py` | PDF loading, text extraction, PDF-to-image conversion, multi-page handling |
 | **Vision Module** | `app/modules/vision.py` | 🆕 Multimodal understanding using Gemini Vision API - sees photos, logos, charts beyond OCR |
 | **Cleaning Module** | `app/modules/cleaning.py` | Text normalization, noise removal, quality filtering |
-| **Recommendation Module** | `app/modules/recommendation.py` | LLM-based category and location suggestion using Gemini API |
+| **Recommendation Module** | `app/modules/recommendation.py` | LLM-based category and location suggestion using Gemini API. Fetches user categories and locations via API (`GET /api/users/{user_id}/categories`, `GET /api/users/{user_id}/locations`). Creates new categories via API (`POST /api/users/{user_id}/categories`) when needed. |
 | **Embedding Module** | `app/modules/embedding.py` | Vector generation using Gemini API embedContent (text-embedding-004) with retry mechanism |
 | **Pipeline Storage** | `app/storage/pipeline_storage.py` | Unified storage handler for all pipeline output results (API-based, no local files). Handles file uploads to DataStorageService via HTTP API. |
 | **Output Schema** | `app/storage/output_schema.py` | Unified management of pipeline output structure and fields |
@@ -433,6 +438,7 @@ Response: {
   - ✅ Uses Gemini 2.5 Flash for intelligent category and location suggestions
   - ✅ Structured output with category codes, location IDs, and reasoning
   - ✅ Support for new category creation
+  - ✅ **🆕 API-based data management**: Categories and locations fetched/saved via API (`/api/users/{user_id}/categories`, `/api/users/{user_id}/locations`) instead of local JSON files
 - [ ] **AI-11**: Implement `Feedback Handler`: API to record user feedback signals
   - ⚠️ API endpoint exists but handler not fully implemented
   - ⚠️ Current implementation in `app/pipelines/feedback.py` raises NotImplementedError
@@ -561,11 +567,7 @@ StorageHelperAIOrchestraService/
 │       ├── pipeline_storage.py # Unified storage handler for pipeline results (API-based)
 │       └── output_schema.py    # Unified output structure management
 ├── tmp/                        # Runtime temporary storage (deprecated)
-│   ├── Storage/                # Configuration data (still used by AI orchestration)
-│   │   ├── document_categories.json
-│   │   ├── locations.json
-│   │   └── README.md
-│   └── README.md
+│   └── README.md               # Note: Categories and locations now managed via API
 ├── main.py                     # FastAPI application entry point
 ├── requirements.txt            # Python dependencies
 └── README.md                   # Service documentation
@@ -790,6 +792,30 @@ StorageHelperAIOrchestraService/
       - Search API endpoint `POST /api/documents/search` should be implemented in StorageHelperDataStorageService
       - Vector similarity search should use MySQL VECTOR type for efficient similarity calculation
       - Result assembly should join with document and location tables in DataStorageService
+*   **Category and Location API Migration** (December 2025):
+    - **Architecture Change**: Migrated from local JSON file storage to API-based management
+    - **Categories**: 
+      - **Fetch**: `GET /api/users/{user_id}/categories` - Retrieves all categories for a user
+      - **Create**: `POST /api/users/{user_id}/categories` - Creates new category for a user
+      - **User isolation**: Each user has independent categories (unique constraint: `user_id + code`)
+      - **Removed**: `tmp/Storage/document_categories.json` file and all local file operations
+    - **Locations**: 
+      - **Fetch**: `GET /api/users/{user_id}/locations` - Retrieves all locations for a user
+      - **User isolation**: Each user has independent locations stored in database
+      - **Removed**: `tmp/Storage/locations.json` file and all local file operations
+    - **Implementation Details**:
+      - Updated `RecommendationGenerator.load_document_categories()` to fetch from API with `user_id` parameter
+      - Updated `RecommendationGenerator.load_locations()` to fetch from API with `user_id` parameter
+      - Updated `RecommendationGenerator.add_new_category()` to save via API POST
+      - Updated `RecommendationGenerator.ensure_category_exists()` to use API-based operations
+      - Optimized API calls: Reduced redundant calls by caching categories during recommendation generation
+      - All methods now require `user_id` parameter for proper user isolation
+    - **Benefits**:
+      - **User isolation**: Each user's categories and locations are properly isolated in database
+      - **No file dependencies**: Removed dependency on local JSON files
+      - **Real-time updates**: Categories and locations immediately available after creation
+      - **Database consistency**: All data stored in centralized database with proper foreign keys
+      - **Scalability**: Supports multiple users without file conflicts
 *   **Pending Work**: 
     - Feedback handler implementation (endpoint exists, storage logic removed, needs API integration)
     - Comprehensive test suite (unit and integration tests)

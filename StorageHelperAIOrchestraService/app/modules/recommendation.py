@@ -30,9 +30,8 @@ class RecommendationGenerator:
     Recommendation generator class that uses Gemini API to generate structured storage recommendations.
     """
 
-    # Default storage paths
+    # Default storage paths (no longer used for categories/locations, kept for potential future use)
     STORAGE_DIR = Path(__file__).parent.parent.parent / "tmp" / "Storage"
-    LOCATIONS_FILE = STORAGE_DIR / "locations.json"
 
     # Define the mandatory structured output schema for the recommendation
     RECOMMENDATION_SCHEMA = {
@@ -140,17 +139,43 @@ class RecommendationGenerator:
             logger.error(f"Error loading document categories from API: {e}")
             return []
 
-    def load_locations(self) -> List[Dict[str, Any]]:
-        """Load storage locations from JSON file."""
+    def load_locations(self, user_id: int) -> List[Dict[str, Any]]:
+        """Load storage locations from API for a specific user."""
         try:
-            if not self.LOCATIONS_FILE.exists():
-                logger.warning(f"Locations file not found: {self.LOCATIONS_FILE}")
+            # Extract base URL from STORAGE_SERVICE_URL
+            # e.g., "http://localhost:8000" from "http://localhost:8000/internal"
+            base_url = settings.STORAGE_SERVICE_URL.replace("/internal", "").rstrip("/")
+            
+            # Validate base URL
+            if not base_url or not base_url.startswith(("http://", "https://")):
+                logger.error(f"Invalid STORAGE_SERVICE_URL configuration: {settings.STORAGE_SERVICE_URL}")
                 return []
-            with open(self.LOCATIONS_FILE, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-                return data.get("locations", [])
+            
+            # Call API to get locations
+            url = f"{base_url}/api/users/{user_id}/locations"
+            logger.debug(f"Loading storage locations from API: {url}")
+            
+            # Use sync httpx client for this sync method
+            with httpx.Client(timeout=10.0) as client:
+                response = client.get(url)
+                response.raise_for_status()
+                result = response.json()
+                locations = result.get("locations", [])
+                logger.info(f"Loaded {len(locations)} storage locations for user {user_id}")
+                return locations
+                
+        except httpx.ConnectError as e:
+            logger.error(f"Cannot connect to DataStorageService at {base_url}. Service may be down or URL incorrect.")
+            logger.debug(f"Full error: {e}")
+            return []
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 404:
+                logger.warning(f"User {user_id} not found or has no locations yet")
+            else:
+                logger.error(f"HTTP {e.response.status_code}: {e.response.text[:200]}")
+            return []
         except Exception as e:
-            logger.error(f"Error loading locations: {e}")
+            logger.error(f"Error loading storage locations from API: {e}")
             return []
 
     def load_location_mappings(self) -> List[Dict[str, Any]]:
@@ -487,10 +512,10 @@ class RecommendationGenerator:
                     for loc_id, metadata in existing_locations.items()
                 ]
         else:
-            # Load from file
-            locations = self.load_locations()
+            # Load from API
+            locations = self.load_locations(owner_id)
             if not locations:
-                logger.warning("No locations found. Location recommendation will not be available.")
+                logger.warning(f"No locations found for user {owner_id}. Location recommendation will not be available.")
 
         # Format locations for LLM context
         location_context = ""

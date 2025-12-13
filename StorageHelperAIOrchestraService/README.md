@@ -200,10 +200,9 @@ curl -X POST http://localhost:8000/api/ingestion \
 
 ### Storage Configuration
 
-Locations are managed in:
-- `tmp/Storage/locations.json`
-
-Document categories are now managed via API and stored in the database (see `/api/users/{user_id}/categories`).
+Locations and document categories are now managed via API and stored in the database:
+- Locations: `/api/users/{user_id}/locations`
+- Categories: `/api/users/{user_id}/categories`
 
 ## 📊 Architecture
 
