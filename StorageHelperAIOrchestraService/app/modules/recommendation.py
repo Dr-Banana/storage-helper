@@ -32,7 +32,6 @@ class RecommendationGenerator:
 
     # Default storage paths
     STORAGE_DIR = Path(__file__).parent.parent.parent / "tmp" / "Storage"
-    DOCUMENT_CATEGORIES_FILE = STORAGE_DIR / "document_categories.json"
     LOCATIONS_FILE = STORAGE_DIR / "locations.json"
 
     # Define the mandatory structured output schema for the recommendation
@@ -102,17 +101,43 @@ class RecommendationGenerator:
         self.api_key = api_key or settings.GEMINI_LLM_API_KEY
         self.api_url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model_name}:generateContent?key={self.api_key}"
 
-    def load_document_categories(self) -> List[Dict[str, Any]]:
-        """Load document categories from JSON file."""
+    def load_document_categories(self, user_id: int) -> List[Dict[str, Any]]:
+        """Load document categories from API for a specific user."""
         try:
-            if not self.DOCUMENT_CATEGORIES_FILE.exists():
-                logger.warning(f"Document categories file not found: {self.DOCUMENT_CATEGORIES_FILE}")
+            # Extract base URL from STORAGE_SERVICE_URL
+            # e.g., "http://localhost:8000" from "http://localhost:8000/internal"
+            base_url = settings.STORAGE_SERVICE_URL.replace("/internal", "").rstrip("/")
+            
+            # Validate base URL
+            if not base_url or not base_url.startswith(("http://", "https://")):
+                logger.error(f"Invalid STORAGE_SERVICE_URL configuration: {settings.STORAGE_SERVICE_URL}")
                 return []
-            with open(self.DOCUMENT_CATEGORIES_FILE, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-                return data.get("document_categories", [])
+            
+            # Call API to get categories
+            url = f"{base_url}/api/users/{user_id}/categories"
+            logger.debug(f"Loading document categories from API: {url}")
+            
+            # Use sync httpx client for this sync method
+            with httpx.Client(timeout=10.0) as client:
+                response = client.get(url)
+                response.raise_for_status()
+                result = response.json()
+                categories = result.get("categories", [])
+                logger.info(f"Loaded {len(categories)} document categories for user {user_id}")
+                return categories
+                
+        except httpx.ConnectError as e:
+            logger.error(f"Cannot connect to DataStorageService at {base_url}. Service may be down or URL incorrect.")
+            logger.debug(f"Full error: {e}")
+            return []
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 404:
+                logger.warning(f"User {user_id} not found or has no categories yet")
+            else:
+                logger.error(f"HTTP {e.response.status_code}: {e.response.text[:200]}")
+            return []
         except Exception as e:
-            logger.error(f"Error loading document categories: {e}")
+            logger.error(f"Error loading document categories from API: {e}")
             return []
 
     def load_locations(self) -> List[Dict[str, Any]]:
@@ -226,29 +251,78 @@ class RecommendationGenerator:
             return best_location.get("id")
         return locations[0].get("id")
 
-    def save_document_categories(self, categories: List[Dict[str, Any]]) -> bool:
-        """Save document categories to JSON file."""
+    def save_category_to_api(self, user_id: int, code: str, name: str, description: str, classification: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        """Save a new category to API for a specific user."""
         try:
-            self.DOCUMENT_CATEGORIES_FILE.parent.mkdir(parents=True, exist_ok=True)
-            data = {"document_categories": categories}
-            with open(self.DOCUMENT_CATEGORIES_FILE, 'w', encoding='utf-8') as f:
-                json.dump(data, f, indent=2, ensure_ascii=False)
-            logger.info(f"Saved document categories to {self.DOCUMENT_CATEGORIES_FILE}")
-            return True
+            # Extract base URL from STORAGE_SERVICE_URL
+            base_url = settings.STORAGE_SERVICE_URL.replace("/internal", "").rstrip("/")
+            
+            # Validate base URL
+            if not base_url or not base_url.startswith(("http://", "https://")):
+                logger.error(f"Invalid STORAGE_SERVICE_URL configuration: {settings.STORAGE_SERVICE_URL}")
+                return None
+            
+            # Call API to create category
+            url = f"{base_url}/api/users/{user_id}/categories"
+            payload = {
+                "code": code,
+                "name": name,
+                "description": description,
+                "classification": classification
+            }
+            
+            logger.debug(f"Saving category to API: {url}, payload: {payload}")
+            
+            # Use sync httpx client for this sync method
+            with httpx.Client(timeout=10.0) as client:
+                response = client.post(url, json=payload)
+                response.raise_for_status()
+                logger.info(f"Successfully saved category '{code}' ({name}) for user {user_id}")
+                # API returns empty dict on success, but we return the payload as the category info
+                return {
+                    "code": code,
+                    "name": name,
+                    "description": description,
+                    "classification": classification
+                }
+                
+        except httpx.ConnectError as e:
+            logger.error(f"Cannot connect to DataStorageService at {base_url}. Service may be down or URL incorrect.")
+            logger.debug(f"Full error: {e}")
+            return None
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 400:
+                error_text = e.response.text[:200]
+                logger.warning(f"Category '{code}' may already exist for user {user_id}: {error_text}")
+                # Try to get existing category
+                categories = self.load_document_categories(user_id)
+                for cat in categories:
+                    if cat.get("code", "").upper() == code.upper():
+                        return cat
+            else:
+                logger.error(f"HTTP {e.response.status_code}: {e.response.text[:200]}")
+            return None
         except Exception as e:
-            logger.error(f"Error saving document categories: {e}")
-            return False
+            logger.error(f"Error saving category to API: {e}")
+            return None
 
-    def add_new_category(self, name: str, description: str, code: Optional[str] = None) -> Dict[str, Any]:
+    def add_new_category(self, user_id: int, name: str, description: str, code: Optional[str] = None, classification: Optional[str] = None, existing_categories: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
         """
-        Add a new category to document_categories.json.
+        Add a new category via API for a specific user.
 
+        :param user_id: User ID
         :param name: Category name
         :param description: Category description
         :param code: Category code (auto-generated if not provided)
-        :return: The new category dict with assigned ID
+        :param classification: Optional classification (e.g., virtual/physical)
+        :param existing_categories: Optional pre-loaded categories list to avoid redundant API calls
+        :return: The new category dict
         """
-        categories = self.load_document_categories()
+        # Use provided categories if available, otherwise load from API
+        if existing_categories is not None:
+            categories = existing_categories
+        else:
+            categories = self.load_document_categories(user_id)
 
         # Generate code if not provided (use first 3 uppercase letters of name)
         if not code or not is_allowed_category_type(code):
@@ -274,47 +348,62 @@ class RecommendationGenerator:
                     code = f"{original_code}{counter}"
                     counter += 1
 
-        # Get next ID
-        max_id = max((cat.get("id", 0) for cat in categories), default=0) if categories else 0
-        new_id = max_id + 1
-
-        # Create new category
-        now = datetime.now().isoformat() + "Z"
-        new_category = {
-            "id": new_id,
-            "code": code,
-            "name": name,
-            "description": description,
-            "created_at": now,
-            "updated_at": now
-        }
-
-        # Add to list
-        categories.append(new_category)
-
-        # Save
-        if self.save_document_categories(categories):
-            logger.info(f"Added new category: {code} ({name}) with ID {new_id}")
-            return new_category
+        # Save via API
+        new_category = self.save_category_to_api(user_id, code, name, description, classification)
+        if new_category:
+            # Reload to get the full category with ID from database
+            categories = self.load_document_categories(user_id)
+            for cat in categories:
+                if cat.get("code", "").upper() == code.upper():
+                    logger.info(f"Added new category: {code} ({name}) with ID {cat.get('id')}")
+                    return cat
+            
+            # If not found after reload, return what we have
+            logger.warning(f"Category saved but not found after reload. Returning basic info.")
+            return {
+                "code": code,
+                "name": name,
+                "description": description,
+                "classification": classification
+            }
         else:
-            raise Exception("Failed to save new category to file")
+            raise Exception(f"Failed to save new category '{code}' to API for user {user_id}")
 
-    def ensure_category_exists(self, code: str, name: str, description: str) -> Dict[str, Any]:
+    def ensure_category_exists(self, user_id: int, code: str, name: str, description: str, classification: Optional[str] = None, existing_categories: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
         """
-        Ensure a category with the given code exists in document_categories.json.
+        Ensure a category with the given code exists for a specific user via API.
         If it does not exist, create it using the provided metadata.
 
+        :param user_id: User ID
         :param code: Category code to ensure
         :param name: Category display name
         :param description: Category description text
+        :param classification: Optional classification (e.g., virtual/physical)
+        :param existing_categories: Optional pre-loaded categories list to avoid redundant API calls
         :return: Dictionary representing the ensured category
         """
-        categories = self.load_document_categories()
+        # Use provided categories if available, otherwise load from API
+        if existing_categories is not None:
+            categories = existing_categories
+        else:
+            categories = self.load_document_categories(user_id)
+        
         for category in categories:
             if category.get("code", "").upper() == code.upper():
                 return category
 
-        return self.add_new_category(name=name, description=description, code=code)
+        # Category doesn't exist, create it
+        new_category = self.add_new_category(user_id=user_id, name=name, description=description, code=code, classification=classification, existing_categories=categories)
+        
+        # add_new_category already reloads categories, so we can get it from there
+        # But we need to reload once more to ensure we have the latest
+        categories = self.load_document_categories(user_id)
+        for category in categories:
+            if category.get("code", "").upper() == code.upper():
+                return category
+        
+        # Fallback: return what we have
+        return new_category
 
     async def generate(
         self,
@@ -332,21 +421,22 @@ class RecommendationGenerator:
         :return: Dictionary containing the structured recommendation with category_id and category_code, or error info.
         """
 
-        # Load existing document categories
-        categories = self.load_document_categories()
+        # Load existing document categories (cache for reuse later)
+        categories = self.load_document_categories(owner_id)
         if not categories:
-            logger.warning("No document categories found. The system will create new categories as needed.")
+            logger.warning(f"No document categories found for user {owner_id}. The system will create new categories as needed.")
+
+        # Build existing_codes lookup for reuse
+        existing_codes = {cat.get("code", "").upper(): cat for cat in categories}
 
         # Format categories for LLM context
         categories_context = "\n--- EXISTING DOCUMENT CATEGORIES (现有文档分类) ---\n"
         categories_context += "You MUST select one of these EXACT category codes (case-sensitive):\n"
-        existing_codes = []
         for cat in categories:
             cat_id = cat.get("id")
             code = cat.get("code", "")
             name = cat.get("name", "")
             description = cat.get("description", "")
-            existing_codes.append(code.upper())
             categories_context += f"  '{code}' - {name}: {description}\n"
         categories_context += "---------------------------------\n"
 
@@ -467,8 +557,9 @@ class RecommendationGenerator:
 
                     parsed_json = json.loads(json_string)
 
-                    categories = self.load_document_categories()
-                    existing_codes = {cat.get("code", "").upper(): cat for cat in categories}
+                    # Reuse cached categories and existing_codes (no need to reload)
+                    # If a new category was created, we'll reload categories later if needed
+                    # existing_codes was already built above from the initial categories load
 
                     final_category_id = None
                     final_category_code = parsed_json.get("category_code", "").upper().strip()
@@ -492,8 +583,11 @@ class RecommendationGenerator:
                             new_description = suggestion.get("description",
                                                              f"Category for documents classified as {new_code}")
 
-                        new_category = self.ensure_category_exists(code=new_code, name=new_name,
-                                                                   description=new_description)
+                        new_category = self.ensure_category_exists(user_id=owner_id, code=new_code, name=new_name,
+                                                                   description=new_description, existing_categories=categories)
+                        # Reload categories after creating new one to update cache
+                        categories = self.load_document_categories(owner_id)
+                        existing_codes = {cat.get("code", "").upper(): cat for cat in categories}
                         final_category_code = new_category["code"]
                         final_category_id = new_category["id"]
                         logger.info(
@@ -510,8 +604,11 @@ class RecommendationGenerator:
                         new_name = suggestion.get("name", final_category_code)
                         new_description = suggestion.get("description",
                                                          f"Category for documents classified as {final_category_code}")
-                        new_category = self.ensure_category_exists(code=final_category_code, name=new_name,
-                                                                   description=new_description)
+                        new_category = self.ensure_category_exists(user_id=owner_id, code=final_category_code, name=new_name,
+                                                                   description=new_description, existing_categories=categories)
+                        # Reload categories after creating new one to update cache
+                        categories = self.load_document_categories(owner_id)
+                        existing_codes = {cat.get("code", "").upper(): cat for cat in categories}
                         final_category_code = new_category["code"]
                         final_category_id = new_category["id"]
                         is_new_category = True
