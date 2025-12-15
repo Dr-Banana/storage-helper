@@ -1,33 +1,25 @@
 # StorageHelperWebService
 
-前端 Web 服务和用户界面，用于 Home AI Paper Organizer 系统。
+家庭文件存储和管理助手的前端应用。
+
+## 特性
+
+- 🎨 **现代化设计** - 采用温暖的家庭风格配色方案
+- 📱 **响应式布局** - 完美支持手机端和电脑端
+- 🚀 **快速开发** - 基于 Vite + React + TypeScript
+- 🎯 **用户友好** - 直观的界面和流畅的交互体验
 
 ## 技术栈
 
-- **Framework**: Next.js 14+ (App Router)
-- **UI Library**: Shadcn/ui (Tailwind CSS)
-- **State Management**: Zustand
-- **Data Fetching**: TanStack Query (React Query)
-- **Form Handling**: React Hook Form
-- **Language**: TypeScript
+- **React 18** - UI 框架
+- **TypeScript** - 类型安全
+- **Vite** - 构建工具
+- **Tailwind CSS** - 样式框架
+- **React Router** - 路由管理
+- **Axios** - HTTP 客户端
+- **Lucide React** - 图标库
 
-## 功能特性
-
-### 已实现
-- ✅ 基于用户ID的登录系统（无需密码）
-- ✅ 用户验证（通过 DataStorage Service API）
-- ✅ Session 管理（Zustand + localStorage）
-- ✅ 受保护的路由（AuthGuard）
-- ✅ 基础 UI 组件（Button, Input, Card）
-- ✅ 仪表板页面（基础结构）
-
-### 开发中
-- 🔄 文档上传界面
-- 🔄 文档搜索界面
-- 🔄 文档管理界面
-- 🔄 位置管理界面
-
-## 快速开始
+## 开始使用
 
 ### 安装依赖
 
@@ -35,89 +27,13 @@
 npm install
 ```
 
-### 配置环境变量
-
-复制 `.env.example` 为 `.env.local` 并配置：
-
-```env
-NEXT_PUBLIC_AI_SERVICE_URL=http://localhost:8001
-NEXT_PUBLIC_DATA_STORAGE_SERVICE_URL=http://localhost:8000
-```
-
-### 运行开发服务器
+### 开发模式
 
 ```bash
 npm run dev
 ```
 
-访问 [http://localhost:3000](http://localhost:3000)
-
-## 项目结构
-
-```
-StorageHelperWebService/
-├── app/                    # Next.js App Router
-│   ├── (dashboard)/       # 受保护的路由组
-│   │   ├── layout.tsx     # Dashboard 布局
-│   │   └── dashboard/     # 仪表板页面
-│   ├── login/             # 登录页面
-│   ├── layout.tsx         # 根布局
-│   ├── page.tsx           # 首页（重定向到登录）
-│   └── globals.css        # 全局样式
-├── components/            # React 组件
-│   ├── ui/               # Shadcn/ui 基础组件
-│   ├── auth-guard.tsx    # 路由保护组件
-│   └── providers.tsx    # 全局 Providers
-├── lib/                  # 工具和配置
-│   ├── api/              # API 客户端
-│   │   ├── client.ts     # 基础 API 客户端
-│   │   └── auth.ts       # 认证相关 API
-│   ├── store/            # Zustand stores
-│   │   └── authStore.ts  # 认证状态管理
-│   └── utils.ts          # 工具函数
-└── types/                # TypeScript 类型定义
-```
-
-## API 集成
-
-### AI Orchestration Service
-- **Ingestion API**: `POST /api/ingestion`
-  - 用于文档上传和处理
-
-### DataStorage Service
-- **User Validation**: `GET /api/users/{user_id}`
-  - 用于验证用户是否存在
-- **User Documents**: `GET /api/users/{user_id}/documents`
-  - 用于获取用户的文档列表
-
-## 认证流程
-
-1. 用户在登录页面输入用户ID
-2. 前端调用 DataStorage Service 验证用户是否存在
-3. 如果用户存在，将用户ID存储到 Zustand store（持久化到 localStorage）
-4. 重定向到仪表板
-5. 受保护的路由通过 AuthGuard 组件检查认证状态
-
-## 开发说明
-
-### 添加新的 UI 组件
-
-使用 Shadcn/ui CLI 添加组件：
-
-```bash
-npx shadcn-ui@latest add [component-name]
-```
-
-### 添加新的 API 端点
-
-在 `lib/api/` 目录下创建新的 API 客户端文件，使用 TanStack Query hooks。
-
-### 状态管理
-
-- **服务器状态**（文档、位置等）：使用 TanStack Query
-- **客户端状态**（UI 状态、认证）：使用 Zustand
-
-## 构建和部署
+应用将在 `http://localhost:3000` 启动。
 
 ### 构建生产版本
 
@@ -125,12 +41,84 @@ npx shadcn-ui@latest add [component-name]
 npm run build
 ```
 
-### 启动生产服务器
+构建产物将输出到 `dist` 目录。
+
+### 预览生产构建
 
 ```bash
-npm start
+npm run preview
 ```
+
+## 环境配置
+
+创建 `.env.local` 文件（可选）：
+
+```env
+VITE_API_BASE_URL=http://localhost:8000/api
+```
+
+如果不设置，默认使用 `/api`（通过 Vite 代理到 `http://localhost:8000`）。
+
+## 项目结构
+
+```
+src/
+├── api/              # API 客户端和服务
+│   ├── client.ts    # Axios 配置
+│   └── services.ts  # API 服务函数
+├── components/      # 可复用组件
+│   └── Layout.tsx   # 主布局组件
+├── pages/           # 页面组件
+│   ├── HomePage.tsx
+│   ├── DocumentsPage.tsx
+│   ├── DocumentDetailPage.tsx
+│   ├── UploadPage.tsx
+│   ├── SearchPage.tsx
+│   ├── UsersPage.tsx
+│   └── SettingsPage.tsx
+├── App.tsx          # 应用入口和路由配置
+├── main.tsx         # React 入口
+└── index.css        # 全局样式
+```
+
+## 功能页面
+
+- **首页** (`/`) - 仪表盘和快速操作
+- **文档列表** (`/documents`) - 浏览所有文档
+- **文档详情** (`/documents/:id`) - 查看文档详细信息
+- **上传文档** (`/upload`) - 上传新文档
+- **搜索** (`/search`) - 智能搜索文档
+- **用户管理** (`/users`) - 管理用户
+- **设置** (`/settings`) - 应用设置
+
+## 配色方案
+
+采用温暖的家庭风格配色：
+
+- **主色**: 温暖的橙色 (`home-primary`)
+- **辅助色**: 柔和的蓝色 (`home-secondary`)
+- **背景**: 奶油色和米白色 (`home-background`)
+- **文字**: 深棕色 (`home-text`)
+- **成功**: 柔和的绿色 (`home-success`)
+- **警告**: 温暖的黄色 (`home-warning`)
+- **错误**: 柔和的红色 (`home-error`)
+
+## 开发说明
+
+### API 集成
+
+前端通过 `/api` 路径访问后端 API。在开发模式下，Vite 会自动代理请求到 `http://localhost:8000`。
+
+### 响应式设计
+
+- 移动端：侧边栏自动隐藏，通过菜单按钮打开
+- 平板端：适配中等屏幕尺寸
+- 桌面端：侧边栏固定显示，充分利用屏幕空间
+
+### 组件开发
+
+所有组件都使用 TypeScript 编写，确保类型安全。样式使用 Tailwind CSS 工具类，保持一致性。
 
 ## 许可证
 
-[待定]
+Part of the Home AI Paper Organizer project.
