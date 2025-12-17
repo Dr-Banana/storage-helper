@@ -21,12 +21,65 @@ router = APIRouter(prefix="/api/v1", tags=["public-api"])
 # ============================================================
 
 @router.post(
-    "/documents/upload-and-process",
+    "/documents/upload",
     response_model=dict,
     status_code=status.HTTP_201_CREATED,
-    summary="Upload document page with OCR result",
+    summary="Upload document page image to storage",
     description="""
-    Upload a document page with OCR text.
+    Upload a document page image to storage backend.
+    Returns image_url for later use in /documents/process endpoint.
+    
+    No database operations - purely file storage.
+    """
+)
+def upload_document_image(
+    file: UploadFile = File(..., description="Document page image file"),
+    owner_id: int = Form(..., description="Document owner user ID"),
+):
+    """
+    Upload document page image to storage.
+    
+    - **file**: Document page image file (required)
+    - **owner_id**: Document owner user ID (required)
+    
+    Returns image_url for use in /documents/process endpoint
+    """
+    try:
+        # Read file content
+        file_content = BytesIO(file.file.read())
+        
+        # Upload to storage and get image_url
+        image_url = DocumentService.upload_file_only(
+            file_content=file_content,
+            filename=file.filename,
+            owner_id=owner_id
+        )
+        
+        return {
+            "image_url": image_url,
+            "filename": file.filename
+        }
+        
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e)
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to upload document image: {str(e)}"
+        )
+
+
+@router.post(
+    "/documents/process",
+    response_model=dict,
+    status_code=status.HTTP_201_CREATED,
+    summary="Process and persist document page metadata",
+    description="""
+    Save document page metadata to database.
+    Requires image_url from /documents/upload endpoint.
     
     - If document_id is provided, adds page to existing document
     - If document_id is not provided, creates new document
@@ -34,44 +87,45 @@ router = APIRouter(prefix="/api/v1", tags=["public-api"])
     Returns document_id, page_id and status code
     """
 )
-def upload_and_process(
-    file: UploadFile = File(..., description="Document page image file"),
+def process_document_page(
+    image_url: str = Form(..., description="Image URL from /documents/upload endpoint"),
     owner_id: int = Form(..., description="Document owner user ID"),
     page_number: int = Form(..., description="Page number within document (1-indexed)"),
-    ocr_text: str = Form(..., description="OCR extracted text for this page"),
+    ocr_text: Optional[str] = Form(None, description="Optional: OCR extracted text for this page"),
     document_id: Optional[int] = Form(None, description="Optional existing document ID. If not provided, creates new document"),
     db: Session = Depends(get_db)
 ):
     """
-    Upload a document page with OCR result.
+    Process and persist document page metadata.
     
-    - **file**: Document page image file
+    - **image_url**: Image URL (from /documents/upload)
     - **owner_id**: Document owner user ID (required)
     - **page_number**: Page number within document (required, 1-indexed)
-    - **ocr_text**: OCR extracted text for this page (required)
+    - **ocr_text**: OCR extracted text for this page (optional)
     - **document_id**: Optional existing document ID. If not provided, creates new document
     """
     try:
-        # Read file content
-        file_content = BytesIO(file.file.read())
-        
-        # Upload page and optionally create document
-        doc_id, page_id, image_url = DocumentService.upload_document_page(
+        # Process page and save to database
+        doc_id, page_id, returned_image_url = DocumentService.process_document_page(
             db=db,
-            file_content=file_content,
-            filename=file.filename,
+            image_url=image_url,
             owner_id=owner_id,
             page_number=page_number,
             ocr_text=ocr_text,
             document_id=document_id
         )
         
-        # Return document_id, page_id, image_url and status
+        # Determine status
+        if document_id:
+            status_value = "updated"
+        else:
+            status_value = "created"
+        
         return {
             "document_id": doc_id,
             "page_id": page_id,
-            "image_url": image_url,
-            "status": "created" if not document_id else "updated",
+            "image_url": returned_image_url,
+            "status": status_value,
             "page_number": page_number
         }
         
@@ -83,5 +137,6 @@ def upload_and_process(
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to upload document page: {str(e)}"
+            detail=f"Failed to process document page: {str(e)}"
         )
+

@@ -4,6 +4,7 @@ Document business logic service - High-level API for AI Service
 from sqlalchemy.orm import Session
 from typing import Optional, List, Dict, Any
 from io import BytesIO
+import logging
 
 from app.models.document import Document
 from app.models.document_category import DocumentCategory
@@ -13,6 +14,8 @@ from app.models.document_page import DocumentPage
 from app.models.user import User
 from app.schemas.document import DocumentCreate, DocumentUpdate
 from app.integrations.storage_client import StorageClient, StorageException
+
+logger = logging.getLogger(__name__)
 
 
 class DocumentService:
@@ -302,6 +305,124 @@ class DocumentService:
         except Exception as e:
             db.rollback()
             raise ValueError(f"Failed to update document: {str(e)}")
+
+    @staticmethod
+    def upload_file_only(
+        file_content: BytesIO,
+        filename: str,
+        owner_id: int
+    ) -> str:
+        """
+        Upload file to storage and return image_url (no database operations)
+        
+        This is the first step in the separated upload/process flow.
+        Handles file upload to storage backend only.
+        
+        Args:
+            file_content: Image file content (BytesIO)
+            filename: Original filename
+            owner_id: Document owner user ID (for folder organization)
+            
+        Returns:
+            image_url of the uploaded file
+            
+        Raises:
+            ValueError: If operation fails
+        """
+        try:
+            # Upload image file to storage
+            image_url = StorageClient.upload_image(
+                file_content=file_content,
+                filename=filename,
+                folder=f"documents/{owner_id}/pages"
+            )
+            
+            logger.info(f"File uploaded to storage. URL: {image_url}")
+            return image_url
+            
+        except Exception as e:
+            logger.error(f"Failed to upload file to storage: {e}")
+            raise ValueError(f"File upload failed: {str(e)}")
+
+    @staticmethod
+    def process_document_page(
+        db: Session,
+        image_url: str,
+        owner_id: int,
+        page_number: int,
+        ocr_text: Optional[str] = None,
+        document_id: Optional[int] = None
+    ) -> tuple:
+        """
+        Process and persist document page metadata (no file upload)
+        
+        This is the second step in the separated upload/process flow.
+        Saves page metadata to database, inherited from upload_document_page logic.
+        
+        Args:
+            db: Database session
+            image_url: URL of already-uploaded image file
+            owner_id: Document owner user ID
+            page_number: Page number within document
+            ocr_text: Optional extracted OCR text for this page
+            document_id: Optional existing document ID. If None, creates new document
+            
+        Returns:
+            Tuple of (document_id, page_id, image_url)
+            
+        Raises:
+            ValueError: If operation fails
+        """
+        try:
+            # Verify user exists
+            user = db.query(User).filter(User.id == owner_id).first()
+            if not user:
+                raise ValueError(f"User {owner_id} not found")
+            
+            # Get or create document
+            if document_id:
+                # Verify document exists and belongs to owner
+                document = db.query(Document)\
+                    .filter(Document.id == document_id, Document.owner_id == owner_id).first()
+                if not document:
+                    raise ValueError(f"Document {document_id} not found or does not belong to user {owner_id}")
+            else:
+                # Create new document
+                document = Document(
+                    title=f"Document page {page_number}",
+                    owner_id=owner_id,
+                    image_url=None,
+                    category_id=None,
+                    event_id=None,
+                    doc_metadata={}
+                )
+                db.add(document)
+                db.flush()  # Get document.id
+                document_id = document.id
+            
+            # Create document page record
+            page = DocumentPage(
+                document_id=document_id,
+                page_number=page_number,
+                image_url=image_url,
+                ocr_text=ocr_text
+            )
+            db.add(page)
+            
+            # Update document thumbnail if first page
+            if page_number == 1:
+                document.image_url = image_url
+            
+            db.commit()
+            db.refresh(page)
+            
+            logger.info(f"Document page created: doc_id={document_id}, page_id={page.id}")
+            return (document_id, page.id, image_url)
+            
+        except Exception as e:
+            db.rollback()
+            logger.error(f"Failed to process document page: {e}")
+            raise ValueError(f"Failed to process document page: {str(e)}")
 
     @staticmethod
     def upload_document_page(
