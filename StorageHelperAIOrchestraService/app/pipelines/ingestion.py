@@ -33,8 +33,9 @@ class PipelineState:
     embedding_result: Optional[EmbeddingResult] = None
     
     # File storage
-    file_url: Optional[str] = None  # URL of file stored in database (from upload-and-process API)
-    page_id: Optional[int] = None  # Page ID from database (from upload-and-process API)
+    file_url: Optional[str] = None  # URL of file stored in database (from upload/process API)
+    page_id: Optional[int] = None  # Page ID from database (from upload/process API)
+    processed_page_number: Optional[int] = None  # Page number returned by /documents/process
     file_upload_error: Optional[str] = None  # Error message if file upload failed
     embedding_save_error: Optional[str] = None  # Error message if embedding save failed
     
@@ -329,16 +330,64 @@ class IngestionPipeline:
     
     async def step_upload_file(self, state: PipelineState, page_number: int = 1) -> bool:
         """
-        Step 2B: Upload document file to DataStorageService.
+        Step 2B: Upload document file to DataStorageService and get image_url.
         
-        This step uploads the file after cleaning is complete, so we can use
-        the cleaned_text as ocr_text in the API request.
+        This step uploads the file to get image_url. The actual document processing
+        (saving metadata) happens later in step_process_document after pipeline completes.
+        
+        :param state: Pipeline state to update.
+        :param page_number: Page number within document (1-indexed).
+        :return: True if upload succeeded, False if upload failed (pipeline continues regardless).
+        """
+        logger.info(f"STEP 2B (File Upload): Uploading document file to DataStorageService (page {page_number})...")
+        
+        try:
+            # Upload file only to get image_url
+            image_url = await self.pipeline_storage.upload_file_only(
+                file_path=state.image_url,
+                owner_id=state.owner_id
+            )
+            
+            if image_url:
+                # Store image_url for later use in process step
+                state.file_url = image_url
+                logger.info(f"File uploaded successfully. Image URL: {state.file_url}")
+                state.processing_steps.append("File Upload")
+                return True
+            else:
+                # File upload failed but AI processing can still continue
+                state.file_upload_error = "File upload to DataStorageService failed"
+                logger.warning("File upload failed, but continuing with AI processing")
+                # 返回 False，让调用方知道这个页面的存储相关信息不可用
+                return False
+            
+        except Exception as upload_error:
+            # File upload failed but AI processing can still continue
+            error_msg = str(upload_error)
+            state.file_upload_error = f"File upload error: {error_msg}"
+            logger.warning(f"File upload error (non-critical): {upload_error}")
+            # 返回 False，让调用方知道上传失败
+            return False
+    
+    async def step_process_document(self, state: PipelineState, page_number: int = 1) -> bool:
+        """
+        Step 4B: Process document page metadata via DataStorageService API.
+        
+        This step processes the document page metadata AFTER the entire pipeline
+        (OCR, Vision, Cleaning, Recommendation, Embedding) is complete.
+        It sends the structured results and file storage path to /documents/process API.
         
         :param state: Pipeline state to update.
         :param page_number: Page number within document (1-indexed).
         :return: True if successful or non-critical failure, False on critical error.
         """
-        logger.info(f"STEP 2B (File Upload): Uploading document file to DataStorageService (page {page_number})...")
+        logger.info(f"STEP 4B (Process Document): Processing document page metadata (page {page_number})...")
+        
+        # Check if we have image_url from upload step
+        if not state.file_url:
+            state.file_upload_error = "No image_url available for document processing (upload step may have failed)"
+            logger.warning("Cannot process document: no image_url available")
+            return True  # Non-critical, continue pipeline
         
         try:
             # Get cleaned text from cleaning_info, fallback to cleaned_text or OCR text
@@ -350,51 +399,59 @@ class IngestionPipeline:
             elif state.ocr_result and state.ocr_result.text:
                 ocr_text = state.ocr_result.text
             else:
-                logger.warning("No OCR text available for file upload")
+                logger.warning("No OCR text available for document processing")
                 ocr_text = ""
             
-            # Upload file with new API format
-            upload_result = await self.pipeline_storage.upload_document_file(
-                file_path=state.image_url,
+            # Process document page with image_url and structured results
+            process_result = await self.pipeline_storage.process_document_page(
+                image_url=state.file_url,
                 owner_id=state.owner_id,
                 page_number=page_number,
                 ocr_text=ocr_text,
                 document_id=state.document_id  # Pass document_id (can be None)
             )
             
-            if upload_result:
+            if process_result:
                 # API returns document_id, not id
-                returned_document_id = upload_result.get("document_id")
-                returned_page_id = upload_result.get("page_id")
-                state.file_url = upload_result.get("url") or upload_result.get("image_url")
+                returned_document_id = process_result.get("document_id")
+                returned_page_id = process_result.get("page_id")
                 state.page_id = returned_page_id  # Store page_id from API response
+
+                # Update file_url and processed_page_number from API response
+                returned_image_url = process_result.get("image_url")
+                if returned_image_url:
+                    state.file_url = returned_image_url
+
+                returned_page_number = process_result.get("page_number")
+                if returned_page_number is not None:
+                    state.processed_page_number = returned_page_number
                 
-                # Update document_id if we got one from the upload
+                # Update document_id if we got one from the process step
                 # For first page: use returned document_id if we didn't have one
                 # For subsequent pages: should already have document_id, but update if returned
                 if returned_document_id:
                     if not state.document_id:
                         # First page - use the returned document_id
                         state.document_id = returned_document_id
-                        logger.info(f"Document ID established from upload: {state.document_id}")
+                        logger.info(f"Document ID established from process: {state.document_id}")
                     elif state.document_id != returned_document_id:
                         # This shouldn't happen, but log a warning
                         logger.warning(f"Document ID mismatch: state has {state.document_id}, API returned {returned_document_id}")
                 
-                logger.info(f"File uploaded successfully. URL: {state.file_url}, Document ID: {state.document_id}, Page ID: {state.page_id}")
-                state.processing_steps.append("File Upload")
+                logger.info(f"Document page processed successfully. Document ID: {state.document_id}, Page ID: {state.page_id}")
+                state.processing_steps.append("Process Document")
                 return True
             else:
-                # File upload failed but AI processing succeeded
-                state.file_upload_error = "File upload to DataStorageService failed"
-                logger.warning("File upload failed, but continuing with AI processing")
+                # Document processing failed but AI processing succeeded
+                state.file_upload_error = "Document processing via DataStorageService API failed"
+                logger.warning("Document processing failed, but AI processing completed")
                 return True  # Non-critical, continue pipeline
             
-        except Exception as upload_error:
-            # File upload failed but AI processing succeeded
-            error_msg = str(upload_error)
-            state.file_upload_error = f"File upload error: {error_msg}"
-            logger.warning(f"File upload error (non-critical): {upload_error}")
+        except Exception as process_error:
+            # Document processing failed but AI processing succeeded
+            error_msg = str(process_error)
+            state.file_upload_error = f"Document processing error: {error_msg}"
+            logger.warning(f"Document processing error (non-critical): {process_error}")
             return True  # Non-critical, continue pipeline
     
     async def step_recommendation(self, state: PipelineState) -> bool:
@@ -494,7 +551,7 @@ class IngestionPipeline:
         Step 4: Use document ID from upload API (storage logic removed).
         
         NOTE: Storage logic has been removed. This step uses the document_id
-        returned from /api/v1/documents/upload-and-process API. All document_id
+        returned from /api/v1/documents/process API (after upload step). All document_id
         management is handled by the backend. If document_id is not available
         (e.g., upload failed), it remains None.
         
@@ -504,7 +561,7 @@ class IngestionPipeline:
         """
         try:
             # Use document_id from upload API if available
-            # This is the document_id returned by /api/v1/documents/upload-and-process
+            # This is the document_id returned by /api/v1/documents/process (after upload step)
             # All document_id management is handled by the backend - we don't generate any IDs
             doc_id = state.document_id
             if doc_id:
@@ -691,6 +748,10 @@ class IngestionPipeline:
             elif not state.embedding_result or not state.embedding_result.is_successful:
                 logger.info("Skipping embedding save: embedding generation failed or not successful (this is expected when embedding generation fails)")
         
+        # Step 4B: Process document page metadata (after all pipeline processing is complete)
+        # This sends structured results and file storage path to /documents/process API
+        await self.step_process_document(state, page_number=1)
+        
         # Step 4: Persistence
         if not skip_persist:
             # Check if pipeline failed at any critical step
@@ -769,9 +830,11 @@ async def run_unified_ingestion_pipeline(
     logger.info(f"Starting unified ingestion for {len(file_urls)} files, owner_id={owner_id}, document_id={document_id}")
     
     pipeline = _default_pipeline
-    page_tasks = []  # List of (page_number, file_path, file_type) tuples
+    # page_tasks: List of tuples
+    # (global_page_index, ocr_source_path, file_type, file_image_url, page_number_within_file)
+    page_tasks = []
     temp_files = []  # Track temporary files for cleanup
-    current_page = 1
+    current_page_global = 1  # 全局页序，只用于内部排序 / 映射
     
     try:
         # Step 1: Process all files and split PDFs into pages
@@ -787,9 +850,28 @@ async def run_unified_ingestion_pipeline(
                 logger.info(f"Processing file: {file_url} (type: {detected_type} - auto-detected)")
             
             file_type_for_task = detected_type
+
+            # 🆕 上传「原始文件」一次，所有页面共享同一个 image_url
+            file_image_url: Optional[str] = None
+            upload_error: Optional[str] = None
+            try:
+                logger.info(f"Uploading original file for unified ingestion: {file_url}")
+                file_image_url = await pipeline.pipeline_storage.upload_file_only(
+                    file_path=file_url,
+                    owner_id=owner_id
+                )
+                if not file_image_url:
+                    upload_error = "File upload to DataStorageService failed"
+                    logger.warning(f"{upload_error} (file: {file_url})")
+            except Exception as e:
+                upload_error = f"File upload error: {str(e)}"
+                logger.warning(f"{upload_error} (file: {file_url})")
+
+            # 对当前文件内的页面使用「文件内页码」(1..N)
+            page_number_within_file = 1
             
             if detected_type == "pdf":
-                # Split PDF into pages
+                # Split PDF into pages（仅用于 OCR / AI，不再单页上传）
                 try:
                     pdf_result = await convert_pdf_to_images(file_url, dpi=300)
                     logger.info(f"PDF split into {len(pdf_result.pages)} pages")
@@ -802,25 +884,54 @@ async def run_unified_ingestion_pipeline(
                         page_num = page_data["page_number"]
                         page_image = page_data["image"]
                         
-                        # Save page image to temporary file
+                        # Save page image to temporary file（OCR 用）
                         temp_file_path = os.path.join(temp_dir, f"page_{page_num}.png")
                         page_image.save(temp_file_path, "PNG")
                         temp_files.append(temp_file_path)
                         
                         # Add to page tasks
-                        page_tasks.append((current_page, temp_file_path, "image"))
-                        current_page += 1
+                        page_tasks.append(
+                            (
+                                current_page_global,   # 全局索引
+                                temp_file_path,        # OCR 源文件（单页图片）
+                                "image",               # OCR 文件类型
+                                file_image_url,        # 此原始文件的 image_url（整文件上传得到）
+                                page_number_within_file,  # 当前文件内的页码
+                                upload_error           # 上传是否失败的信息
+                            )
+                        )
+                        current_page_global += 1
+                        page_number_within_file += 1
                         
                 except Exception as e:
                     logger.error(f"Failed to split PDF {file_url}: {e}")
-                    # Add as failed page
-                    page_tasks.append((current_page, None, "pdf", str(e)))
-                    current_page += 1
+                    # Add as failed page（仍然保留一条记录，方便前端看到错误）
+                    page_tasks.append(
+                        (
+                            current_page_global,
+                            None,
+                            "pdf",
+                            file_image_url,
+                            page_number_within_file,
+                            str(e)
+                        )
+                    )
+                    current_page_global += 1
+                    page_number_within_file += 1
                     
             else:
-                # Single image file - treat as one page
-                page_tasks.append((current_page, file_url, "image"))
-                current_page += 1
+                # 单张图片文件：视为单页，page_number = 1
+                page_tasks.append(
+                    (
+                        current_page_global,
+                        file_url,           # OCR 源文件（整张图）
+                        "image",
+                        file_image_url,     # 整个文件上传得到的 image_url
+                        page_number_within_file,
+                        upload_error
+                    )
+                )
+                current_page_global += 1
         
         if not page_tasks:
             logger.error("No pages to process after file splitting")
@@ -842,32 +953,41 @@ async def run_unified_ingestion_pipeline(
         # This ensures all pages use the same document_id, even if processing is interrupted
         all_cleaned_texts = []  # Collect text from all pages for recommendation/embedding
         page_results = []
+        page_states = {}  # Store state for each page: {page_number: PipelineState}
         final_document_id = document_id
         
-        async def process_single_page(page_info: tuple, use_document_id: Optional[int] = None) -> Dict[str, Any]:
-            """Process a single page through the pipeline"""
-            page_number, file_path, file_type_info = page_info[:3]
-            error_msg = page_info[3] if len(page_info) > 3 else None
+        async def process_single_page(page_info: tuple, use_document_id: Optional[int] = None) -> tuple[Dict[str, Any], Optional[PipelineState]]:
+            """Process a single page through the pipeline. Returns (result_dict, state)"""
+            (
+                global_page_index,
+                file_path,
+                file_type_info,
+                file_image_url,
+                page_number_within_file,
+                error_msg
+            ) = page_info
             
             if error_msg:
-                return {
-                    "page_number": page_number,
+                return ({
+                    "page_number": page_number_within_file,
+                    "global_page_index": global_page_index,
                     "status": "failed",
                     "error": error_msg,
                     "ocr_text": None,
                     "file_url": None,
                     "page_id": None
-                }
+                }, None)
             
             if not file_path:
-                return {
-                    "page_number": page_number,
+                return ({
+                    "page_number": page_number_within_file,
+                    "global_page_index": global_page_index,
                     "status": "failed",
                     "error": "File path is None",
                     "ocr_text": None,
                     "file_url": None,
                     "page_id": None
-                }
+                }, None)
             
             try:
                 # Create pipeline state for this page
@@ -877,18 +997,21 @@ async def run_unified_ingestion_pipeline(
                     document_id=use_document_id,
                     file_type=file_type_info
                 )
+                # 🆕 对于统一上传模式，每一页都共享原始文件的 image_url
+                state.file_url = file_image_url
                 
                 # Step 1: OCR
                 if not await pipeline.step_ocr(state):
-                    return {
-                        "page_number": page_number,
+                    return ({
+                        "page_number": page_number_within_file,
+                        "global_page_index": global_page_index,
                         "status": "failed",
                         "error": state.error or "OCR failed",
                         "ocr_text": None,
                         "file_url": None,
                         "document_id": None,
                         "page_id": None
-                    }
+                    }, state)
                 
                 # Step 1B: Vision Enhancement (optional)
                 await pipeline.step_vision_enhancement(state)
@@ -899,55 +1022,55 @@ async def run_unified_ingestion_pipeline(
                 # Collect cleaned text for recommendation/embedding
                 cleaned_text = state.cleaned_text or (state.ocr_result.text if state.ocr_result else "")
                 if cleaned_text:
-                    all_cleaned_texts.append((page_number, cleaned_text))
-                
-                # Step 2B: Upload file (use page_number from task)
-                upload_success = await pipeline.step_upload_file(state, page_number=page_number)
-                
-                return {
-                    "page_number": page_number,
-                    "status": "success" if upload_success else "failed",
-                    "error": state.file_upload_error if not upload_success else None,
+                    # 这里用「文件内页码」作为标记，后续组合文本时会按页码排序
+                    all_cleaned_texts.append((page_number_within_file, cleaned_text))
+
+                # 统一上传模式下，这里不再重复上传；如果文件级上传失败，则标记为 failed
+                if not file_image_url:
+                    return ({
+                        "page_number": page_number_within_file,
+                        "global_page_index": global_page_index,
+                        "status": "failed",
+                        "error": error_msg or "File upload to DataStorageService failed",
+                        "ocr_text": cleaned_text,
+                        "file_url": None,
+                        "document_id": None,
+                        "page_id": None
+                    }, state)
+
+                return ({
+                    "page_number": page_number_within_file,
+                    "global_page_index": global_page_index,
+                    "status": "success",
+                    "error": None,
                     "ocr_text": cleaned_text,
-                    "file_url": state.file_url,
+                    "file_url": state.file_url,  # 与原始文件共享的 image_url
                     "document_id": state.document_id,  # Return document_id for first page
-                    "page_id": state.page_id  # Return page_id from upload
-                }
+                    "page_id": state.page_id  # Will be set after process step
+                }, state)
                 
             except Exception as e:
-                logger.error(f"Error processing page {page_number}: {e}", exc_info=True)
-                return {
-                    "page_number": page_number,
+                logger.error(f"Error processing page (file_page={page_number_within_file}, global_index={global_page_index}): {e}", exc_info=True)
+                return ({
+                    "page_number": page_number_within_file,
+                    "global_page_index": global_page_index,
                     "status": "failed",
                     "error": str(e),
                     "ocr_text": None,
                     "file_url": None,
                     "document_id": None,
                     "page_id": None
-                }
+                }, None)
         
         # Step 2A: Process first page synchronously to establish document_id
         # This ensures document_id is available before processing remaining pages
         if page_tasks:
             first_page_info = page_tasks[0]
             logger.info(f"Processing first page synchronously to establish document_id (current: {final_document_id})...")
-            first_page_result = await process_single_page(first_page_info, use_document_id=final_document_id)
+            first_page_result, first_page_state = await process_single_page(first_page_info, use_document_id=final_document_id)
             page_results.append(first_page_result)
-            
-            # Extract document_id from first page result
-            # This is critical - all subsequent pages will use this document_id
-            first_page_doc_id = first_page_result.get("document_id")
-            if first_page_doc_id:
-                final_document_id = first_page_doc_id
-                logger.info(f"Document ID established from first page: {final_document_id}. All remaining pages will use this document_id.")
-            else:
-                # First page didn't return document_id - this is a problem
-                if first_page_result.get("status") == "failed":
-                    logger.error(f"First page failed and no document_id was created: {first_page_result.get('error')}")
-                    logger.warning("Subsequent pages may create separate documents if processing continues.")
-                else:
-                    logger.error("First page processed but no document_id returned. This should not happen.")
-                    logger.warning("Subsequent pages may create separate documents.")
+            if first_page_state:
+                page_states[first_page_result["global_page_index"]] = first_page_state
         
         # Step 2B: Process remaining pages in parallel (if any)
         # All pages now use the established document_id from first page
@@ -974,7 +1097,10 @@ async def run_unified_ingestion_pipeline(
                         "page_id": None
                     })
                 else:
-                    page_results.append(result)
+                    result_dict, result_state = result
+                    page_results.append(result_dict)
+                    if result_state:
+                        page_states[result_dict["global_page_index"]] = result_state
         
         # Sort results by page number
         page_results.sort(key=lambda x: x["page_number"])
@@ -1071,6 +1197,43 @@ async def run_unified_ingestion_pipeline(
                 logger.info("Skipping embedding save: document_id not available (this is expected for failed page processing)")
             elif not embedding_result or not (isinstance(embedding_result, EmbeddingResult) and embedding_result.is_successful):
                 logger.info("Skipping embedding save: embedding generation failed or not successful (this is expected when embedding generation fails)")
+        
+        # Step 4B: Process document page metadata for each successful page
+        # This sends structured results and file storage path to /documents/process API
+        logger.info("Processing document pages metadata after pipeline completion...")
+        for page_result in processed_results:
+            if page_result.get("status") == "success":
+                global_page_index = page_result.get("global_page_index")
+                page_state = page_states.get(global_page_index)
+                if page_state:
+                    # 当前文件内的页码（作为传给 /documents/process 的 page_number）
+                    file_page_number = page_result.get("page_number", 1)
+
+                    # Update document_id in state if we have final_document_id
+                    if final_document_id and not page_state.document_id:
+                        page_state.document_id = final_document_id
+                    
+                    # Process document page with structured results
+                    await pipeline.step_process_document(page_state, page_number=file_page_number)
+
+                    # Update page_result with values returned from /documents/process
+                    if page_state.page_id is not None:
+                        page_result["page_id"] = page_state.page_id
+                    if page_state.document_id is not None:
+                        page_result["document_id"] = page_state.document_id
+                    if page_state.file_url is not None:
+                        page_result["file_url"] = page_state.file_url
+                    # Prefer page number returned by storage service as source of truth
+                    if page_state.processed_page_number is not None:
+                        page_result["page_number"] = page_state.processed_page_number
+
+                    # 如果还没有最终 document_id，则从任意一个成功页中补充
+                    if final_document_id is None and page_state.document_id is not None:
+                        final_document_id = page_state.document_id
+
+        # 清理内部字段，不暴露给 API 调用方
+        for page_result in processed_results:
+            page_result.pop("global_page_index", None)
         
         # Build response
         # Convert document_id to int if it's a string (from API response)

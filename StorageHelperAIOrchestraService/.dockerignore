@@ -1,0 +1,68 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual environments
+venv/
+ENV/
+env/
+.venv
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# Logs
+*.log
+logs/
+
+# Environment files (will be mounted via docker-compose)
+# Note: .env.local is NOT ignored so it can be mounted in docker-compose.yml
+.env
+.env.prod
+.env.*.local
+
+# Windows Tesseract binaries (not needed in Linux Docker)
+app/modules/tesseract/
+
+# Git
+.git/
+.gitignore
+
+# Documentation
+Document/
+
+# Scripts (Windows PowerShell scripts not needed in Docker)
+script/*.ps1
+
+# Temporary files
+tmp/

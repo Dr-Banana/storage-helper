@@ -24,18 +24,39 @@ The ingestion pipeline orchestrates the complete document processing workflow fr
 - **Images**: JPG, JPEG, PNG, GIF, BMP, WEBP, TIFF
 - **PDFs**: Single or multi-page PDF documents (up to 10 pages processed for performance)
 
+**Input Source (File Binary Upload via Multipart Form Data):**
+- **Browser-friendly file upload design**
+  - The frontend uploads **raw file binaries** via `multipart/form-data` (similar to `/api/v1/documents/upload` in the DataStorageService).
+  - Supports both **single-file** and **multi-file** uploads (`files` parameter is a list of `UploadFile`).
+  - **API Endpoint**: `POST /api/v1/ingestion` (AIOrchestraService)
+  - **Parameters**:
+    - `files`: `List[UploadFile]` – List of files to ingest (required).
+    - `owner_id`: `int` – Document owner user ID (required).
+    - `document_id`: `Optional[int]` – Existing document ID (optional; if omitted, the first processed page will create one).
+    - `file_type`: `Optional[str]` – Optional file type override: `"image"` or `"pdf"` (mainly for single-file uploads; otherwise auto-detected).
+  - **Server-side ingestion behavior** (high level):
+    1. Save uploaded files to a **temporary directory** for OCR / PDF processing.
+    2. For each original file (image or PDF), call the DataStorageService `/api/v1/documents/upload` **exactly once** to store the file and obtain a single `image_url` for that file.
+    3. Run the full AI pipeline on a **per-page basis** (OCR → Vision → Cleaning → [Parallel: Recommendation + Embedding]).
+    4. For each logical page, call `/api/v1/documents/process` using the shared `image_url` for that file, plus `page_number`, `ocr_text`, and `document_id`.
+    5. Clean up temporary files after processing completes.
+
 **Batch Processing Support:**
-- **Single File**: Use `file_urls` with one element: `["file1.jpg"]`
-- **Multiple Files**: Use `file_urls` with multiple elements: `["file1.jpg", "file2.pdf", "file3.jpg"]`
-- **Multi-page PDFs**: Automatically split into individual pages with sequential page numbering
-- **Mixed Formats**: Supports combinations of images and PDFs in a single batch
-- **Document ID Management**: First page establishes `document_id`, all subsequent pages use the same ID
+- **Single File**: Upload one file via `files` parameter: `files=[UploadFile(...)]`.  
+  - Single image ⇒ `total_pages = 1`, `page_number = 1`.
+  - Single multi-page PDF ⇒ split into N logical pages, `page_number = 1..N` (within that file).
+- **Multiple Files**: Upload multiple files: `files=[UploadFile(...), UploadFile(...), ...]`.  
+  - Each file is treated independently for page numbering: each file has its own `page_number = 1..N_file`.
+  - Each file is uploaded **once** and has a single `image_url` that is reused across all of its pages.
+- **Multi-page PDFs**: Automatically split into logical pages for AI processing (per-file page numbering).
+- **Mixed Formats**: Supports combinations of images and PDFs in a single batch.
+- **Document ID Management**: The first successfully processed page establishes `document_id` (via `/documents/process`); all subsequent pages (across all files in the batch) reuse the same `document_id`.
 
 #### Pipeline Architecture
 
 ```mermaid
 flowchart TD
-    Start([INGESTION PIPELINE<br/>app/pipelines/ingestion.py]) --> Input["INPUT<br/>• file_urls: List of strings<br/>  - Single: one file URL<br/>  - Batch: multiple file URLs<br/>• owner_id<br/>• document_id: optional<br/>• file_type auto-detect<br/>State: PipelineState"]
+    Start([INGESTION PIPELINE<br/>app/pipelines/ingestion.py]) --> Input["INPUT<br/>• files: List[UploadFile]<br/>  - Single: one file<br/>  - Batch: multiple files<br/>• Files saved to temp directory<br/>• owner_id<br/>• document_id: optional<br/>• file_type auto-detect<br/>State: PipelineState"]
     
     Input --> BatchCheck{"Is Batch<br/>Processing?"}
     
@@ -53,7 +74,7 @@ flowchart TD
     
     Vision --> Cleaning["STEP 2: CLEANING<br/>app/modules/cleaning.py<br/>─────────────────<br/>• Whitespace removal<br/>• Line normalization<br/>• Garbage filtering<br/>• Special char handling<br/>─────────────────<br/>OUTPUT:<br/>  - cleaned_text<br/>  - cleaning_info"]
     
-    Cleaning --> Upload["STEP 2B: FILE UPLOAD<br/>app/storage/pipeline_storage.py<br/>─────────────────<br/>• Upload to DataStorageService<br/>  via HTTP API<br/>• POST /api/v1/documents/upload-and-process<br/>• Parameters:<br/>  - file: image/PDF file<br/>  - owner_id<br/>  - page_number: 1-indexed<br/>  - ocr_text: cleaned_text<br/>  - document_id: optional<br/>• First page creates document<br/>• Subsequent pages use same ID<br/>• Non-blocking, continues if fails<br/>─────────────────<br/>OUTPUT: upload_result<br/>  - document_id: int<br/>  - page_id<br/>  - file_url<br/>OUTPUT: file_upload_error if fails"]
+    Cleaning --> Upload["STEP 2B: FILE UPLOAD<br/>app/storage/pipeline_storage.py<br/>─────────────────<br/>• Upload original file to DataStorageService<br/>  via HTTP API (once per input file)<br/>• POST /api/v1/documents/upload<br/>  - file: image/PDF file (binary)<br/>  - owner_id<br/>  - Returns: image_url (storage path)<br/>• Multi-page PDFs and multi-page flows<br/>  reuse the SAME image_url for all pages<br/>  belonging to that original file<br/>• This step stores the raw file only; page-<br/>  level metadata is handled later (Step 4B)<br/>• Non-blocking: AI pipeline can continue<br/>  and record file_upload_error if upload fails<br/>─────────────────<br/>OUTPUT: image_url (per original file)<br/>OUTPUT: file_upload_error if fails"]
     
     OCR -->|Failure| Stop1([STOP - Error])
     PDFOCR -->|Failure| Stop1
@@ -73,7 +94,9 @@ flowchart TD
     
     Merge --> SaveEmbedding["STEP 3C: SAVE EMBEDDING<br/>app/storage/pipeline_storage.py<br/>─────────────────<br/>• Save embedding to DataStorageService<br/>  via HTTP API<br/>• POST /api/documents/{document_id}/embedding<br/>• Executed after pages processed<br/>  (document_id available)<br/>• Validates 768-dimensional vector<br/>• Request format:<br/>  document_id: int<br/>  embedding: List[float]<br/>• Non-blocking, continues if fails<br/>• Called in both single and batch<br/>  processing pipelines<br/>─────────────────<br/>OUTPUT: save_success: bool<br/>Logs success/failure status"]
     
-    SaveEmbedding --> Persistence["STEP 4: PERSISTENCE<br/>app/pipelines/ingestion.py<br/>─────────────────<br/>STORAGE LOGIC REMOVED:<br/>• Generate UUID for document_id<br/>• No local file storage<br/>• No remote API calls<br/>• Persistence handled by API layer<br/>─────────────────<br/>OUTPUT: document_id UUID string<br/>for API response"]
+    SaveEmbedding --> ProcessDoc["STEP 4B: PROCESS DOCUMENT<br/>app/storage/pipeline_storage.py<br/>─────────────────<br/>• Process document page metadata<br/>  AFTER full AI pipeline completes<br/>  (OCR / Vision / Cleaning / Recommendation / Embedding)<br/>• POST /api/v1/documents/process<br/>  - image_url: from upload step (/documents/upload)<br/>  - owner_id<br/>  - page_number: 1-indexed<br/>  - ocr_text: cleaned_text (optional)<br/>  - document_id: optional<br/>• Sends structured AI results (cleaned_text)<br/>  **together with** file storage path (image_url)<br/>• First page creates document (returns document_id)<br/>• Subsequent pages reuse the same document_id<br/>• Non-blocking, continues if fails<br/>─────────────────<br/>OUTPUT: process_result<br/>  - document_id: int<br/>  - page_id<br/>  - image_url<br/>  - status: created/updated<br/>OUTPUT: file_upload_error if fails"]
+    
+    ProcessDoc --> Persistence["STEP 4: PERSISTENCE<br/>app/pipelines/ingestion.py<br/>─────────────────<br/>STORAGE LOGIC REMOVED:<br/>• Generate UUID for document_id<br/>• No local file storage<br/>• No remote API calls<br/>• Persistence handled by API layer<br/>─────────────────<br/>OUTPUT: document_id UUID string<br/>for API response"]
     
     Persistence --> Response["RESPONSE: Complete Pipeline Output<br/>─────────────────<br/>Returns full pipeline results<br/>• status: success / partial_success / failed<br/>• document_id: int, not UUID string<br/>• recommendation: Dict with all recommendation data<br/>  - category_id: int, no category_code<br/>  - location_id: int, no location_name<br/>  - recommendation_reason<br/>  - suggested_tags<br/>• For batch processing:<br/>  - total_pages: int<br/>  - successful_pages: int<br/>  - failed_pages: int<br/>  - page_results: List of PageProcessingResult<br/>    Each page: page_number, status,<br/>    error, ocr_text, file_url<br/>• Single file: page_results = None"]
     
@@ -108,22 +131,41 @@ flowchart TD
    - Pipeline continues to completion to retain partial results
    - Upload task properly cancelled if OCR fails to prevent resource leaks
 7. **Storage Architecture**: 
-   - **Local file storage removed**: No longer saves to tmp/documents/, tmp/embeddings/, tmp/images/, tmp/pdfs/, or index.json
-   - **🆕 API-based category and location management**: Categories and locations now fetched and saved via API instead of local JSON files
+   - **Local file storage removed**: No longer saves to `tmp/documents/`, `tmp/embeddings/`, `tmp/images/`, `tmp/pdfs/`, or `index.json`.
+   - **🆕 API-based category and location management**: Categories and locations are now fetched and saved via API instead of local JSON files.
      - **Categories**: `GET /api/users/{user_id}/categories` (fetch), `POST /api/users/{user_id}/categories` (create)
      - **Locations**: `GET /api/users/{user_id}/locations` (fetch)
-     - **User isolation**: Each user has independent categories and locations stored in database
-     - **No local files**: Removed `tmp/Storage/document_categories.json` and `tmp/Storage/locations.json` dependencies
-   - **File upload integration**: Files uploaded to DataStorageService via HTTP API after cleaning step
-   - **Upload API Format**: `POST /api/v1/documents/upload-and-process`
-     - Parameters: `file`, `owner_id`, `page_number`, `ocr_text` (cleaned_text), `document_id` (optional)
-     - First page: creates new document if `document_id` not provided
-     - Subsequent pages: use same `document_id` from first page
-   - **API-only persistence**: Storage logic removed from pipeline; persistence handled by API layer
-   - **Unified output management**: `PipelineStorage` class provides methods to format and return complete pipeline results
-   - **Output schema**: `DocumentOutputSchema` class manages output structure and field inclusion
-   - **File upload error tracking**: Upload failures tracked per page without blocking AI processing
-   - **🆕 Embedding persistence**: Embeddings automatically saved to DataStorageService after generation
+     - **User isolation**: Each user has independent categories and locations stored in the database.
+     - **No local files**: Removed `tmp/Storage/document_categories.json` and `tmp/Storage/locations.json` dependencies.
+   - **File upload integration (two-step, API-based)**:
+     - **Step 1 – Upload Original File (per input file)**  
+       - API: `POST /api/v1/documents/upload` (DataStorageService, public API)
+       - Parameters:
+         - `file`: Original image/PDF file (binary, from `multipart/form-data`)
+         - `owner_id`: Document owner user ID
+       - Behavior:
+         - Each input file is uploaded **once**, regardless of how many logical pages it contains.
+         - The API returns a single `image_url` and `filename` for that file.
+         - All logical pages derived from that file (e.g. split PDF pages) **reuse the same `image_url`**.
+       - Purpose: Persist the raw file and obtain a stable storage path to be referenced by all downstream page records.
+     - **Step 2 – Process Document Page (per logical page)**  
+       - API: `POST /api/v1/documents/process` (DataStorageService, public API)
+       - Parameters:
+         - `image_url`: From the upload step (shared by all pages of that file)
+         - `owner_id`: Document owner user ID
+         - `page_number`: Page index **within that file** (1-indexed, 1..N_file)
+         - `ocr_text`: Optional cleaned OCR text for this page
+         - `document_id`: Optional existing document ID; when omitted, the first page creates a new document
+       - Returns: `document_id`, `page_id`, `image_url`, `status` (created/updated), `page_number`
+       - Purpose: Persist per-page metadata while linking each page back to the shared file URL.
+     - **Document ID Management**:
+       - The first successfully processed page (where `document_id` is absent) creates a new `document_id`.
+       - All subsequent pages in the ingestion batch (including pages from other files in the same request) reuse this `document_id`, ensuring a single logical document in the database.
+   - **API-only persistence**: Storage logic is removed from the pipeline; all persistence is handled through DataStorageService HTTP APIs.
+   - **Unified output management**: `PipelineStorage` provides methods to format and return complete pipeline results.
+   - **Output schema**: `DocumentOutputSchema` manages the output structure and field inclusion.
+   - **File upload error tracking**: Upload failures are tracked per file/page without blocking AI processing; errors are exposed via a `file_upload_error` field in the output.
+   - **🆕 Embedding persistence**: Embeddings are automatically saved to DataStorageService after generation
      - **API Endpoint**: `POST /api/documents/{document_id}/embedding`
      - **Timing**: Executed after pages processed (document_id available) and embedding generation succeeds
      - **Format**: `{"document_id": int, "embedding": List[float]}` (768 dimensions)
@@ -322,9 +364,10 @@ The `pdf_processor` module (`app/modules/pdf_processor.py`) handles PDF document
 
 #### Error Handling Strategy
 
-- **OCR Failure**: Pipeline stops immediately, upload task cancelled, returns error status
-- **PDF Processing Failure**: Pipeline stops, upload task cancelled, returns error status
-- **File Upload Failure**: Continue with AI processing, set `file_upload_error` field, log warning
+- **OCR Failure**: Pipeline stops immediately, returns error status
+- **PDF Processing Failure**: Pipeline stops, returns error status
+- **File Upload Failure (Step 2B)**: Continue with AI processing, set `file_upload_error` field, log warning. Process step will be skipped if no `image_url` available.
+- **Document Processing Failure (Step 4B)**: Continue pipeline, set `file_upload_error` field, log warning. AI processing results are still available.
 - **Vision Enhancement Failure**: 🆕 Continue with OCR text only (graceful degradation), log warning
 - **Cleaning Failure**: Continue with raw OCR text, log warning
 - **Recommendation Failure**: Log error, continue to completion with partial data
@@ -464,47 +507,57 @@ Response: {
 #### POST `/api/v1/ingestion`
 **Unified ingestion endpoint for single and batch processing**
 
-**Request:**
-```json
-{
-  "document_id": null,  // Optional: existing document ID
-  "file_urls": ["file1.jpg", "file2.pdf"],  // List of file URLs (single: length 1)
-  "owner_id": 1,
-  "user_notes": "Optional user notes"
-}
+**🆕 API Design (File Binary Upload via Multipart Form Data):**
+The frontend uploads raw file binaries via `multipart/form-data`, which avoids any need for the browser to know local absolute paths.
+
+**Request (multipart/form-data):**
+```
+POST /api/v1/ingestion
+Content-Type: multipart/form-data
+
+files: [UploadFile, ...]   // List of files to ingest (required; supports single or multiple files)
+owner_id: int              // Document owner user ID (required)
+document_id: int (optional) // Existing document ID, if appending pages to an existing document
+file_type: str (optional)   // Optional override: "image" or "pdf" (primarily for single-file uploads)
 ```
 
-**Response (Single File):**
+**Example (cURL):**
+```bash
+curl -X POST http://localhost:8001/api/v1/ingestion \
+  -F "files=@/path/to/file1.pdf" \
+  -F "files=@/path/to/file2.jpg" \
+  -F "owner_id=1" \
+  -F "document_id=123"  # optional
+```
+
+**Example (JavaScript/Fetch):**
+```javascript
+const formData = new FormData();
+formData.append('files', fileInput.files[0]);       // Single file
+// For multiple files:
+// for (const f of fileInput.files) formData.append('files', f);
+formData.append('owner_id', '1');
+// formData.append('document_id', '123');  // optional
+
+fetch('http://localhost:8001/api/v1/ingestion', {
+  method: 'POST',
+  body: formData
+});
+```
+
+**Response (Single File, Single Page):**
 ```json
 {
   "status": "success",
-  "document_id": 6,
+  "document_id": 13,
   "recommendation": {
-    "category_id": 3,
+    "category_id": 4,
     "location_id": 1,
-    "recommendation_reason": "The document is...",
-    "suggested_tags": ["tag1", "tag2"]
+    "recommendation_reason": "This document is a professional resume...",
+    "suggested_tags": ["Resume", "CV", "Work Experience", "Software Developer", "Education"]
   },
-  "total_pages": null,
-  "successful_pages": null,
-  "failed_pages": null,
-  "page_results": null
-}
-```
-
-**Response (Batch Processing):**
-```json
-{
-  "status": "success",
-  "document_id": 6,
-  "recommendation": {
-    "category_id": 3,
-    "location_id": 1,
-    "recommendation_reason": "Combined analysis of all pages...",
-    "suggested_tags": ["tag1", "tag2"]
-  },
-  "total_pages": 3,
-  "successful_pages": 3,
+  "total_pages": 1,
+  "successful_pages": 1,
   "failed_pages": 0,
   "page_results": [
     {
@@ -512,26 +565,60 @@ Response: {
       "status": "success",
       "error": null,
       "ocr_text": "Extracted text...",
-      "file_url": "http://..."
-    },
-    {
-      "page_number": 2,
-      "status": "success",
-      "error": null,
-      "ocr_text": "Extracted text...",
-      "file_url": "http://..."
+      "file_url": "./tmp\\\\documents/1/pages/xxxx.pdf",
+      "document_id": 13,
+      "page_id": 62
     }
   ]
 }
 ```
 
+**Response (Batch Processing – Multiple Files and/or Multi-page PDFs):**
+```json
+{
+  "status": "success",
+  "document_id": 42,
+  "recommendation": {
+    "category_id": 3,
+    "location_id": 1,
+    "recommendation_reason": "Combined analysis of all pages...",
+    "suggested_tags": ["tag1", "tag2"]
+  },
+  "total_pages": 5,
+  "successful_pages": 5,
+  "failed_pages": 0,
+  "page_results": [
+    {
+      "page_number": 1,
+      "status": "success",
+      "error": null,
+      "ocr_text": "Extracted text (file A, page 1)...",
+      "file_url": "./tmp\\\\documents/1/pages/fileA.pdf",
+      "document_id": 42,
+      "page_id": 101
+    },
+    {
+      "page_number": 2,
+      "status": "success",
+      "error": null,
+      "ocr_text": "Extracted text (file A, page 2)...",
+      "file_url": "./tmp\\\\documents/1/pages/fileA.pdf",
+      "document_id": 42,
+      "page_id": 102
+    }
+    // ... additional pages from other files, each with its own page_number
+  ]
+}
+```
+
 **Key Features:**
-- **Unified API**: Single endpoint handles both single file (`file_urls` length 1) and batch processing
-- **PDF Splitting**: Multi-page PDFs automatically split into pages with sequential numbering
-- **Document ID**: Integer type, first page establishes ID, subsequent pages use same ID
-- **Recommendation**: All recommendation data in single `recommendation` field
-  - Uses IDs (`category_id`, `location_id`) instead of codes/names to save space
-  - Removed redundant fields for cleaner response
+- **Unified API**: Single endpoint handles both single-file and batch ingestion via `multipart/form-data` (`files` list).
+- **Per-file upload**: Each original file is uploaded once; all its pages reuse the same `image_url`.
+- **PDF Splitting**: Multi-page PDFs are split into logical pages for AI processing, with page numbers defined **within each file** (1..N_file).
+- **Document ID**: Integer type; the first successfully processed page establishes the `document_id`, and all subsequent pages reuse it.
+- **Recommendation**: All recommendation data is returned in a single `recommendation` field.
+  - Uses IDs (`category_id`, `location_id`) instead of codes/names to save space.
+  - Removes redundant fields for a cleaner response.
 
 ---
 
@@ -673,19 +760,40 @@ StorageHelperAIOrchestraService/
 *   **File Upload Integration** (December 6, 2025):
     - **Parallel File Upload**: Files uploaded to DataStorageService during OCR step
       - Upload runs in parallel with OCR processing for efficiency
-      - Uses HTTP API: `POST /api/v1/documents/upload-and-process`
+      - Uses HTTP API: Two-step process
+        - Step 1: `POST /api/v1/documents/upload` - Upload file and get `image_url`
+        - Step 2: `POST /api/v1/documents/process` - Process document page metadata
       - Microservice communication: No direct code dependencies, pure HTTP
     - **Error Handling**: 
       - File upload failure doesn't block AI processing
       - `file_upload_error` field tracks upload failures separately
       - Upload task properly cancelled if OCR fails to prevent resource leaks
     - **Output Fields**: 
-      - `file_url`: URL of file stored in database (from upload response)
+      - `file_url`: URL of file stored in database (from upload response, now `image_url`)
       - `file_upload_error`: Error message if upload failed (AI processing succeeded)
     - **Configuration**: 
       - `STORAGE_SERVICE_URL` configures DataStorageService endpoint
       - Default: `http://localhost:8000/internal` (extracted to `http://localhost:8000` for public API)
     - **Dependencies**: Added `aiofiles==24.1.0` for async file reading
+*   **File Upload Process Refactoring** (December 2025):
+    - **Two-Step Process Separation**: Split file upload into two distinct steps
+      - **Step 2B (File Upload)**: Upload file after cleaning step to get `image_url`
+        - API: `POST /api/v1/documents/upload`
+        - Timing: After cleaning step, before recommendation/embedding
+        - Purpose: Store file and get storage path
+      - **Step 4B (Process Document)**: Process document page metadata after pipeline completes
+        - API: `POST /api/v1/documents/process`
+        - Timing: After all pipeline processing (OCR, Vision, Cleaning, Recommendation, Embedding) completes
+        - Purpose: Save structured results and file storage path to database
+    - **Implementation Changes**:
+      - Split `upload_document_file()` into `upload_file_only()` and `process_document_page()` methods
+      - Modified `step_upload_file()` to only upload file (no processing)
+      - Added new `step_process_document()` method called after pipeline completion
+      - Updated both single-file and batch processing pipelines
+    - **Benefits**:
+      - Clear separation of concerns: file storage vs. metadata processing
+      - Structured results (OCR text, recommendations, embeddings) available when processing document
+      - Better error handling: upload failures don't prevent processing, processing failures don't prevent AI results
 *   **Batch Processing Implementation** (December 6, 2025):
     - **Unified Ingestion API**: Single `/ingestion` endpoint handles both single and batch uploads
       - Request format: `file_urls: List[str]` (single file = list with one element)
@@ -721,17 +829,20 @@ StorageHelperAIOrchestraService/
       - Normalized location fields: prefers `location_id` over `suggested_location_id`
       - Removes `location_name` and `suggested_location_name` fields
 *   **File Upload API Integration** (December 6, 2025):
-    - **Updated Upload Format**: Modified to match new DataStorageService API
-      - Endpoint: `POST /api/v1/documents/upload-and-process`
-      - Parameters: `file`, `owner_id`, `page_number`, `ocr_text` (cleaned_text), `document_id` (optional)
-      - Response: `document_id` (int), `page_id`
+    - **Updated Upload Format**: Modified to match new DataStorageService API (two-step process)
+      - Step 1: `POST /api/v1/documents/upload`
+        - Parameters: `file`, `owner_id`
+        - Response: `image_url`, `filename`
+      - Step 2: `POST /api/v1/documents/process`
+        - Parameters: `image_url` (from upload step), `owner_id`, `page_number`, `ocr_text` (optional), `document_id` (optional)
+        - Response: `document_id` (int), `page_id`, `image_url`, `status` (created/updated)
     - **Upload Timing**: Moved from OCR step to after Cleaning step
       - Ensures `cleaned_text` is available for upload
       - Uses `cleaning_info.cleaned_text` from PipelineStorage
     - **Document ID Handling**: 
       - If `document_id` provided: uses it for all pages
       - If empty: first page creates new document, subsequent pages use returned ID
-      - Properly extracts `document_id` from upload response (key: `'document_id'`, not `'id'`)
+      - Properly extracts `document_id` from process response (key: `'document_id'`, not `'id'`)
 *   **Embedding Architecture Enhancement** (December 8, 2025):
     - **EmbeddingResult Class**: Refactored embedding output to use structured `EmbeddingResult` class
       - Better encapsulation: vector, dimension, status, metadata all in one object

@@ -152,7 +152,7 @@ class DocumentOutputSchema:
         :param source: Source image URL
         :param file_type: File type ("image" or "pdf")
         :param document_id: Document ID
-        :param file_url: URL of file stored in database (from upload-and-process API)
+        :param file_url: URL of file stored in database (from upload/process API)
         :param file_upload_error: Error message if file upload failed (AI processing succeeded)
         :param processing_steps: List of processing steps completed
         :param extracted_text: Extracted text from OCR

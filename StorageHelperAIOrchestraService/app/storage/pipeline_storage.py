@@ -212,6 +212,194 @@ class PipelineStorage:
         # Return original path - file will be handled via API
         return file_path if file_path else None
     
+    async def upload_file_only(
+        self,
+        file_path: str,
+        owner_id: int
+    ) -> Optional[str]:
+        """
+        Upload document file to DataStorageService and get image_url.
+        
+        This is Step 1 of the two-step upload process:
+        - Uploads file to get image_url
+        - Does NOT process document metadata (that happens later in step_process_document_page)
+        
+        [API: POST /api/v1/documents/upload]
+        Service: DataStorageService (separate microservice)
+        
+        API format:
+        - file * (binary): Document page image file
+        - owner_id * (integer): Document owner user ID
+        
+        Returns:
+        - image_url (string): Image URL for later use in /documents/process endpoint
+        
+        :param file_path: Local file path or URL to the document file
+        :param owner_id: Document owner user ID
+        :return: image_url string if successful, None if failed
+        """
+        # Extract base URL from STORAGE_SERVICE_URL (e.g., "http://localhost:8000" from "http://localhost:8000/internal")
+        base_url = settings.STORAGE_SERVICE_URL.replace("/internal", "").rstrip("/")
+        
+        # Validate base URL
+        if not base_url or not base_url.startswith(("http://", "https://")):
+            logger.error(f"Invalid STORAGE_SERVICE_URL configuration: {settings.STORAGE_SERVICE_URL}")
+            return None
+        
+        try:
+            logger.debug(f"Uploading file to DataStorageService at: {base_url}/api/v1/documents/upload")
+            
+            # Read file content
+            file_content = await self._read_file_content(file_path)
+            if not file_content:
+                logger.error(f"Failed to read file content from {file_path}")
+                return None
+            
+            # Determine filename from path
+            filename = Path(file_path).name if file_path else "document"
+            
+            # Prepare multipart form data for upload
+            files = {
+                "file": (filename, file_content, self._get_content_type(file_path))
+            }
+            upload_data = {
+                "owner_id": str(owner_id)  # Convert to string for form data
+            }
+            
+            async with httpx.AsyncClient(base_url=base_url, timeout=30.0) as client:
+                upload_response = await client.post(
+                    "/api/v1/documents/upload",
+                    files=files,
+                    data=upload_data
+                )
+                upload_response.raise_for_status()
+                upload_result = upload_response.json()
+                image_url = upload_result.get("image_url")
+                
+                if not image_url:
+                    logger.error("Upload API did not return image_url")
+                    return None
+                
+                logger.info(f"File uploaded successfully. Image URL: {image_url}")
+                return image_url
+                
+        except httpx.ConnectError as e:
+            error_msg = f"Cannot connect to DataStorageService at {base_url}. Service may be down or URL incorrect."
+            logger.error(f"Connection error uploading file: {error_msg}")
+            logger.debug(f"Full error: {e}")
+            return None
+        except httpx.HTTPStatusError as e:
+            error_msg = f"HTTP {e.response.status_code}: {e.response.text[:200]}"
+            logger.error(f"Failed to upload file via API: {error_msg}")
+            return None
+        except httpx.TimeoutException as e:
+            error_msg = f"Timeout connecting to DataStorageService at {base_url}"
+            logger.error(f"Timeout uploading file: {error_msg}")
+            return None
+        except Exception as e:
+            error_msg = f"Unexpected error: {str(e)}"
+            logger.error(f"Error uploading file via API: {error_msg}", exc_info=True)
+            return None
+    
+    async def process_document_page(
+        self,
+        image_url: str,
+        owner_id: int,
+        page_number: int = 1,
+        ocr_text: str = "",
+        document_id: Optional[Union[int, str]] = None
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Process document page metadata via DataStorageService API.
+        
+        This is Step 2 of the two-step upload process:
+        - Processes document page metadata using image_url from upload step
+        - Should be called AFTER pipeline processing is complete
+        
+        [API: POST /api/v1/documents/process]
+        Service: DataStorageService (separate microservice)
+        
+        API format:
+        - image_url * (string): Image URL from /documents/upload endpoint
+        - owner_id * (integer): Document owner user ID
+        - page_number * (integer): Page number within document (1-indexed)
+        - ocr_text (string, optional): OCR extracted text for this page
+        - document_id (integer, optional): Existing document ID. If not provided, creates new document
+        
+        :param image_url: Image URL from upload step
+        :param owner_id: Document owner user ID
+        :param page_number: Page number within document (1-indexed)
+        :param ocr_text: OCR extracted text for this page (cleaned text from pipeline)
+        :param document_id: Optional existing document ID. If not provided, creates new document
+        :return: Response dictionary with document_id, page_id, image_url, status, or None if failed
+        """
+        # Extract base URL from STORAGE_SERVICE_URL (e.g., "http://localhost:8000" from "http://localhost:8000/internal")
+        base_url = settings.STORAGE_SERVICE_URL.replace("/internal", "").rstrip("/")
+        
+        # Validate base URL
+        if not base_url or not base_url.startswith(("http://", "https://")):
+            logger.error(f"Invalid STORAGE_SERVICE_URL configuration: {settings.STORAGE_SERVICE_URL}")
+            return None
+        
+        try:
+            logger.debug(f"Processing document page at: {base_url}/api/v1/documents/process")
+            
+            process_data = {
+                "image_url": image_url,
+                "owner_id": str(owner_id),
+                "page_number": str(page_number)
+            }
+            
+            # Add ocr_text if provided
+            if ocr_text:
+                process_data["ocr_text"] = ocr_text
+            
+            # Add document_id only if provided (not None)
+            if document_id is not None:
+                process_data["document_id"] = str(document_id)
+            
+            async with httpx.AsyncClient(base_url=base_url, timeout=30.0) as client:
+                process_response = await client.post(
+                    "/api/v1/documents/process",
+                    data=process_data
+                )
+                process_response.raise_for_status()
+                process_result = process_response.json()
+                
+                result = {
+                    "document_id": process_result.get("document_id"),
+                    "page_id": process_result.get("page_id"),
+                    "image_url": process_result.get("image_url") or image_url,
+                    "status": process_result.get("status"),
+                    "page_number": process_result.get("page_number", page_number)
+                }
+                
+                logger.info(
+                    f"Document page processed successfully. "
+                    f"Document ID: {result['document_id']}, "
+                    f"Page ID: {result['page_id']}, "
+                    f"Status: {result['status']}"
+                )
+                return result
+                
+        except httpx.ConnectError as e:
+            error_msg = f"Cannot connect to DataStorageService at {base_url}. Service may be down or URL incorrect."
+            logger.error(f"Connection error processing document page: {error_msg}")
+            logger.debug(f"Full error: {e}")
+            return None
+        except httpx.HTTPStatusError as e:
+            error_msg = f"HTTP {e.response.status_code}: {e.response.text[:200]}"
+            logger.error(f"Failed to process document page via API: {error_msg}")
+            return None
+        except httpx.TimeoutException as e:
+            error_msg = f"Timeout connecting to DataStorageService at {base_url}"
+            logger.error(f"Timeout processing document page: {error_msg}")
+            return None
+        except Exception as e:
+            error_msg = f"Unexpected error: {str(e)}"
+            logger.error(f"Error processing document page via API: {error_msg}", exc_info=True)
+            return None
+    
     async def upload_document_file(
         self,
         file_path: str,
@@ -223,20 +411,17 @@ class PipelineStorage:
         event_name: Optional[str] = None
     ) -> Optional[Dict[str, Any]]:
         """
-        Upload document file to DataStorageService via HTTP API.
+        Upload document file to DataStorageService via HTTP API (legacy method).
+        
+        This method is kept for backward compatibility but is deprecated.
+        New code should use upload_file_only() + process_document_page() separately.
         
         This method communicates with the DataStorageService microservice through
-        its public API endpoint. No direct code dependencies - pure HTTP communication.
+        its public API endpoints. No direct code dependencies - pure HTTP communication.
         
-        [API: POST /api/v1/documents/upload-and-process]
-        Service: DataStorageService (separate microservice)
-        
-        New API format:
-        - file * (binary): Document page image file
-        - owner_id * (integer): Document owner user ID
-        - page_number * (integer): Page number within document (1-indexed)
-        - ocr_text * (string): OCR extracted text for this page
-        - document_id (optional): Existing document ID. If not provided, creates new document
+        Process:
+        1. [API: POST /api/v1/documents/upload] - Upload file and get image_url
+        2. [API: POST /api/v1/documents/process] - Process document page metadata using image_url
         
         :param file_path: Local file path or URL to the document file
         :param owner_id: Document owner user ID
@@ -245,80 +430,20 @@ class PipelineStorage:
         :param document_id: Optional existing document ID. If not provided, creates new document
         :param category: Document category (TAX, VISA, MED, INS, etc.) - deprecated, kept for backward compatibility
         :param event_name: Optional associated event name - deprecated, kept for backward compatibility
-        :return: Response dictionary with id, filename, url, owner_id, created_at, or None if failed
+        :return: Response dictionary with document_id, page_id, image_url, status, or None if failed
         """
-        url = "/api/v1/documents/upload-and-process"
+        # Use the new split methods
+        image_url = await self.upload_file_only(file_path, owner_id)
+        if not image_url:
+            return None
         
-        try:
-            # Read file content
-            file_content = await self._read_file_content(file_path)
-            if not file_content:
-                logger.error(f"Failed to read file content from {file_path}")
-                return None
-            
-            # Determine filename from path
-            filename = Path(file_path).name if file_path else "document"
-            
-            # Prepare multipart form data
-            files = {
-                "file": (filename, file_content, self._get_content_type(file_path))
-            }
-            data = {
-                "owner_id": str(owner_id),  # Convert to string for form data
-                "page_number": str(page_number),  # Convert to string for form data
-                "ocr_text": ocr_text
-            }
-            
-            # Add document_id only if provided (not None)
-            if document_id is not None:
-                data["document_id"] = str(document_id)
-            
-            # Legacy parameters (deprecated but kept for backward compatibility)
-            if category and category != "UNKNOWN":
-                logger.warning("'category' parameter is deprecated in new API format")
-            if event_name:
-                logger.warning("'event_name' parameter is deprecated in new API format")
-            
-            # Upload to DataStorageService via HTTP API (microservice communication)
-            # Note: This endpoint is at /api/v1, not /internal
-            # Extract base URL from STORAGE_SERVICE_URL (e.g., "http://localhost:8000" from "http://localhost:8000/internal")
-            base_url = settings.STORAGE_SERVICE_URL.replace("/internal", "").rstrip("/")
-            
-            # Validate base URL
-            if not base_url or not base_url.startswith(("http://", "https://")):
-                logger.error(f"Invalid STORAGE_SERVICE_URL configuration: {settings.STORAGE_SERVICE_URL}")
-                return None
-            
-            logger.debug(f"Uploading file to DataStorageService at: {base_url}{url}")
-            
-            async with httpx.AsyncClient(base_url=base_url, timeout=30.0) as client:
-                response = await client.post(url, files=files, data=data)
-                response.raise_for_status()
-                
-                result = response.json()
-                # API returns document_id, not id
-                document_id = result.get('document_id')
-                page_id = result.get('page_id')
-                logger.info(f"Document file uploaded successfully. Document ID: {document_id}, Page ID: {page_id}")
-                return result
-                
-        except httpx.ConnectError as e:
-            error_msg = f"Cannot connect to DataStorageService at {base_url}. Service may be down or URL incorrect."
-            logger.error(f"Connection error uploading document file: {error_msg}")
-            logger.debug(f"Full error: {e}")
-            return None
-        except httpx.HTTPStatusError as e:
-            error_msg = f"HTTP {e.response.status_code}: {e.response.text[:200]}"
-            logger.error(f"Failed to upload document file via API: {error_msg}")
-            return None
-        except httpx.TimeoutException as e:
-            error_msg = f"Timeout connecting to DataStorageService at {base_url}"
-            logger.error(f"Timeout uploading document file: {error_msg}")
-            return None
-        except Exception as e:
-            error_msg = f"Unexpected error: {str(e)}"
-            logger.error(f"Error uploading document file via API: {error_msg}", exc_info=True)
-            return None
+        return await self.process_document_page(
+            image_url=image_url,
+            owner_id=owner_id,
+            page_number=page_number,
+            ocr_text=ocr_text,
+            document_id=document_id
+        )
     
     async def _read_file_content(self, file_path: str) -> Optional[bytes]:
         """
