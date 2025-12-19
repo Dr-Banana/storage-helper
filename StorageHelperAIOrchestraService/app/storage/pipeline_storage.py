@@ -307,7 +307,9 @@ class PipelineStorage:
         owner_id: int,
         page_number: int = 1,
         ocr_text: str = "",
-        document_id: Optional[Union[int, str]] = None
+        document_id: Optional[Union[int, str]] = None,
+        category_id: Optional[int] = None,
+        location_id: Optional[int] = None
     ) -> Optional[Dict[str, Any]]:
         """
         Process document page metadata via DataStorageService API.
@@ -325,12 +327,16 @@ class PipelineStorage:
         - page_number * (integer): Page number within document (1-indexed)
         - ocr_text (string, optional): OCR extracted text for this page
         - document_id (integer, optional): Existing document ID. If not provided, creates new document
+        - category_id (integer, optional): Document category ID
+        - location_id (integer, optional): Storage location ID (use -1 for no location)
         
         :param image_url: Image URL from upload step
         :param owner_id: Document owner user ID
         :param page_number: Page number within document (1-indexed)
         :param ocr_text: OCR extracted text for this page (cleaned text from pipeline)
         :param document_id: Optional existing document ID. If not provided, creates new document
+        :param category_id: Optional document category ID
+        :param location_id: Optional storage location ID (use -1 for no location)
         :return: Response dictionary with document_id, page_id, image_url, status, or None if failed
         """
         # Extract base URL from STORAGE_SERVICE_URL (e.g., "http://localhost:8000" from "http://localhost:8000/internal")
@@ -357,6 +363,14 @@ class PipelineStorage:
             # Add document_id only if provided (not None)
             if document_id is not None:
                 process_data["document_id"] = str(document_id)
+            
+            # Add category_id if provided
+            if category_id is not None:
+                process_data["category_id"] = str(category_id)
+            
+            # Add location_id if provided (including -1 for no location)
+            if location_id is not None:
+                process_data["location_id"] = str(location_id)
             
             async with httpx.AsyncClient(base_url=base_url, timeout=30.0) as client:
                 process_response = await client.post(

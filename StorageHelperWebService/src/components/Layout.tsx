@@ -9,6 +9,8 @@ import {
   Settings,
   Menu,
   X,
+  Tag,
+  MapPin,
 } from 'lucide-react'
 
 const Layout = () => {
@@ -21,6 +23,8 @@ const Layout = () => {
     { name: 'Upload', href: '/upload', icon: Upload },
     { name: 'Search', href: '/search', icon: Search },
     { name: 'Users', href: '/users', icon: Users },
+    { name: 'Categories', href: '/categories', icon: Tag },
+    { name: 'Locations', href: '/locations', icon: MapPin },
     { name: 'Settings', href: '/settings', icon: Settings },
   ]
 

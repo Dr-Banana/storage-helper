@@ -213,8 +213,18 @@ const DocumentsPage = () => {
                     return (
                       <div key={`${file.url}-${idx}`} className="rounded-home overflow-hidden bg-home-background-dark">
                         {file.file_type === 'pdf' ? (
-                          <div className="w-full h-32 flex items-center justify-center bg-home-background-dark">
-                            <FileText className="text-home-primary-500" size={48} />
+                          <div className="w-full h-48 rounded-home overflow-hidden bg-home-background-dark relative border border-home-primary-100">
+                            <iframe
+                              src={`${file.url}#toolbar=0&navpanes=0&scrollbar=0&page=1&zoom=page-fit`}
+                              type="application/pdf"
+                              className="w-full h-full border-0"
+                              title={`PDF Preview ${idx + 1}`}
+                              style={{ 
+                                pointerEvents: 'none',
+                                width: '100%',
+                                height: '100%'
+                              }}
+                            />
                           </div>
                         ) : (
                           <img

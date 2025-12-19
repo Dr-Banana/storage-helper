@@ -402,13 +402,27 @@ class IngestionPipeline:
                 logger.warning("No OCR text available for document processing")
                 ocr_text = ""
             
+            # Extract category_id and location_id from recommendation_result if available
+            category_id = None
+            location_id = None
+            if state.recommendation_result and state.recommendation_result.get("status") == "llm_success":
+                rec_data = state.recommendation_result.get("recommendation", {})
+                category_id = rec_data.get("category_id")
+                # Get location_id, prefer location_id over suggested_location_id
+                location_id = rec_data.get("location_id") or rec_data.get("suggested_location_id")
+                # Normalize: None or -1 means no location
+                if location_id is None:
+                    location_id = -1
+            
             # Process document page with image_url and structured results
             process_result = await self.pipeline_storage.process_document_page(
                 image_url=state.file_url,
                 owner_id=state.owner_id,
                 page_number=page_number,
                 ocr_text=ocr_text,
-                document_id=state.document_id  # Pass document_id (can be None)
+                document_id=state.document_id,  # Pass document_id (can be None)
+                category_id=category_id,
+                location_id=location_id
             )
             
             if process_result:
@@ -1066,44 +1080,55 @@ async def run_unified_ingestion_pipeline(
         
         # Step 2A: Process first page synchronously to establish document_id
         # This ensures document_id is available before processing remaining pages
+        # IMPORTANT: For single-page documents, we defer processing until after recommendation
+        # For multi-page documents, we process first page immediately to establish document_id
+        total_pages = len(page_tasks)
+        is_single_page = total_pages == 1
+        
         if page_tasks:
             first_page_info = page_tasks[0]
-            logger.info(f"Processing first page synchronously to establish document_id (current: {final_document_id})...")
+            logger.info(f"Processing first page synchronously to establish document_id (current: {final_document_id}, total_pages: {total_pages}, is_single_page: {is_single_page})...")
             first_page_result, first_page_state = await process_single_page(first_page_info, use_document_id=final_document_id)
             page_results.append(first_page_result)
+            first_page_state_global_index = None  # Store for later use in Step 3B
             if first_page_state:
-                first_page_global_index = first_page_result.get("global_page_index")
-                page_states[first_page_global_index] = first_page_state
+                first_page_state_global_index = first_page_result.get("global_page_index")
+                page_states[first_page_state_global_index] = first_page_state
                 
-                # 🔧 BUG FIX: Immediately process first page to get document_id
-                # This ensures all subsequent pages use the same document_id
+                # For multi-page documents: immediately process first page to get document_id
+                # For single-page documents: defer processing until after recommendation (in Step 3B)
                 if first_page_result.get("status") == "success":
-                    # Use global_page_number for database (ensures uniqueness across all files)
-                    # Fallback to page_number if global_page_number is not available
-                    global_page_num = first_page_result.get("global_page_number") or first_page_result.get("page_number", 1)
-                    # Process first page to establish document_id
-                    logger.info(f"Processing first page to establish document_id (global_page_number={global_page_num}, global_index={first_page_result.get('global_page_index')})...")
-                    await pipeline.step_process_document(first_page_state, page_number=global_page_num)
-                    
-                    # Update final_document_id from first page's result
-                    if first_page_state.document_id is not None:
-                        final_document_id = first_page_state.document_id
-                        logger.info(f"Document ID established from first page: {final_document_id}")
-                    
-                    # Update first_page_result with values from step_process_document
-                    # This is critical: we mark the first page as processed by setting page_id
-                    if first_page_state.page_id is not None:
-                        first_page_result["page_id"] = first_page_state.page_id
-                        logger.info(f"First page processed successfully: page_id={first_page_state.page_id}, document_id={first_page_state.document_id}, global_page_number={global_page_num}")
+                    if not is_single_page:
+                        # Multi-page: Process first page immediately to establish document_id
+                        # Use global_page_number for database (ensures uniqueness across all files)
+                        # Fallback to page_number if global_page_number is not available
+                        global_page_num = first_page_result.get("global_page_number") or first_page_result.get("page_number", 1)
+                        # Process first page to establish document_id
+                        logger.info(f"Processing first page to establish document_id (multi-page document, global_page_number={global_page_num}, global_index={first_page_result.get('global_page_index')})...")
+                        await pipeline.step_process_document(first_page_state, page_number=global_page_num)
+                        
+                        # Update final_document_id from first page's result
+                        if first_page_state.document_id is not None:
+                            final_document_id = first_page_state.document_id
+                            logger.info(f"Document ID established from first page: {final_document_id}")
+                        
+                        # Update first_page_result with values from step_process_document
+                        # This is critical: we mark the first page as processed by setting page_id
+                        if first_page_state.page_id is not None:
+                            first_page_result["page_id"] = first_page_state.page_id
+                            logger.info(f"First page processed successfully: page_id={first_page_state.page_id}, document_id={first_page_state.document_id}, global_page_number={global_page_num}")
+                        else:
+                            logger.warning(f"First page processing did not return page_id (global_page_number={global_page_num}) - this may cause duplicate insertion!")
+                        
+                        if first_page_state.document_id is not None:
+                            first_page_result["document_id"] = first_page_state.document_id
+                        if first_page_state.file_url is not None:
+                            first_page_result["file_url"] = first_page_state.file_url
+                        if first_page_state.processed_page_number is not None:
+                            first_page_result["page_number"] = first_page_state.processed_page_number
                     else:
-                        logger.warning(f"First page processing did not return page_id (global_page_number={global_page_num}) - this may cause duplicate insertion!")
-                    
-                    if first_page_state.document_id is not None:
-                        first_page_result["document_id"] = first_page_state.document_id
-                    if first_page_state.file_url is not None:
-                        first_page_result["file_url"] = first_page_state.file_url
-                    if first_page_state.processed_page_number is not None:
-                        first_page_result["page_number"] = first_page_state.processed_page_number
+                        # Single-page: Defer processing until after recommendation
+                        logger.info(f"Single-page document detected - deferring first page processing until after recommendation")
         
         # Step 2B: Process remaining pages in parallel (if any)
         # All pages now use the established document_id from first page
@@ -1173,6 +1198,111 @@ async def run_unified_ingestion_pipeline(
             if isinstance(embedding_result, Exception):
                 logger.error(f"Embedding failed: {embedding_result}")
                 embedding_result = None
+        
+        # Step 3B: Process/Update document with recommendation data (category and location)
+        # IMPORTANT: 
+        # - For single-page documents: Process first page here (deferred from Step 2A) with recommendation
+        # - For multi-page documents: Update first page (already processed in Step 2A) with recommendation
+        total_pages = len(page_results)
+        if final_document_id and recommendation_result and recommendation_result.get("status") == "llm_success":
+            rec_data = recommendation_result.get("recommendation", {})
+            category_id = rec_data.get("category_id")
+            location_id = rec_data.get("location_id") or rec_data.get("suggested_location_id")
+            # Normalize: None means no location, convert to -1
+            if location_id is None:
+                location_id = -1
+            
+            # Update document by processing a page with category and location
+            # We always update if we have recommendation data (even if category_id is None, we may need to set location_id to -1)
+            # Use page_number=1 to trigger the update logic in DocumentService
+            if total_pages == 1:
+                logger.info(f"Step 3B: Processing single-page document {final_document_id} with recommendation data: category_id={category_id}, location_id={location_id}, rec_data keys: {list(rec_data.keys())}, rec_data: {rec_data}")
+            else:
+                logger.info(f"Step 3B: Updating multi-page document {final_document_id} (total_pages={total_pages}) with recommendation data: category_id={category_id}, location_id={location_id}, rec_data keys: {list(rec_data.keys())}, rec_data: {rec_data}")
+            # Always try to update if we have recommendation result
+            # category_id should always be present in rec_data if recommendation succeeded
+            # Even if category_id is None, we should still try to update (it means no category was found)
+            # IMPORTANT: Check if category_id exists AND is not None, or if location_id is not None
+            has_category = "category_id" in rec_data and rec_data.get("category_id") is not None
+            has_location = location_id is not None
+            logger.info(f"Step 3B: Condition check - has_category: {has_category}, has_location: {has_location}, category_id value: {category_id}")
+            if has_category or has_location:
+                logger.info(f"Step 3B: Condition met - will update document")
+                try:
+                    # Get the first page state and result
+                    first_page_state = None
+                    first_page_result = None
+                    for page_state in page_states.values():
+                        if page_state and page_state.file_url:
+                            # For multi-page: match by document_id
+                            # For single-page: just get the first one
+                            if total_pages > 1:
+                                if page_state.document_id == final_document_id:
+                                    first_page_state = page_state
+                                    break
+                            else:
+                                first_page_state = page_state
+                                break
+                    
+                    # Find corresponding first_page_result
+                    if first_page_state:
+                        for result in page_results:
+                            if result.get("status") == "success":
+                                # Match by global_page_index or by being the first successful result
+                                if total_pages == 1 or result.get("page_number") == 1:
+                                    first_page_result = result
+                                    break
+                    
+                    if first_page_state and first_page_result:
+                        # Create a temporary state with recommendation data for updating document
+                        update_state = PipelineState(
+                            image_url=first_page_state.image_url,
+                            owner_id=owner_id,
+                            document_id=final_document_id if total_pages > 1 else None,  # For single-page, let it create new document
+                            file_url=first_page_state.file_url
+                        )
+                        update_state.recommendation_result = recommendation_result
+                        
+                        # Process with page_number=1
+                        # For single-page: This creates the page record with recommendation
+                        # For multi-page: This updates the existing page record with recommendation
+                        global_page_num = first_page_result.get("global_page_number") or first_page_result.get("page_number", 1)
+                        await pipeline.step_process_document(update_state, page_number=global_page_num)
+                        
+                        # Update final_document_id if we got one from processing
+                        if update_state.document_id is not None:
+                            final_document_id = update_state.document_id
+                        
+                        # Update first_page_result with values from step_process_document
+                        if total_pages == 1:
+                            # Single-page: Mark as processed
+                            if update_state.page_id is not None:
+                                first_page_result["page_id"] = update_state.page_id
+                                logger.info(f"Single-page document processed successfully: page_id={update_state.page_id}, document_id={update_state.document_id}, category_id={category_id}, location_id={location_id}")
+                            if update_state.document_id is not None:
+                                first_page_result["document_id"] = update_state.document_id
+                            if update_state.file_url is not None:
+                                first_page_result["file_url"] = update_state.file_url
+                            if update_state.processed_page_number is not None:
+                                first_page_result["page_number"] = update_state.processed_page_number
+                        else:
+                            # Multi-page: Just update
+                            logger.info(f"Updated multi-page document {final_document_id} with category_id={category_id}, location_id={location_id}")
+                    else:
+                        logger.warning(f"Could not find first page state to update document {final_document_id} with recommendation data")
+                except Exception as e:
+                    logger.error(f"Step 3B: Failed to update document with recommendation data: {e}", exc_info=True)
+            else:
+                logger.warning(f"Step 3B: Skipping update - category_id is None and location_id is None. rec_data: {rec_data}")
+        elif total_pages == 1:
+            logger.info(f"Step 3B: Skipping update - single page document, first page was already processed with recommendation in Step 2A")
+        else:
+            if not final_document_id:
+                logger.warning("Step 3B: Skipping - no final_document_id")
+            elif not recommendation_result:
+                logger.warning("Step 3B: Skipping - no recommendation_result")
+            elif recommendation_result.get("status") != "llm_success":
+                logger.warning(f"Step 3B: Skipping - recommendation status is not llm_success: {recommendation_result.get('status')}")
         
         # Step 3C: Save embedding to DataStorageService via API
         # This should be done after pages are processed (document_id is available)
@@ -1283,6 +1413,10 @@ async def run_unified_ingestion_pipeline(
                     if final_document_id and not page_state.document_id:
                         page_state.document_id = final_document_id
                     
+                    # Add recommendation_result to page_state if available (for Step 4B processing)
+                    if recommendation_result and not page_state.recommendation_result:
+                        page_state.recommendation_result = recommendation_result
+                    
                     # Process document page with structured results (use global page number for database)
                     await pipeline.step_process_document(page_state, page_number=global_page_num)
 
@@ -1359,9 +1493,9 @@ async def run_unified_ingestion_pipeline(
             
             # Normalize location fields: use location_id instead of location_name
             # Prefer location_id over suggested_location_id
+            # If no location is provided, set location_id to -1
             location_id = rec_data.get("location_id") or rec_data.get("suggested_location_id")
-            if location_id:
-                rec_data["location_id"] = location_id
+            rec_data["location_id"] = location_id if location_id else -1
             
             # Always remove location_name fields (use ID only)
             rec_data.pop("location_name", None)

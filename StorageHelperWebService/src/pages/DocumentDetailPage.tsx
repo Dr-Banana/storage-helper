@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react'
 import { useParams, Link, useLocation } from 'react-router-dom'
 import { ArrowLeft, Calendar, User, FileText, MapPin, Tag } from 'lucide-react'
-import { documentService, userService, Document, DocumentPage, DocumentFile } from '../api/services'
+import { documentService, userService, categoryService, locationService, Document, DocumentPage, DocumentFile, DocumentCategory, StorageLocation } from '../api/services'
 
 const DocumentDetailPage = () => {
   const { id } = useParams<{ id: string }>()
@@ -11,6 +11,8 @@ const DocumentDetailPage = () => {
   const [files, setFiles] = useState<DocumentFile[]>([])
   const [loading, setLoading] = useState(true)
   const [users, setUsers] = useState<Array<{ id: number; display_name: string }>>([])
+  const [category, setCategory] = useState<DocumentCategory | null>(null)
+  const [storageLocation, setStorageLocation] = useState<StorageLocation | null>(null)
   
   // Get owner_id from location state if available
   const ownerIdFromState = (location.state as { ownerId?: number })?.ownerId
@@ -37,9 +39,9 @@ const DocumentDetailPage = () => {
         // Use owner_id from location state if available, otherwise try to find it
         if (ownerIdFromState) {
           doc.owner_id = ownerIdFromState
-        } else if (doc.owner_id === 0) {
+        } else if (doc.owner_id === 0 && users.length > 0) {
           // If owner_id is 0, try to find the actual owner by querying all users
-          // Search through users to find who owns this document
+          // Only search if users are already loaded
           for (const user of users) {
             try {
               const userDocs = await userService.getDocuments(user.id)
@@ -53,13 +55,64 @@ const DocumentDetailPage = () => {
           }
         }
         
-        setDocument(doc)
-
+        // Use document from pages API if available, otherwise use minimal doc
         const pagesData = await documentService.getPages(parseInt(id))
+        
+        // Backend now returns full document details including category_id and location_id
+        if (pagesData.document) {
+          setDocument(pagesData.document)
+          // Use owner_id from document
+          if (pagesData.document.owner_id) {
+            doc.owner_id = pagesData.document.owner_id
+          }
+        } else {
+          setDocument(doc)
+        }
         
         // Backend now returns full page details including image_url and unique files
         setPages(pagesData.pages || [])
         setFiles(pagesData.files || [])
+        
+        // Load category and location details if available
+        const finalDoc = pagesData.document || doc
+        console.log('Document data:', finalDoc)
+        console.log('Category ID:', finalDoc.category_id, 'Location ID:', finalDoc.current_location_id, 'Owner ID:', finalDoc.owner_id)
+        
+        // Load category if available (category_id exists and is not null/undefined)
+        if (finalDoc.category_id != null && finalDoc.category_id > 0 && finalDoc.owner_id && finalDoc.owner_id > 0) {
+          try {
+            console.log('Loading category:', finalDoc.category_id, 'for user:', finalDoc.owner_id)
+            const cat = await categoryService.getById(finalDoc.owner_id, finalDoc.category_id)
+            console.log('Category loaded:', cat)
+            if (cat) {
+              setCategory(cat)
+            } else {
+              console.warn('Category not found for ID:', finalDoc.category_id)
+            }
+          } catch (error) {
+            console.error('Failed to load category:', error)
+          }
+        } else {
+          console.log('Skipping category load - category_id:', finalDoc.category_id, 'owner_id:', finalDoc.owner_id)
+        }
+        
+        // Load location if available (current_location_id exists, is not null/undefined, and is not -1)
+        if (finalDoc.current_location_id != null && finalDoc.current_location_id > 0 && finalDoc.owner_id && finalDoc.owner_id > 0) {
+          try {
+            console.log('Loading location:', finalDoc.current_location_id, 'for user:', finalDoc.owner_id)
+            const loc = await locationService.getById(finalDoc.owner_id, finalDoc.current_location_id)
+            console.log('Location loaded:', loc)
+            if (loc) {
+              setStorageLocation(loc)
+            } else {
+              console.warn('Location not found for ID:', finalDoc.current_location_id)
+            }
+          } catch (error) {
+            console.error('Failed to load location:', error)
+          }
+        } else {
+          console.log('Skipping location load - current_location_id:', finalDoc.current_location_id, 'owner_id:', finalDoc.owner_id)
+        }
       } catch (error) {
         console.error('Failed to load document:', error)
       } finally {
@@ -68,7 +121,9 @@ const DocumentDetailPage = () => {
     }
 
     loadDocument()
-  }, [id, ownerIdFromState, users])
+    // Only depend on id and ownerIdFromState, not users
+    // users is loaded separately and doesn't need to trigger document reload
+  }, [id, ownerIdFromState])
 
   if (loading) {
     return (
@@ -108,18 +163,19 @@ const DocumentDetailPage = () => {
       {/* Document info card */}
       <div className="card mb-6">
         <div className="flex flex-col md:flex-row gap-6">
-          {document.image_url && (
-            <div className="md:w-1/3">
-              <img
-                src={document.image_url}
-                alt={document.title || 'Document'}
-                className="w-full rounded-home shadow-home"
-              />
-            </div>
-          )}
           <div className="flex-1">
             <h1 className="text-3xl font-bold text-home-text-dark mb-4">
-              {document.title || `Document #${document.id}`}
+              {(() => {
+                // If title is "Document page X" format, use Document #ID instead
+                if (document.title && /^Document page \d+$/i.test(document.title)) {
+                  return `Document #${document.id}`
+                }
+                // If title is empty or just "Document #X", try to use a better default
+                if (!document.title || document.title === `Document #${document.id}`) {
+                  return `Document #${document.id}`
+                }
+                return document.title
+              })()}
             </h1>
             <div className="space-y-3">
               <div className="flex items-center gap-2 text-home-text-light">
@@ -136,18 +192,36 @@ const DocumentDetailPage = () => {
                   <span>Page IDs: {pages.map(p => p.id).join(', ')}</span>
                 </div>
               )}
-              {document.current_location_id && (
+              {(document.current_location_id != null && document.current_location_id > 0) ? (
                 <div className="flex items-center gap-2 text-home-text-light">
                   <MapPin size={18} />
-                  <span>Storage Location: #{document.current_location_id}</span>
+                  <span>
+                    Storage Location: {storageLocation ? (
+                      <>
+                        {storageLocation.name}
+                        {storageLocation.description && ` (${storageLocation.description})`}
+                      </>
+                    ) : (
+                      `#${document.current_location_id}`
+                    )}
+                  </span>
                 </div>
-              )}
-              {document.category_id && (
+              ) : null}
+              {(document.category_id != null && document.category_id > 0) ? (
                 <div className="flex items-center gap-2 text-home-text-light">
                   <Tag size={18} />
-                  <span>Category: #{document.category_id}</span>
+                  <span>
+                    Category: {category ? (
+                      <>
+                        {category.name} ({category.code})
+                        {category.description && ` - ${category.description}`}
+                      </>
+                    ) : (
+                      `#${document.category_id}`
+                    )}
+                  </span>
                 </div>
-              )}
+              ) : null}
             </div>
             {document.metadata && Object.keys(document.metadata).length > 0 && (
               <div className="mt-6 pt-6 border-t border-home-primary-100">

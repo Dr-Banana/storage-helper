@@ -7,6 +7,8 @@ import UploadPage from './pages/UploadPage'
 import SearchPage from './pages/SearchPage'
 import UsersPage from './pages/UsersPage'
 import SettingsPage from './pages/SettingsPage'
+import CategoriesPage from './pages/CategoriesPage'
+import LocationsPage from './pages/LocationsPage'
 
 function App() {
   return (
@@ -24,6 +26,8 @@ function App() {
           <Route path="upload" element={<UploadPage />} />
           <Route path="search" element={<SearchPage />} />
           <Route path="users" element={<UsersPage />} />
+          <Route path="categories" element={<CategoriesPage />} />
+          <Route path="locations" element={<LocationsPage />} />
           <Route path="settings" element={<SettingsPage />} />
         </Route>
       </Routes>

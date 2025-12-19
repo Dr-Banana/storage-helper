@@ -351,7 +351,9 @@ class DocumentService:
         owner_id: int,
         page_number: int,
         ocr_text: Optional[str] = None,
-        document_id: Optional[int] = None
+        document_id: Optional[int] = None,
+        category_id: Optional[int] = None,
+        location_id: Optional[int] = None
     ) -> tuple:
         """
         Process and persist document page metadata (no file upload)
@@ -366,6 +368,8 @@ class DocumentService:
             page_number: Page number within document
             ocr_text: Optional extracted OCR text for this page
             document_id: Optional existing document ID. If None, creates new document
+            category_id: Optional document category ID
+            location_id: Optional storage location ID (use -1 for no location, will be converted to None)
             
         Returns:
             Tuple of (document_id, page_id, image_url)
@@ -379,6 +383,9 @@ class DocumentService:
             if not user:
                 raise ValueError(f"User {owner_id} not found")
             
+            # Normalize location_id: -1 means no location, convert to None
+            normalized_location_id = None if location_id == -1 else location_id
+            
             # Get or create document
             if document_id:
                 # Verify document exists and belongs to owner
@@ -386,38 +393,84 @@ class DocumentService:
                     .filter(Document.id == document_id, Document.owner_id == owner_id).first()
                 if not document:
                     raise ValueError(f"Document {document_id} not found or does not belong to user {owner_id}")
+                
+                # Update document with category and location if provided
+                # For existing documents, update category/location if:
+                # 1. It's the first page, OR
+                # 2. The document doesn't have category/location yet (None)
+                # This ensures recommendation data is saved even if first page was processed before recommendation
+                # IMPORTANT: Always update if page_number == 1 (this is called from Step 3B to update with recommendation)
+                should_update = page_number == 1 or document.category_id is None or document.current_location_id is None
+                logger.info(f"Document update check: page_number={page_number}, category_id={category_id}, location_id={location_id}, "
+                           f"doc.category_id={document.category_id}, doc.current_location_id={document.current_location_id}, should_update={should_update}")
+                
+                if should_update:
+                    # Update category if provided (including None to clear it)
+                    if category_id is not None:
+                        logger.info(f"Updating document {document_id} category_id from {document.category_id} to {category_id}")
+                        document.category_id = category_id
+                    elif page_number == 1:
+                        # If page_number == 1 and category_id is None, log a warning
+                        logger.warning(f"Step 3B update called with page_number=1 but category_id is None for document {document_id}")
+                    # Update location if provided (including -1 which means None/no location)
+                    # location_id can be -1 (meaning no location), which should be saved as None
+                    if location_id is not None:
+                        logger.info(f"Updating document {document_id} current_location_id from {document.current_location_id} to {normalized_location_id}")
+                        document.current_location_id = normalized_location_id
+                else:
+                    logger.warning(f"Skipping update for document {document_id} - page_number={page_number}, doc.category_id={document.category_id}, doc.current_location_id={document.current_location_id}")
             else:
                 # Create new document
+                # Use None as title - will be displayed as "Document #ID" in frontend
+                # This is better than "Document page X" which is confusing
                 document = Document(
-                    title=f"Document page {page_number}",
+                    title=None,
                     owner_id=owner_id,
                     image_url=None,
-                    category_id=None,
+                    category_id=category_id,
                     event_id=None,
+                    current_location_id=normalized_location_id,
                     doc_metadata={}
                 )
                 db.add(document)
                 db.flush()  # Get document.id
                 document_id = document.id
             
-            # Create document page record
-            page = DocumentPage(
-                document_id=document_id,
-                page_number=page_number,
-                image_url=image_url,
-                ocr_text=ocr_text
-            )
-            db.add(page)
+            # Check if page already exists (for Step 3B updates, page might already exist)
+            existing_page = db.query(DocumentPage).filter(
+                DocumentPage.document_id == document_id,
+                DocumentPage.page_number == page_number
+            ).first()
             
-            # Update document thumbnail if first page
-            if page_number == 1:
-                document.image_url = image_url
-            
-            db.commit()
-            db.refresh(page)
-            
-            logger.info(f"Document page created: doc_id={document_id}, page_id={page.id}")
-            return (document_id, page.id, image_url)
+            if existing_page:
+                # Page already exists - just update document category/location if needed
+                # This handles Step 3B case where we're updating document metadata after recommendation
+                logger.info(f"Page {page_number} already exists for document {document_id}, skipping page creation, only updating document metadata")
+                page_id = existing_page.id
+                returned_image_url = existing_page.image_url
+                # Commit the document updates (category_id and location_id)
+                db.commit()
+                logger.info(f"Document metadata updated: doc_id={document_id}, page_id={page_id}, category_id={category_id}, location_id={normalized_location_id}")
+                return (document_id, page_id, returned_image_url)
+            else:
+                # Create document page record
+                page = DocumentPage(
+                    document_id=document_id,
+                    page_number=page_number,
+                    image_url=image_url,
+                    ocr_text=ocr_text
+                )
+                db.add(page)
+                
+                # Update document thumbnail if first page
+                if page_number == 1:
+                    document.image_url = image_url
+                
+                db.commit()
+                db.refresh(page)
+                
+                logger.info(f"Document page created: doc_id={document_id}, page_id={page.id}, category_id={category_id}, location_id={normalized_location_id}")
+                return (document_id, page.id, image_url)
             
         except Exception as e:
             db.rollback()

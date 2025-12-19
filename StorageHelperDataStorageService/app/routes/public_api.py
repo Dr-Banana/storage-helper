@@ -93,6 +93,8 @@ def process_document_page(
     page_number: int = Form(..., description="Page number within document (1-indexed)"),
     ocr_text: Optional[str] = Form(None, description="Optional: OCR extracted text for this page"),
     document_id: Optional[int] = Form(None, description="Optional existing document ID. If not provided, creates new document"),
+    category_id: Optional[int] = Form(None, description="Optional: Document category ID"),
+    location_id: Optional[int] = Form(None, description="Optional: Storage location ID (use -1 for no location)"),
     db: Session = Depends(get_db)
 ):
     """
@@ -103,6 +105,8 @@ def process_document_page(
     - **page_number**: Page number within document (required, 1-indexed)
     - **ocr_text**: OCR extracted text for this page (optional)
     - **document_id**: Optional existing document ID. If not provided, creates new document
+    - **category_id**: Optional document category ID
+    - **location_id**: Optional storage location ID (use -1 for no location)
     """
     try:
         # Process page and save to database
@@ -112,7 +116,9 @@ def process_document_page(
             owner_id=owner_id,
             page_number=page_number,
             ocr_text=ocr_text,
-            document_id=document_id
+            document_id=document_id,
+            category_id=category_id,
+            location_id=location_id
         )
         
         # Determine status

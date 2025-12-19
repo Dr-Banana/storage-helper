@@ -170,14 +170,19 @@ export const documentService = {
    * Get document by ID
    * Note: Backend doesn't have GET /api/v1/documents/{id} endpoint
    * This function uses /api/documents/{id}/pages to verify document exists
-   * and returns a minimal document object
+   * and returns the document object from the API response
    */
   getById: async (id: number): Promise<Document> => {
     try {
-      // Use /api/documents/{id}/pages to verify document exists
+      // Use /api/documents/{id}/pages to get document details
       const pagesResponse = await apiClient.get(`/documents/${id}/pages`)
       
-      // Create a minimal document object since backend doesn't expose full document details endpoint
+      // Backend now returns full document details in the response
+      if (pagesResponse.data.document) {
+        return pagesResponse.data.document
+      }
+      
+      // Fallback: Create a minimal document object if document not in response
       const minimalDoc: Document = {
         id: id,
         title: `Document #${id}`,
@@ -198,6 +203,7 @@ export const documentService = {
    */
   getPages: async (documentId: number): Promise<{ 
     document_id: number
+    document?: Document
     total: number
     pages: DocumentPage[]
     files?: DocumentFile[]
@@ -380,12 +386,20 @@ export const ingestionService = {
 
 export const categoryService = {
   /**
-   * Get all document categories
-   * This endpoint may not exist yet, but prepared for future use
+   * Get all document categories for a user
+   * GET /api/users/{user_id}/categories
    */
-  getAll: async (): Promise<DocumentCategory[]> => {
-    // TODO: Implement when API endpoint is available
-    throw new Error('Not implemented yet')
+  getByUserId: async (userId: number): Promise<{ user_id: number; total: number; categories: DocumentCategory[] }> => {
+    const response = await apiClient.get(`/users/${userId}/categories`)
+    return response.data
+  },
+  
+  /**
+   * Get category by ID (from user's categories list)
+   */
+  getById: async (userId: number, categoryId: number): Promise<DocumentCategory | null> => {
+    const response = await categoryService.getByUserId(userId)
+    return response.categories.find(c => c.id === categoryId) || null
   },
 }
 
@@ -395,12 +409,20 @@ export const categoryService = {
 
 export const locationService = {
   /**
-   * Get all storage locations
-   * This endpoint may not exist yet, but prepared for future use
+   * Get all storage locations for a user
+   * GET /api/users/{user_id}/locations
    */
-  getAll: async (): Promise<StorageLocation[]> => {
-    // TODO: Implement when API endpoint is available
-    throw new Error('Not implemented yet')
+  getByUserId: async (userId: number): Promise<{ user_id: number; total: number; locations: StorageLocation[] }> => {
+    const response = await apiClient.get(`/users/${userId}/locations`)
+    return response.data
+  },
+  
+  /**
+   * Get location by ID (from user's locations list)
+   */
+  getById: async (userId: number, locationId: number): Promise<StorageLocation | null> => {
+    const response = await locationService.getByUserId(userId)
+    return response.locations.find(l => l.id === locationId) || null
   },
 }
 

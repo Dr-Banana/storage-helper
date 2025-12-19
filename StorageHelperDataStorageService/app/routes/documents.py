@@ -188,6 +188,18 @@ def get_document_pages(document_id: int, db: Session = Depends(get_db)):
         
         return {
             "document_id": document_id,
+            "document": {
+                "id": document.id,
+                "title": document.title,
+                "category_id": document.category_id,
+                "owner_id": document.owner_id,
+                "event_id": document.event_id,
+                "current_location_id": document.current_location_id,
+                "metadata": document.doc_metadata,
+                "image_url": _convert_to_accessible_url(document.image_url) if document.image_url else None,
+                "created_at": document.created_at.isoformat() if document.created_at else None,
+                "updated_at": document.updated_at.isoformat() if document.updated_at else None,
+            },
             "total": len(page_details),
             "pages": page_details,
             "files": file_list,
