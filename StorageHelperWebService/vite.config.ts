@@ -21,6 +21,12 @@ export default defineConfig({
         target: 'http://localhost:8000',
         changeOrigin: true,
       },
+      // Proxy for AIOrchestraService ingestion API (optional, if using relative URLs)
+      '/ai-orchestra': {
+        target: 'http://localhost:8888',
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/ai-orchestra/, '/api/v1'),
+      },
     },
   },
 })

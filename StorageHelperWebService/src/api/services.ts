@@ -1,4 +1,5 @@
 import apiClient from './client'
+import axios from 'axios'
 
 // ============================================================================
 // Type Definitions
@@ -58,6 +59,40 @@ export interface Event {
   description?: string
   created_at: string
   updated_at: string
+}
+
+export interface IngestionRequest {
+  files: File[]
+  owner_id: number
+  document_id?: number
+  file_type?: string
+}
+
+export interface PageProcessingResult {
+  page_number: number
+  status: 'success' | 'failed'
+  error?: string | null
+  ocr_text?: string | null
+  file_url?: string | null
+  document_id?: number | null
+  page_id?: number | null
+}
+
+export interface IngestionResponse {
+  status: 'success' | 'partial_success' | 'failed'
+  document_id: number | null
+  recommendation: {
+    category_id?: number
+    location_id?: number
+    recommendation_reason?: string
+    suggested_tags?: string[]
+    [key: string]: any
+  }
+  total_pages?: number | null
+  successful_pages?: number | null
+  failed_pages?: number | null
+  page_results?: PageProcessingResult[] | null
+  embedding_save_error?: string | null
 }
 
 // ============================================================================
@@ -269,6 +304,64 @@ export const documentService = {
 }
 
 // ============================================================================
+// Ingestion API (AIOrchestraService)
+// ============================================================================
+
+/**
+ * AIOrchestraService API client
+ * This service handles document ingestion with AI processing (OCR, Vision, Recommendation, Embedding)
+ * 
+ * Uses Vite proxy to avoid CORS issues. The proxy is configured in vite.config.ts
+ * to forward /ai-orchestra/* requests to http://localhost:8888/api/v1/*
+ */
+const AI_ORCHESTRA_BASE_URL = import.meta.env.VITE_AI_ORCHESTRA_URL || '/ai-orchestra'
+
+const aiOrchestraClient = axios.create({
+  baseURL: AI_ORCHESTRA_BASE_URL,
+  // Don't set Content-Type header - let browser set it with boundary for multipart/form-data
+})
+
+export const ingestionService = {
+  /**
+   * Process documents through AI ingestion pipeline
+   * POST /api/v1/ingestion (AIOrchestraService)
+   * 
+   * This endpoint:
+   * 1. Uploads files to DataStorageService
+   * 2. Runs OCR, Vision, Cleaning, Recommendation, and Embedding
+   * 3. Saves document metadata and page information
+   * 
+   * @param request - Ingestion request with files and metadata
+   * @returns Ingestion response with document_id, recommendation, and page results
+   */
+  ingest: async (request: IngestionRequest): Promise<IngestionResponse> => {
+    const formData = new FormData()
+    
+    // Append all files (supports single or multiple files)
+    for (const file of request.files) {
+      formData.append('files', file)
+    }
+    
+    // Append required parameters
+    formData.append('owner_id', request.owner_id.toString())
+    
+    // Append optional parameters
+    if (request.document_id !== undefined) {
+      formData.append('document_id', request.document_id.toString())
+    }
+    
+    if (request.file_type) {
+      formData.append('file_type', request.file_type)
+    }
+    
+    // Don't set Content-Type header - browser will set it automatically with boundary
+    const response = await aiOrchestraClient.post('/ingestion', formData)
+    
+    return response.data
+  },
+}
+
+// ============================================================================
 // Category APIs (if needed in the future)
 // ============================================================================
 
@@ -323,6 +416,7 @@ export const api = {
   categories: categoryService,
   locations: locationService,
   events: eventService,
+  ingestion: ingestionService,
 }
 
 // Default export for convenience

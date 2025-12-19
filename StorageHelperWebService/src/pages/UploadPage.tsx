@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Upload, FileText, Image, X, CheckCircle } from 'lucide-react'
-import { documentService } from '../api/services'
+import { Upload, FileText, Image, X, CheckCircle, AlertCircle } from 'lucide-react'
+import { ingestionService } from '../api/services'
 
 const UploadPage = () => {
   const navigate = useNavigate()
@@ -10,6 +10,8 @@ const UploadPage = () => {
   const [uploading, setUploading] = useState(false)
   const [uploadProgress, setUploadProgress] = useState<Record<string, number>>({})
   const [uploadedFiles, setUploadedFiles] = useState<Set<string>>(new Set())
+  const [uploadError, setUploadError] = useState<string | null>(null)
+  const [ingestionResult, setIngestionResult] = useState<any>(null)
 
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files) {
@@ -29,45 +31,63 @@ const UploadPage = () => {
     }
 
     setUploading(true)
+    setUploadError(null)
+    setIngestionResult(null)
     const newUploadedFiles = new Set<string>()
 
     try {
-      // Upload files to temporary storage
-      for (let i = 0; i < files.length; i++) {
-        const file = files[i]
-        const fileKey = `${file.name}-${i}`
-        
-        setUploadProgress((prev) => ({ ...prev, [fileKey]: 30 }))
-        
-        try {
-          // Upload to temp storage
-          const tempFormData = new FormData()
-          tempFormData.append('file', file)
-          
-          const axios = (await import('axios')).default
-          const uploadResponse = await axios.post('/api/v1/files/upload-temp', tempFormData, {
-            headers: {
-              'Content-Type': 'multipart/form-data',
-            },
-          })
-          
-          // Mark file as uploaded
-          newUploadedFiles.add(fileKey)
-          setUploadedFiles((prev) => new Set([...prev, fileKey]))
-          setUploadProgress((prev) => ({ ...prev, [fileKey]: 100 }))
-          
-          console.log(`File uploaded: ${uploadResponse.data.file_path}`)
-        } catch (error) {
-          console.error(`Failed to upload ${file.name} to temp storage:`, error)
-          setUploadProgress((prev) => ({ ...prev, [fileKey]: 0 }))
-        }
-      }
+      // Initialize progress for all files
+      const progressUpdates: Record<string, number> = {}
+      files.forEach((file, index) => {
+        const fileKey = `${file.name}-${index}`
+        progressUpdates[fileKey] = 10 // Initial progress
+      })
+      setUploadProgress(progressUpdates)
 
-      if (newUploadedFiles.size > 0) {
+      // Call ingestion API with all files
+      const result = await ingestionService.ingest({
+        files: files,
+        owner_id: parseInt(ownerId),
+        // document_id and file_type are optional
+      })
+
+      setIngestionResult(result)
+
+      // Check if ingestion was successful
+      if (result.status === 'success' || result.status === 'partial_success') {
+        // Only update progress and mark files as uploaded for successful outcomes
+        files.forEach((file, index) => {
+          const fileKey = `${file.name}-${index}`
+          progressUpdates[fileKey] = 100
+          newUploadedFiles.add(fileKey)
+        })
+        setUploadProgress(progressUpdates)
+        setUploadedFiles((prev) => new Set([...prev, ...Array.from(newUploadedFiles)]))
+        
+        console.log('Ingestion successful:', result)
+        // Navigate to documents page after a short delay
         setTimeout(() => {
           navigate('/documents')
-        }, 1500)
+        }, 2000)
+      } else {
+        // Mark all files as failed when ingestion status is 'failed'
+        files.forEach((file, index) => {
+          const fileKey = `${file.name}-${index}`
+          progressUpdates[fileKey] = 0
+        })
+        setUploadProgress(progressUpdates)
+        setUploadError(`Ingestion failed: ${result.status}`)
+        console.error('Ingestion failed:', result)
       }
+    } catch (error: any) {
+      console.error('Failed to process documents:', error)
+      setUploadError(error.response?.data?.detail || error.message || 'Failed to process documents')
+      
+      // Mark all files as failed
+      files.forEach((file, index) => {
+        const fileKey = `${file.name}-${index}`
+        setUploadProgress((prev) => ({ ...prev, [fileKey]: 0 }))
+      })
     } finally {
       setUploading(false)
     }
@@ -179,6 +199,64 @@ const UploadPage = () => {
         </div>
       )}
 
+      {/* Error message */}
+      {uploadError && (
+        <div className="card mb-6 bg-home-error-50 border border-home-error-300">
+          <div className="flex items-center gap-3">
+            <AlertCircle className="text-home-error-500" size={24} />
+            <div className="flex-1">
+              <p className="text-sm font-medium text-home-error-700">Upload Error</p>
+              <p className="text-sm text-home-error-600">{uploadError}</p>
+            </div>
+            <button
+              onClick={() => setUploadError(null)}
+              className="text-home-error-500 hover:text-home-error-700"
+            >
+              <X size={20} />
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Success message */}
+      {ingestionResult && (ingestionResult.status === 'success' || ingestionResult.status === 'partial_success') && (
+        <div className={`card mb-6 border ${
+          ingestionResult.status === 'success' 
+            ? 'bg-home-success-50 border-home-success-300' 
+            : 'bg-home-warning-50 border-home-warning-300'
+        }`}>
+          <div className="flex items-center gap-3">
+            <CheckCircle className={
+              ingestionResult.status === 'success' 
+                ? 'text-home-success-500' 
+                : 'text-home-warning-500'
+            } size={24} />
+            <div className="flex-1">
+              <p className={`text-sm font-medium ${
+                ingestionResult.status === 'success' 
+                  ? 'text-home-success-700' 
+                  : 'text-home-warning-700'
+              }`}>
+                {ingestionResult.status === 'success' 
+                  ? 'Documents processed successfully!' 
+                  : 'Documents processed with partial success'}
+              </p>
+              <p className={`text-sm ${
+                ingestionResult.status === 'success' 
+                  ? 'text-home-success-600' 
+                  : 'text-home-warning-600'
+              }`}>
+                Document ID: {ingestionResult.document_id} | 
+                Pages: {ingestionResult.total_pages ?? 1} | 
+                Successful: {ingestionResult.successful_pages ?? ingestionResult.total_pages ?? 1} | 
+                Failed: {ingestionResult.failed_pages ?? 0} | 
+                Status: {ingestionResult.status}
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Upload button */}
       {files.length > 0 && (
         <div className="flex gap-4">
@@ -187,13 +265,15 @@ const UploadPage = () => {
             disabled={uploading || !ownerId}
             className="btn-primary flex-1 disabled:opacity-50 disabled:cursor-not-allowed"
           >
-            {uploading ? 'Uploading...' : 'Start Upload'}
+            {uploading ? 'Processing with AI...' : 'Start Processing'}
           </button>
           <button
             onClick={() => {
               setFiles([])
               setUploadProgress({})
               setUploadedFiles(new Set())
+              setUploadError(null)
+              setIngestionResult(null)
             }}
             disabled={uploading}
             className="btn-secondary disabled:opacity-50 disabled:cursor-not-allowed"
