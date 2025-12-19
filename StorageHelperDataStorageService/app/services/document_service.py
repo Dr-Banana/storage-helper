@@ -212,13 +212,13 @@ class DocumentService:
             if owner_id:
                 query = query.filter(Document.owner_id == owner_id)
             
-            documents = query.all()
+            # Use pgvector's cosine distance for similarity search
+            # Order by distance (smaller is more similar)
+            documents = query.order_by(
+                DocumentEmbedding.embedding.cosine_distance(embedding)
+            ).limit(limit).all()
             
-            # TODO: Calculate similarity scores and sort
-            # This requires vector similarity computation (cosine, euclidean, etc.)
-            # For now, return all documents
-            
-            return documents[:limit]
+            return documents
             
         except Exception as e:
             raise ValueError(f"Failed to search documents: {str(e)}")

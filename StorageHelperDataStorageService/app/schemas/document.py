@@ -68,3 +68,10 @@ class DocumentListResponse(BaseModel):
     """Schema for list of documents"""
     total: int = Field(..., description="Total number of documents")
     documents: list[DocumentResponse] = Field(..., description="List of documents")
+
+
+class DocumentSearchRequest(BaseModel):
+    """Schema for semantic search request"""
+    embedding: list[float] = Field(..., description="768-dimensional query vector")
+    user_id: int = Field(..., description="ID of the user whose documents to search")
+    top_k: int = Field(5, description="Number of results to return")

@@ -1,22 +1,23 @@
 version: '3.8'
 
 services:
-  mysql:
-    image: mysql:9.0
+  postgres:
+    image: pgvector/pgvector:pg16
     container_name: storage-helper-db
     environment:
-      MYSQL_ROOT_PASSWORD: root
-      MYSQL_DATABASE: storage_helper
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: root
+      POSTGRES_DB: storage_helper
     ports:
-      - "3306:3306"
+      - "5432:5432"
     volumes:
       - ./schema.sql:/docker-entrypoint-initdb.d/schema.sql
-      - mysql_data:/var/lib/mysql
+      - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
       interval: 10s
       timeout: 5s
       retries: 5
 
 volumes:
-  mysql_data:
+  postgres_data:

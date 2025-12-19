@@ -1,14 +1,19 @@
 -- ============================================================
+-- 0. Enable pgvector extension
+-- ============================================================
+CREATE EXTENSION IF NOT EXISTS vector;
+
+-- ============================================================
 -- 1. user: who the document belongs to
 -- ============================================================
 
 
-CREATE TABLE user (
-    id              INT AUTO_INCREMENT PRIMARY KEY,
+CREATE TABLE "user" (
+    id              SERIAL PRIMARY KEY,
     display_name    VARCHAR(100) NOT NULL,
     note            TEXT,
     created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+    updated_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
 -- ============================================================
@@ -16,48 +21,48 @@ CREATE TABLE user (
 -- ============================================================
 
 CREATE TABLE document_category (
-    id              INT AUTO_INCREMENT PRIMARY KEY,
+    id              SERIAL PRIMARY KEY,
     user_id         INT NOT NULL,                  -- Owner of this category
     code            VARCHAR(50) NOT NULL,           -- e.g. "TAX", "VISA", "MED", "INS"
     name            VARCHAR(100) NOT NULL,         -- display name, e.g. "Tax Documents", "Immigration Documents"
     description     TEXT,
     classification  TEXT,                      -- e.g. virtual/physical (placeholder)
     created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-    FOREIGN KEY (user_id) REFERENCES user(id) ON DELETE CASCADE,
-    UNIQUE KEY (user_id, code),                     -- Unique code per user
-    INDEX idx_user_id (user_id)
+    updated_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES "user"(id) ON DELETE CASCADE,
+    UNIQUE (user_id, code)
 );
+CREATE INDEX idx_document_category_user_id ON document_category(user_id);
 
 -- ============================================================
 -- 3. storage_location: physical storage (cabinet / drawer / box)
 -- ============================================================
 
 CREATE TABLE storage_location (
-    id              INT AUTO_INCREMENT PRIMARY KEY,
+    id              SERIAL PRIMARY KEY,
     user_id         INT NOT NULL,                  -- Owner of this location
     name            VARCHAR(100) NOT NULL,         -- e.g. "Bedroom desk, left drawer #2"
     description     TEXT,
     photo_url       TEXT,
     created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-    FOREIGN KEY (user_id) REFERENCES user(id) ON DELETE CASCADE,
-    INDEX idx_user_id (user_id)
+    updated_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES "user"(id) ON DELETE CASCADE
 );
+CREATE INDEX idx_storage_location_user_id ON storage_location(user_id);
 
 -- ============================================================
 -- 4. event: contextual grouping (e.g. "2024 Tax Filing", "2025-03 Dental Visit")
 -- ============================================================
 
 CREATE TABLE event (
-    id              INT AUTO_INCREMENT PRIMARY KEY,
+    id              SERIAL PRIMARY KEY,
     name            VARCHAR(200) NOT NULL,         -- e.g. "2024 Tax Filing", "Q2 Dental Visit"
     category        VARCHAR(50),                  -- tag for organizing events (independent from document_category)
     start_date      DATE,
     end_date        DATE,
     description     TEXT,
     created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+    updated_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
 -- ============================================================
@@ -67,40 +72,40 @@ CREATE TABLE event (
 -- ============================================================
 
 CREATE TABLE document (
-    id                  INT AUTO_INCREMENT PRIMARY KEY,
+    id                  SERIAL PRIMARY KEY,
     title               VARCHAR(255),
     category_id    INT,
     owner_id            INT NOT NULL,
     event_id            INT,
     current_location_id INT,
     -- Flexible metadata (per-type fields live here)
-    metadata            JSON,          -- e.g. {"tax_year":2024,"issuer_name":"IRS","expiry_date":"2026-01-01"}
+    metadata            JSONB,          -- e.g. {"tax_year":2024,"issuer_name":"IRS","expiry_date":"2026-01-01"}
     -- File content
     image_url           TEXT,          -- Optional: URL to thumbnail or first page
     created_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    updated_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (category_id) REFERENCES document_category(id) ON DELETE RESTRICT,
-    FOREIGN KEY (owner_id)            REFERENCES user(id) ON DELETE CASCADE,
+    FOREIGN KEY (owner_id)            REFERENCES "user"(id) ON DELETE CASCADE,
     FOREIGN KEY (event_id)            REFERENCES event(id) ON DELETE SET NULL,
-    FOREIGN KEY (current_location_id) REFERENCES storage_location(id) ON DELETE SET NULL,
-    INDEX idx_owner_id (owner_id),
-    INDEX idx_category_id (category_id)
+    FOREIGN KEY (current_location_id) REFERENCES storage_location(id) ON DELETE SET NULL
 );
+CREATE INDEX idx_document_owner_id ON document(owner_id);
+CREATE INDEX idx_document_category_id ON document(category_id);
 
 -- ============================================================
 -- 6. document_page: pages within a document (e.g. pages in a PDF)
 -- ============================================================
 
 CREATE TABLE document_page (
-    id                  INT AUTO_INCREMENT PRIMARY KEY,
+    id                  SERIAL PRIMARY KEY,
     document_id         INT NOT NULL,
     page_number     INT NOT NULL,
     image_url       TEXT NOT NULL,
-    ocr_text        LONGTEXT,
+    ocr_text        TEXT,
     created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    updated_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (document_id) REFERENCES document(id) ON DELETE CASCADE,
-    UNIQUE KEY (document_id, page_number)
+    UNIQUE (document_id, page_number)
 );
 
 -- ============================================================
@@ -109,7 +114,7 @@ CREATE TABLE document_page (
 
 CREATE TABLE document_embedding (
     document_id     INT PRIMARY KEY,
-    embedding       VECTOR(768) NOT NULL,    -- 768-dimensional vector for semantic search
+    embedding       vector(768) NOT NULL,    -- 768-dimensional vector for semantic search
     FOREIGN KEY (document_id) REFERENCES document(id) ON DELETE CASCADE
 );
 
@@ -118,7 +123,7 @@ CREATE TABLE document_embedding (
 -- ============================================================
 
 CREATE TABLE feedback_message (
-    id              INT AUTO_INCREMENT PRIMARY KEY,
+    id              SERIAL PRIMARY KEY,
     document_id     INT,
     feedback_type   VARCHAR(50),      -- e.g. "type_fix", "location_error", "metadata_fix"
     note            TEXT,

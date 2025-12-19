@@ -32,54 +32,54 @@ cd "$PROJECT_ROOT"
 echo "📁 Project directory: $PROJECT_ROOT"
 echo ""
 
-# Check if MySQL image already exists
-if docker image inspect mysql:8.0 &> /dev/null; then
-    echo "✅ MySQL image already exists"
+# Check if PostgreSQL image already exists
+if docker image inspect pgvector/pgvector:pg16 &> /dev/null; then
+    echo "✅ PostgreSQL (pgvector) image already exists"
 else
-    echo "📥 Pulling MySQL image..."
-    docker pull mysql:8.0
+    echo "📥 Pulling PostgreSQL (pgvector) image..."
+    docker pull pgvector/pgvector:pg16
     if [ $? -ne 0 ]; then
-        echo "❌ Error: Failed to pull MySQL image"
+        echo "❌ Error: Failed to pull PostgreSQL image"
         exit 1
     fi
 fi
 
-# Start MySQL container
+# Start PostgreSQL container
 echo "🚀 Starting database container..."
-docker-compose up -d mysql
+docker-compose up -d postgres
 if [ $? -ne 0 ]; then
-    echo "❌ Error: Failed to start MySQL container"
+    echo "❌ Error: Failed to start PostgreSQL container"
     exit 1
 fi
 
-# Wait for MySQL to be ready
-echo "⏳ Waiting for MySQL to start..."
-mysql_ready=false
+# Wait for PostgreSQL to be ready
+echo "⏳ Waiting for PostgreSQL to start..."
+postgres_ready=false
 for i in {1..30}; do
-    if docker-compose exec -T mysql mysql -uroot -proot -e "SELECT 1" > /dev/null 2>&1; then
-        mysql_ready=true
+    if docker-compose exec -T postgres pg_isready -U postgres > /dev/null 2>&1; then
+        postgres_ready=true
         break
     fi
     sleep 1
 done
 
-if [ "$mysql_ready" = false ]; then
-    echo "❌ Error: MySQL failed to become ready within 30 seconds"
-    echo "   Check logs with: docker-compose logs mysql"
+if [ "$postgres_ready" = false ]; then
+    echo "❌ Error: PostgreSQL failed to become ready within 30 seconds"
+    echo "   Check logs with: docker-compose logs postgres"
     exit 1
 fi
 
-echo "✅ MySQL is ready"
+echo "✅ PostgreSQL is ready"
 echo ""
 
 # Verify database initialization
 echo "📊 Verifying database schema..."
-docker-compose exec -T mysql mysql -uroot -proot storage_helper -e "SHOW TABLES;"
+docker-compose exec -T postgres psql -U postgres -d storage_helper -c "\dt"
 if [ $? -ne 0 ]; then
     echo ""
     echo "❌ Error: Failed to verify database schema"
     echo "   The database may not have been initialized correctly"
-    echo "   Check logs with: docker-compose logs mysql"
+    echo "   Check logs with: docker-compose logs postgres"
     exit 1
 fi
 
@@ -90,10 +90,10 @@ echo "================================"
 echo ""
 echo "Connection details:"
 echo "  Host: localhost"
-echo "  Port: 3306"
-echo "  User: root"
+echo "  Port: 5432"
+echo "  User: postgres"
 echo "  Password: root"
 echo "  Database: storage_helper"
 echo ""
 echo "To stop the container: docker-compose down"
-echo "To view logs: docker-compose logs mysql"
+echo "To view logs: docker-compose logs postgres"

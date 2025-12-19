@@ -10,7 +10,7 @@ class Settings:
     # Database
     DATABASE_URL: str = os.getenv(
         "DATABASE_URL",
-        "mysql+pymysql://root:root@localhost:3306/storage_helper"
+        "postgresql://postgres:root@localhost:5432/storage_helper"
     )
     
     # API

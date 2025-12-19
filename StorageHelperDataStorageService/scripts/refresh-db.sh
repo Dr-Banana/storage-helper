@@ -47,7 +47,7 @@ echo "✅ Found schema.sql"
 echo ""
 
 # Check if MySQL container exists and clean up if needed
-echo "🔍 Checking MySQL container status..."
+echo "🔍 Checking database container status..."
 
 # Force complete cleanup with docker-compose down -v (removes volumes)
 echo "🛑 Bringing down docker-compose (will remove volumes)..."
@@ -57,6 +57,7 @@ docker-compose down -v 2>&1 || true
 echo "🗑️  Removing any remaining data volumes..."
 docker volume rm storage-helper-db-data 2>/dev/null || true
 docker volume rm mysql_data 2>/dev/null || true
+docker volume rm postgres_data 2>/dev/null || true
 docker volume rm storage-helper-data 2>/dev/null || true
 
 # Clean up any orphaned containers
@@ -65,48 +66,48 @@ docker rm -f storage-helper-db 2>/dev/null || true
 
 echo ""
 
-# Start MySQL container with fresh data
-echo "🚀 Starting database container with MySQL 9.0..."
-docker-compose up -d mysql 2>&1 || {
+# Start PostgreSQL container with fresh data
+echo "🚀 Starting database container with PostgreSQL (pgvector)..."
+docker-compose up -d postgres 2>&1 || {
     echo "⚠️  Could not start via docker-compose, trying direct docker commands..."
     docker rm -f storage-helper-db 2>/dev/null || true
-    docker-compose up -d mysql
+    docker-compose up -d postgres
 }
 
 if [ $? -ne 0 ]; then
-    echo "❌ Error: Failed to start MySQL container"
+    echo "❌ Error: Failed to start PostgreSQL container"
     exit 1
 fi
 
-# Wait for MySQL to be ready
-echo "⏳ Waiting for MySQL to start..."
-mysql_ready=false
+# Wait for PostgreSQL to be ready
+echo "⏳ Waiting for PostgreSQL to start..."
+postgres_ready=false
 for i in {1..30}; do
-    if docker-compose exec -T mysql mysql -uroot -proot -e "SELECT 1" > /dev/null 2>&1; then
-        mysql_ready=true
+    if docker-compose exec -T postgres pg_isready -U postgres > /dev/null 2>&1; then
+        postgres_ready=true
         break
     fi
     sleep 1
 done
 
-if [ "$mysql_ready" = false ]; then
-    echo "❌ Error: MySQL failed to become ready within 30 seconds"
-    echo "   Check logs with: docker-compose logs mysql"
+if [ "$postgres_ready" = false ]; then
+    echo "❌ Error: PostgreSQL failed to become ready within 30 seconds"
+    echo "   Check logs with: docker-compose logs postgres"
     exit 1
 fi
 
-echo "✅ MySQL is ready"
+echo "✅ PostgreSQL is ready"
 echo ""
 
 # Drop existing database
 echo "🗑️  Dropping existing database..."
-docker-compose exec -T mysql mysql -uroot -proot -e "DROP DATABASE IF EXISTS storage_helper;" 2>&1 || true
+docker-compose exec -T postgres psql -U postgres -c "DROP DATABASE IF EXISTS storage_helper;" 2>&1 || true
 echo "✅ Database dropped"
 echo ""
 
 # Create new database
 echo "🔨 Creating new database..."
-docker-compose exec -T mysql mysql -uroot -proot -e "CREATE DATABASE storage_helper CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
+docker-compose exec -T postgres psql -U postgres -c "CREATE DATABASE storage_helper;"
 if [ $? -ne 0 ]; then
     echo "❌ Error: Failed to create database"
     exit 1
@@ -116,7 +117,7 @@ echo ""
 
 # Execute schema.sql
 echo "📝 Executing schema.sql..."
-docker-compose exec -T mysql mysql -uroot -proot storage_helper < schema.sql
+docker-compose exec -T postgres psql -U postgres -d storage_helper -f /docker-entrypoint-initdb.d/schema.sql
 if [ $? -ne 0 ]; then
     echo "❌ Error: Failed to execute schema.sql"
     echo "   Check the schema.sql file for syntax errors"
@@ -127,11 +128,11 @@ echo ""
 
 # Verify database setup
 echo "📊 Verifying database structure..."
-docker-compose exec -T mysql mysql -uroot -proot storage_helper -e "SHOW TABLES;"
+docker-compose exec -T postgres psql -U postgres -d storage_helper -c "\dt"
 echo ""
 
 # Count tables
-table_count=$(docker-compose exec -T mysql mysql -uroot -proot storage_helper -e "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='storage_helper';" | tail -1)
+table_count=$(docker-compose exec -T postgres psql -U postgres -d storage_helper -t -c "SELECT count(*) FROM information_schema.tables WHERE table_schema='public';" | xargs)
 echo "✅ Total tables created: $table_count"
 echo ""
 
@@ -141,13 +142,13 @@ echo "================================"
 echo ""
 echo "Connection details:"
 echo "  Host: localhost"
-echo "  Port: 3306"
-echo "  User: root"
+echo "  Port: 5432"
+echo "  User: postgres"
 echo "  Password: root"
 echo "  Database: storage_helper"
 echo ""
 echo "Next steps:"
-echo "  - Verify tables: docker-compose exec mysql mysql -uroot -proot storage_helper -e 'DESCRIBE document;'"
+echo "  - Verify tables: docker-compose exec postgres psql -U postgres -d storage_helper -c '\dt'"
 echo "  - Insert test data: add data to your tables"
 echo "  - Stop container: docker-compose down"
-echo "  - View logs: docker-compose logs mysql"
+echo "  - View logs: docker-compose logs postgres"

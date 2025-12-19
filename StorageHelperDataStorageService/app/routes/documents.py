@@ -16,6 +16,8 @@ from app.core.database import get_db
 from app.models.document import Document
 from app.models.document_page import DocumentPage
 from app.models.document_embedding import DocumentEmbedding
+from app.schemas.document import DocumentSearchRequest
+from app.services.document_service import DocumentService
 
 router = APIRouter(prefix="/documents", tags=["documents"])
 
@@ -262,32 +264,17 @@ def update_document_embedding(
             DocumentEmbedding.document_id == document_id
         ).first()
         
-        # Use raw SQL with STRING_TO_VECTOR to properly insert VECTOR type
-        # MySQL VECTOR type requires STRING_TO_VECTOR('[0.1, 0.2, ...]') format
-        embedding_json_str = json.dumps(embedding_request.embedding)
-        
         if existing_embedding:
-            # Update existing embedding using raw SQL with STRING_TO_VECTOR
-            sql = """
-                UPDATE document_embedding 
-                SET embedding = STRING_TO_VECTOR(:embedding_json)
-                WHERE document_id = :document_id
-            """
-            db.execute(text(sql), {
-                "document_id": document_id,
-                "embedding_json": embedding_json_str
-            })
+            # Update existing embedding
+            existing_embedding.embedding = embedding_request.embedding
             action = "updated"
         else:
-            # Insert new embedding using raw SQL with STRING_TO_VECTOR
-            sql = """
-                INSERT INTO document_embedding (document_id, embedding)
-                VALUES (:document_id, STRING_TO_VECTOR(:embedding_json))
-            """
-            db.execute(text(sql), {
-                "document_id": document_id,
-                "embedding_json": embedding_json_str
-            })
+            # Insert new embedding
+            new_embedding = DocumentEmbedding(
+                document_id=document_id,
+                embedding=embedding_request.embedding
+            )
+            db.add(new_embedding)
             action = "created"
         
         db.commit()
@@ -308,4 +295,56 @@ def update_document_embedding(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to update embedding: {str(e)}"
+        )
+
+
+# ============================================================
+# Document Search API
+# ============================================================
+
+@router.post(
+    "/search",
+    response_model=List[int],
+    summary="Search documents by embedding",
+    description="""
+    Search for top k documents matching the provided embedding for a specific user.
+    If fewer than k documents are found, returns all matching documents.
+    """
+)
+def search_documents(
+    search_request: DocumentSearchRequest,
+    db: Session = Depends(get_db)
+):
+    """
+    Search documents by embedding.
+    
+    - **embedding**: 768-dimensional query vector
+    - **user_id**: ID of the user whose documents to search
+    - **top_k**: Number of results to return
+    
+    Returns a list of document IDs.
+    """
+    try:
+        # Verify embedding dimensions
+        if len(search_request.embedding) != 768:
+            raise ValueError(f"Embedding must be 768 dimensions, got {len(search_request.embedding)}")
+        
+        documents = DocumentService.search_by_embedding(
+            db=db,
+            embedding=search_request.embedding,
+            limit=search_request.top_k,
+            owner_id=search_request.user_id
+        )
+        
+        return [doc.id for doc in documents]
+        
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e)
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to search documents: {str(e)}"
         )

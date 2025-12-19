@@ -10,6 +10,7 @@ from app.core.database import Base
 class User(Base):
     """User model"""
     __tablename__ = "user"
+    __table_args__ = {"quote": True}
 
     id = Column(Integer, primary_key=True, index=True, autoincrement=True)
     display_name = Column(String(100), nullable=False)

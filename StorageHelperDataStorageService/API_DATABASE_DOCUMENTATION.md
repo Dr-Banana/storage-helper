@@ -527,7 +527,7 @@ See `.env.local` for configuration:
 
 ```env
 # Database connection
-DATABASE_URL=mysql+pymysql://root:root@localhost:3306/storage_helper
+DATABASE_URL=postgresql://postgres:root@localhost:5432/storage_helper
 
 # Storage
 STORAGE_LOCAL_PATH=./tmp
