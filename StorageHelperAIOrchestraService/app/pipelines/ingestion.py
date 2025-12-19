@@ -955,6 +955,7 @@ async def run_unified_ingestion_pipeline(
         page_results = []
         page_states = {}  # Store state for each page: {page_number: PipelineState}
         final_document_id = document_id
+        first_page_global_index = None  # Track first page's global_index to skip it in Step 4B
         
         async def process_single_page(page_info: tuple, use_document_id: Optional[int] = None) -> tuple[Dict[str, Any], Optional[PipelineState]]:
             """Process a single page through the pipeline. Returns (result_dict, state)"""
@@ -1039,7 +1040,8 @@ async def run_unified_ingestion_pipeline(
                     }, state)
 
                 return ({
-                    "page_number": page_number_within_file,
+                    "page_number": page_number_within_file,  # 文件内页码（用于显示）
+                    "global_page_number": global_page_index,  # 全局页码（用于数据库，确保唯一性）
                     "global_page_index": global_page_index,
                     "status": "success",
                     "error": None,
@@ -1070,13 +1072,44 @@ async def run_unified_ingestion_pipeline(
             first_page_result, first_page_state = await process_single_page(first_page_info, use_document_id=final_document_id)
             page_results.append(first_page_result)
             if first_page_state:
-                page_states[first_page_result["global_page_index"]] = first_page_state
+                first_page_global_index = first_page_result.get("global_page_index")
+                page_states[first_page_global_index] = first_page_state
+                
+                # 🔧 BUG FIX: Immediately process first page to get document_id
+                # This ensures all subsequent pages use the same document_id
+                if first_page_result.get("status") == "success":
+                    # Use global_page_number for database (ensures uniqueness across all files)
+                    # Fallback to page_number if global_page_number is not available
+                    global_page_num = first_page_result.get("global_page_number") or first_page_result.get("page_number", 1)
+                    # Process first page to establish document_id
+                    logger.info(f"Processing first page to establish document_id (global_page_number={global_page_num}, global_index={first_page_result.get('global_page_index')})...")
+                    await pipeline.step_process_document(first_page_state, page_number=global_page_num)
+                    
+                    # Update final_document_id from first page's result
+                    if first_page_state.document_id is not None:
+                        final_document_id = first_page_state.document_id
+                        logger.info(f"Document ID established from first page: {final_document_id}")
+                    
+                    # Update first_page_result with values from step_process_document
+                    # This is critical: we mark the first page as processed by setting page_id
+                    if first_page_state.page_id is not None:
+                        first_page_result["page_id"] = first_page_state.page_id
+                        logger.info(f"First page processed successfully: page_id={first_page_state.page_id}, document_id={first_page_state.document_id}, global_page_number={global_page_num}")
+                    else:
+                        logger.warning(f"First page processing did not return page_id (global_page_number={global_page_num}) - this may cause duplicate insertion!")
+                    
+                    if first_page_state.document_id is not None:
+                        first_page_result["document_id"] = first_page_state.document_id
+                    if first_page_state.file_url is not None:
+                        first_page_result["file_url"] = first_page_state.file_url
+                    if first_page_state.processed_page_number is not None:
+                        first_page_result["page_number"] = first_page_state.processed_page_number
         
         # Step 2B: Process remaining pages in parallel (if any)
         # All pages now use the established document_id from first page
         if len(page_tasks) > 1:
             remaining_pages = page_tasks[1:]
-            logger.info(f"Processing remaining {len(remaining_pages)} pages in parallel...")
+            logger.info(f"Processing remaining {len(remaining_pages)} pages in parallel (using document_id: {final_document_id})...")
             remaining_tasks = [
                 process_single_page(page_info, use_document_id=final_document_id) 
                 for page_info in remaining_pages
@@ -1200,27 +1233,77 @@ async def run_unified_ingestion_pipeline(
         
         # Step 4B: Process document page metadata for each successful page
         # This sends structured results and file storage path to /documents/process API
+        # Note: First page was already processed in Step 2A, so skip it here
         logger.info("Processing document pages metadata after pipeline completion...")
+        processed_page_keys = set()  # Track (document_id, page_number) combinations that have been processed
+        
         for page_result in processed_results:
             if page_result.get("status") == "success":
+                # 🔧 BUG FIX: Skip pages that already have page_id (already processed in Step 2A)
+                # Check page_result first, as it's updated directly in Step 2A
+                page_id = page_result.get("page_id")
+                document_id = page_result.get("document_id")
+                page_number = page_result.get("page_number")
+                
+                if page_id is not None:
+                    logger.info(f"Skipping page (page_id={page_id}, page_number={page_number}, document_id={document_id}) - already processed in Step 2A")
+                    # Track this page as processed
+                    if document_id is not None and page_number is not None:
+                        processed_page_keys.add((document_id, page_number))
+                    continue
+                
                 global_page_index = page_result.get("global_page_index")
                 page_state = page_states.get(global_page_index)
                 if page_state:
-                    # 当前文件内的页码（作为传给 /documents/process 的 page_number）
+                    # 🔧 BUG FIX: Use global_page_number for database (ensures uniqueness across all files)
+                    # This is critical: when multiple files are uploaded, each file's first page would have page_number=1
+                    # But in the database, page_number must be unique within a document
+                    # So we use global_page_number (sequential across all files) instead of file-internal page_number
+                    global_page_num = page_result.get("global_page_number") or page_result.get("page_number", 1)
                     file_page_number = page_result.get("page_number", 1)
+                    
+                    # Double-check: also check page_state.page_id as fallback
+                    if page_state.page_id is not None:
+                        logger.info(f"Skipping page (global_index={global_page_index}, page_id={page_state.page_id}, global_page_number={global_page_num}) - already processed in Step 2A")
+                        # Track this page as processed (use global_page_num, not file page_number)
+                        if page_state.document_id is not None:
+                            processed_page_keys.add((page_state.document_id, global_page_num))
+                        continue
+                    
+                    # Additional safety check: if we have document_id and global_page_number, check if already processed
+                    if final_document_id:
+                        page_key = (final_document_id, global_page_num)
+                        if page_key in processed_page_keys:
+                            logger.info(f"Skipping page (document_id={final_document_id}, global_page_number={global_page_num}) - already in processed set")
+                            continue
+                    
+                    logger.info(f"Processing page: global_page_number={global_page_num}, file_page_number={file_page_number}, document_id={final_document_id}, global_index={global_page_index}")
 
                     # Update document_id in state if we have final_document_id
                     if final_document_id and not page_state.document_id:
                         page_state.document_id = final_document_id
                     
-                    # Process document page with structured results
-                    await pipeline.step_process_document(page_state, page_number=file_page_number)
+                    # Process document page with structured results (use global page number for database)
+                    await pipeline.step_process_document(page_state, page_number=global_page_num)
 
                     # Update page_result with values returned from /documents/process
                     if page_state.page_id is not None:
                         page_result["page_id"] = page_state.page_id
+                        logger.info(f"Page processed successfully: page_id={page_state.page_id}, document_id={page_state.document_id}, page_number={global_page_num}")
+                    else:
+                        # If page_id is None, document processing may have failed
+                        # Update error status in page_result
+                        if page_state.file_upload_error:
+                            page_result["error"] = page_state.file_upload_error
+                            logger.warning(f"Page processing failed: {page_state.file_upload_error} (page_number={global_page_num})")
+                        else:
+                            logger.warning(f"Page processing returned no page_id (page_number={global_page_num}) - this may indicate a failure")
+                    
                     if page_state.document_id is not None:
                         page_result["document_id"] = page_state.document_id
+                        # Track this page as processed (use global_page_num for tracking)
+                        if page_state.page_id is not None:
+                            processed_page_keys.add((page_state.document_id, global_page_num))
                     if page_state.file_url is not None:
                         page_result["file_url"] = page_state.file_url
                     # Prefer page number returned by storage service as source of truth
