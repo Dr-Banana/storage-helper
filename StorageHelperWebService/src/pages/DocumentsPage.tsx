@@ -1,14 +1,19 @@
 import { useState, useEffect } from 'react'
 import { Link } from 'react-router-dom'
 import { FileText, Calendar, User, Search } from 'lucide-react'
-import { documentService, userService, Document } from '../api/services'
+import { documentService, userService, Document, DocumentFile } from '../api/services'
+
+interface DocumentWithFiles extends Document {
+  previewFiles?: DocumentFile[]
+}
 
 const DocumentsPage = () => {
-  const [documents, setDocuments] = useState<Document[]>([])
+  const [documents, setDocuments] = useState<DocumentWithFiles[]>([])
   const [loading, setLoading] = useState(true)
   const [searchQuery, setSearchQuery] = useState('')
   const [selectedUserId, setSelectedUserId] = useState<number | null>(null)
   const [users, setUsers] = useState<Array<{ id: number; display_name: string }>>([])
+  const [loadingFiles, setLoadingFiles] = useState<Set<number>>(new Set())
 
   useEffect(() => {
     const loadUsers = async () => {
@@ -61,12 +66,13 @@ const DocumentsPage = () => {
             
             // Create minimal document objects since backend doesn't have GET /api/v1/documents/{id}
             // Use document IDs and owner_id to create basic document info
-            const userDocs: Document[] = docsResponse.document_ids.map(docId => ({
+            const userDocs: DocumentWithFiles[] = docsResponse.document_ids.map(docId => ({
               id: docId,
               title: `Document #${docId}`,
               owner_id: user.id,
               created_at: new Date().toISOString(),
               updated_at: new Date().toISOString(),
+              previewFiles: [],
             }))
             
             allDocuments.push(...userDocs)
@@ -81,6 +87,9 @@ const DocumentsPage = () => {
         )
         
         setDocuments(allDocuments)
+        
+        // Load preview files for each document
+        loadPreviewFiles(allDocuments)
       } catch (error) {
         console.error('Failed to load documents:', error)
       } finally {
@@ -90,6 +99,39 @@ const DocumentsPage = () => {
 
     loadDocuments()
   }, [selectedUserId, users])
+
+  const loadPreviewFiles = async (docs: DocumentWithFiles[]) => {
+    const loadingSet = new Set<number>()
+    
+    for (const doc of docs) {
+      if (loadingSet.has(doc.id)) continue
+      
+      loadingSet.add(doc.id)
+      setLoadingFiles(prev => new Set(prev).add(doc.id))
+      
+      try {
+        const pagesData = await documentService.getPages(doc.id)
+        
+        // Use files field from API response (already deduplicated)
+        const fileList = pagesData.files || []
+        
+        // Update document with preview files
+        setDocuments(prevDocs => 
+          prevDocs.map(d => 
+            d.id === doc.id ? { ...d, previewFiles: fileList } : d
+          )
+        )
+      } catch (error) {
+        console.error(`Failed to load preview files for document ${doc.id}:`, error)
+      } finally {
+        setLoadingFiles(prev => {
+          const newSet = new Set(prev)
+          newSet.delete(doc.id)
+          return newSet
+        })
+      }
+    }
+  }
 
   const filteredDocuments = documents.filter((doc) =>
     doc.title?.toLowerCase().includes(searchQuery.toLowerCase())
@@ -164,7 +206,33 @@ const DocumentsPage = () => {
               state={{ ownerId: doc.owner_id }}
               className="card hover:shadow-home-lg transition-all duration-200 group"
             >
-              {doc.image_url && (
+              {/* Show preview files if available */}
+              {doc.previewFiles && doc.previewFiles.length > 0 ? (
+                <div className="mb-4 space-y-2">
+                  {doc.previewFiles.slice(0, 3).map((file, idx) => {
+                    return (
+                      <div key={`${file.url}-${idx}`} className="rounded-home overflow-hidden bg-home-background-dark">
+                        {file.file_type === 'pdf' ? (
+                          <div className="w-full h-32 flex items-center justify-center bg-home-background-dark">
+                            <FileText className="text-home-primary-500" size={48} />
+                          </div>
+                        ) : (
+                          <img
+                            src={file.url}
+                            alt={`File ${idx + 1}`}
+                            className="w-full h-32 object-cover group-hover:scale-105 transition-transform duration-200"
+                          />
+                        )}
+                      </div>
+                    )
+                  })}
+                  {doc.previewFiles.length > 3 && (
+                    <div className="text-center text-sm text-home-text-light">
+                      +{doc.previewFiles.length - 3} more {doc.previewFiles.length - 3 === 1 ? 'file' : 'files'}
+                    </div>
+                  )}
+                </div>
+              ) : doc.image_url ? (
                 <div className="mb-4 rounded-home overflow-hidden bg-home-background-dark">
                   <img
                     src={doc.image_url}
@@ -172,7 +240,11 @@ const DocumentsPage = () => {
                     className="w-full h-48 object-cover group-hover:scale-105 transition-transform duration-200"
                   />
                 </div>
-              )}
+              ) : loadingFiles.has(doc.id) ? (
+                <div className="mb-4 rounded-home overflow-hidden bg-home-background-dark h-48 flex items-center justify-center">
+                  <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-home-primary-500"></div>
+                </div>
+              ) : null}
               <h3 className="text-lg font-semibold text-home-text-dark mb-2 line-clamp-2">
                 {doc.title || `Document #${doc.id}`}
               </h3>
@@ -185,6 +257,12 @@ const DocumentsPage = () => {
                   <User size={16} />
                   <span>{users.find(u => u.id === doc.owner_id)?.display_name || `User ${doc.owner_id}`}</span>
                 </div>
+                {doc.previewFiles && doc.previewFiles.length > 0 && (
+                  <div className="flex items-center gap-1">
+                    <FileText size={16} />
+                    <span>{doc.previewFiles.length} {doc.previewFiles.length === 1 ? 'file' : 'files'}</span>
+                  </div>
+                )}
               </div>
             </Link>
           ))}

@@ -36,6 +36,13 @@ export interface DocumentPage {
   updated_at: string
 }
 
+export interface DocumentFile {
+  url: string
+  file_type: 'pdf' | 'image'
+  first_page_number: number
+  ocr_text?: string
+}
+
 export interface DocumentCategory {
   id: number
   code: string
@@ -189,7 +196,13 @@ export const documentService = {
    * Get all pages for a document
    * GET /api/documents/{document_id}/pages
    */
-  getPages: async (documentId: number): Promise<{ document_id: number; total: number; page_ids: number[] }> => {
+  getPages: async (documentId: number): Promise<{ 
+    document_id: number
+    total: number
+    pages: DocumentPage[]
+    files?: DocumentFile[]
+    total_files?: number
+  }> => {
     const response = await apiClient.get(`/documents/${documentId}/pages`)
     return response.data
   },

@@ -1,13 +1,14 @@
 import { useState, useEffect } from 'react'
 import { useParams, Link, useLocation } from 'react-router-dom'
 import { ArrowLeft, Calendar, User, FileText, MapPin, Tag } from 'lucide-react'
-import { documentService, userService, Document, DocumentPage } from '../api/services'
+import { documentService, userService, Document, DocumentPage, DocumentFile } from '../api/services'
 
 const DocumentDetailPage = () => {
   const { id } = useParams<{ id: string }>()
   const location = useLocation()
   const [document, setDocument] = useState<Document | null>(null)
   const [pages, setPages] = useState<DocumentPage[]>([])
+  const [files, setFiles] = useState<DocumentFile[]>([])
   const [loading, setLoading] = useState(true)
   const [users, setUsers] = useState<Array<{ id: number; display_name: string }>>([])
   
@@ -56,17 +57,9 @@ const DocumentDetailPage = () => {
 
         const pagesData = await documentService.getPages(parseInt(id))
         
-        // Backend only returns page_ids, not full page details
-        // Create minimal page objects with page_ids
-        const pageObjects: DocumentPage[] = pagesData.page_ids.map((pageId, index) => ({
-          id: pageId,
-          document_id: parseInt(id),
-          page_number: index + 1,
-          image_url: '',
-          created_at: new Date().toISOString(),
-          updated_at: new Date().toISOString(),
-        }))
-        setPages(pageObjects)
+        // Backend now returns full page details including image_url and unique files
+        setPages(pagesData.pages || [])
+        setFiles(pagesData.files || [])
       } catch (error) {
         console.error('Failed to load document:', error)
       } finally {
@@ -173,47 +166,48 @@ const DocumentDetailPage = () => {
         </div>
       </div>
 
-      {/* Document pages */}
-      {pages.length > 0 ? (
+      {/* Document files preview */}
+      {files.length > 0 ? (
         <div className="card">
           <h2 className="text-xl font-semibold text-home-text-dark mb-4">
-            Document Pages ({pages.length})
+            File Preview ({files.length} {files.length === 1 ? 'file' : 'files'})
           </h2>
-          <div className="space-y-4">
-            {pages.map((page) => (
-              <div key={page.id} className="border border-home-primary-100 rounded-home p-4">
-                <div className="flex items-center justify-between mb-2">
-                  <span className="font-medium text-home-text-dark">
-                    Page {page.page_number} (ID: {page.id})
-                  </span>
-                </div>
-                {page.image_url && (
-                  <img
-                    src={page.image_url}
-                    alt={`Page ${page.page_number}`}
-                    className="w-full rounded-home mt-2"
-                  />
-                )}
-                {page.ocr_text && (
-                  <div className="mt-4 p-4 bg-home-background-dark rounded-home">
-                    <p className="text-sm text-home-text-dark whitespace-pre-wrap">
-                      {page.ocr_text}
-                    </p>
+          <div className="grid grid-cols-1 gap-6">
+            {files.map((file, index) => {
+              return (
+                <div key={`${file.url}-${index}`} className="border border-home-primary-100 rounded-home p-4">
+                  <div className="mb-2">
+                    <span className="text-sm text-home-text-light">
+                      {file.file_type === 'pdf' ? 'PDF File' : 'Image File'}
+                    </span>
                   </div>
-                )}
-                {!page.image_url && !page.ocr_text && (
-                  <p className="text-sm text-home-text-light mt-2">
-                    Page details not available (backend only provides page IDs)
-                  </p>
-                )}
-              </div>
-            ))}
+                  {file.file_type === 'pdf' ? (
+                    <div className="w-full h-[600px] rounded-home overflow-hidden bg-home-background-dark">
+                      <iframe
+                        src={file.url}
+                        type="application/pdf"
+                        className="w-full h-full border-0"
+                        title={`PDF Preview ${index + 1}`}
+                      />
+                    </div>
+                  ) : (
+                    <div className="rounded-home overflow-hidden bg-home-background-dark">
+                      <img
+                        src={file.url}
+                        alt={`File ${index + 1}`}
+                        className="w-full h-auto max-h-[600px] object-contain"
+                      />
+                    </div>
+                  )}
+                </div>
+              )
+            })}
           </div>
         </div>
       ) : (
         <div className="card text-center py-12">
           <FileText className="mx-auto mb-4 text-home-primary-300" size={48} />
-          <p className="text-home-text-light">No page information available</p>
+          <p className="text-home-text-light">No file preview available</p>
         </div>
       )}
     </div>

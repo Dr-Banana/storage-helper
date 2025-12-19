@@ -5,8 +5,12 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.responses import FileResponse
 from typing import List
 import json
+import os
+import urllib.parse
+from pathlib import Path
 
 from app.core.database import get_db
 from app.models.document import Document
@@ -14,6 +18,84 @@ from app.models.document_page import DocumentPage
 from app.models.document_embedding import DocumentEmbedding
 
 router = APIRouter(prefix="/documents", tags=["documents"])
+
+
+# ============================================================
+# Helper Functions
+# ============================================================
+
+def _convert_to_accessible_url(file_path: str) -> str:
+    """
+    Convert local file path to accessible HTTP URL.
+    If already a URL (http/https), return as is.
+    If local file path, convert to API endpoint URL.
+    """
+    # If already a URL, return as is
+    if file_path.startswith(('http://', 'https://')):
+        return file_path
+    
+    # If local file path, convert to API endpoint URL
+    # Encode the file path to handle special characters
+    encoded_path = urllib.parse.quote(file_path, safe='')
+    return f"/api/documents/files?path={encoded_path}"
+
+
+# ============================================================
+# File Serving Endpoint
+# ============================================================
+
+@router.get("/files", response_class=FileResponse, summary="Serve document files")
+def serve_file(path: str):
+    """
+    Serve document files (images, PDFs) from local storage.
+    
+    - **path**: Encoded file path (URL encoded)
+    
+    Returns the file content with appropriate content type.
+    """
+    try:
+        # Decode the file path
+        file_path = urllib.parse.unquote(path)
+        
+        # Security check: ensure file exists and is within storage directory
+        if not os.path.exists(file_path):
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"File not found: {file_path}"
+            )
+        
+        # Determine media type based on file extension
+        file_ext = Path(file_path).suffix.lower()
+        media_type_map = {
+            '.jpg': 'image/jpeg',
+            '.jpeg': 'image/jpeg',
+            '.png': 'image/png',
+            '.gif': 'image/gif',
+            '.bmp': 'image/bmp',
+            '.webp': 'image/webp',
+            '.pdf': 'application/pdf',
+        }
+        
+        media_type = media_type_map.get(file_ext, 'application/octet-stream')
+        
+        # For PDF files, ensure inline display (not download)
+        headers = {}
+        if file_ext == '.pdf':
+            headers['Content-Disposition'] = 'inline'
+        
+        return FileResponse(
+            file_path,
+            media_type=media_type,
+            filename=os.path.basename(file_path),
+            headers=headers
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to serve file: {str(e)}"
+        )
 
 
 # ============================================================
@@ -37,16 +119,16 @@ class EmbeddingRequest(BaseModel):
 @router.get(
     "/{document_id}/pages",
     response_model=dict,
-    summary="Get all page IDs for a document",
-    description="Retrieve all page IDs for a specific document"
+    summary="Get all pages for a document",
+    description="Retrieve all pages for a specific document. Returns full page details including image_url."
 )
 def get_document_pages(document_id: int, db: Session = Depends(get_db)):
     """
-    Get all page IDs for a specific document
+    Get all pages for a specific document
     
     - **document_id**: The document's ID
     
-    Returns a list of page IDs for the document
+    Returns a list of page details including image_url for the document
     """
     try:
         # Verify document exists
@@ -57,16 +139,59 @@ def get_document_pages(document_id: int, db: Session = Depends(get_db)):
                 detail=f"Document with ID {document_id} not found"
             )
         
-        # Get all pages for the document
-        pages = db.query(DocumentPage.id).filter(
+        # Get all pages for the document with full details
+        pages = db.query(DocumentPage).filter(
             DocumentPage.document_id == document_id
         ).order_by(DocumentPage.page_number).all()
-        page_ids = [page.id for page in pages]
+        
+        # Convert to response format
+        page_details = [
+            {
+                "id": page.id,
+                "document_id": page.document_id,
+                "page_number": page.page_number,
+                "image_url": _convert_to_accessible_url(page.image_url) if page.image_url else None,
+                "ocr_text": page.ocr_text,
+                "created_at": page.created_at.isoformat() if page.created_at else None,
+                "updated_at": page.updated_at.isoformat() if page.updated_at else None,
+            }
+            for page in pages
+        ]
+        
+        # Get unique files (deduplicate by image_url)
+        # This ensures that if multiple pages point to the same file URL, 
+        # we only return the file once
+        unique_files = {}
+        for page in pages:
+            if page.image_url and page.image_url not in unique_files:
+                # Determine file type based on URL
+                image_url_lower = page.image_url.lower()
+                is_pdf = (
+                    image_url_lower.endswith('.pdf') or 
+                    '.pdf' in image_url_lower or
+                    'application/pdf' in image_url_lower
+                )
+                
+                # Convert local file path to accessible URL
+                accessible_url = _convert_to_accessible_url(page.image_url)
+                
+                unique_files[page.image_url] = {
+                    "url": accessible_url,
+                    "file_type": "pdf" if is_pdf else "image",
+                    "first_page_number": page.page_number,
+                    # Include OCR text from the first page that references this file
+                    "ocr_text": page.ocr_text,
+                }
+        
+        # Convert to list
+        file_list = list(unique_files.values())
         
         return {
             "document_id": document_id,
-            "total": len(page_ids),
-            "page_ids": page_ids
+            "total": len(page_details),
+            "pages": page_details,
+            "files": file_list,
+            "total_files": len(file_list)
         }
     except HTTPException:
         raise
