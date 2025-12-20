@@ -9,7 +9,7 @@ from app.core.database import get_db
 from app.services.user_service import UserService
 from app.schemas.user import UserCreate, UserUpdate, UserResponse, UserListResponse
 from app.schemas.category import CategoryCreate
-from app.schemas.location import LocationCreate
+from app.schemas.location import LocationCreate, LocationUpdate
 from pydantic import BaseModel
 
 router = APIRouter(prefix="/users", tags=["users"])
@@ -420,4 +420,228 @@ def create_user_location(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to create user location: {str(e)}"
+        )
+
+
+@router.put(
+    "/{user_id}/locations/{location_id}",
+    response_model=EmptyResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Update a location for a user",
+    description="Update an existing storage location for a specific user"
+)
+def update_user_location(
+    user_id: int,
+    location_id: int,
+    location_data: LocationUpdate,
+    db: Session = Depends(get_db)
+) -> dict:
+    """
+    Update an existing storage location for a specific user
+    
+    - **user_id**: The user's ID
+    - **location_id**: The location's ID to update
+    - **location_data**: Updated location information (name, description, photo_url)
+    
+    Returns nothing on success, error message on failure
+    """
+    try:
+        # Verify user exists
+        user = UserService.get_user_by_id(db, user_id)
+        if not user:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"User with ID {user_id} not found"
+            )
+        
+        from app.models.storage_location import StorageLocation
+        
+        # Get the location
+        location = db.query(StorageLocation).filter(
+            StorageLocation.id == location_id,
+            StorageLocation.user_id == user_id
+        ).first()
+        
+        if not location:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Location with ID {location_id} not found for user {user_id}"
+            )
+        
+        # Update location fields (only update provided fields)
+        if location_data.name is not None:
+            location.name = location_data.name
+        if location_data.description is not None:
+            location.description = location_data.description
+        if location_data.photo_url is not None:
+            location.photo_url = location_data.photo_url
+        
+        db.commit()
+        
+        return {}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to update user location: {str(e)}"
+        )
+
+
+@router.get(
+    "/{user_id}/locations/{location_id}/documents",
+    response_model=dict,
+    summary="Get all documents in a location for a user",
+    description="Retrieve all document IDs stored in a specific location for a specific user"
+)
+def get_user_location_documents(
+    user_id: int,
+    location_id: int,
+    db: Session = Depends(get_db)
+):
+    """
+    Get all document IDs stored in a specific location for a specific user
+    
+    - **user_id**: The user's ID
+    - **location_id**: The location's ID
+    
+    Returns a list of document IDs stored in this location for the user
+    """
+    try:
+        # Verify user exists
+        user = UserService.get_user_by_id(db, user_id)
+        if not user:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"User with ID {user_id} not found"
+            )
+        
+        from app.models.storage_location import StorageLocation
+        from app.models.document import Document
+        
+        # Get the location and verify it belongs to the user
+        location = db.query(StorageLocation).filter(
+            StorageLocation.id == location_id,
+            StorageLocation.user_id == user_id
+        ).first()
+        
+        if not location:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Location with ID {location_id} not found for user {user_id}"
+            )
+        
+        # Get all documents in this location for this user
+        documents = db.query(Document).filter(
+            Document.current_location_id == location_id,
+            Document.owner_id == user_id
+        ).all()
+        
+        document_ids = [doc.id for doc in documents]
+        
+        return {
+            "user_id": user_id,
+            "location_id": location_id,
+            "total": len(document_ids),
+            "document_ids": document_ids
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to retrieve documents for location: {str(e)}"
+        )
+
+
+@router.delete(
+    "/{user_id}/locations/{location_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Delete a location for a user",
+    description="Delete an existing storage location for a specific user. Cannot delete if location contains documents."
+)
+def delete_user_location(
+    user_id: int,
+    location_id: int,
+    db: Session = Depends(get_db)
+):
+    """
+    Delete an existing storage location for a specific user
+    
+    - **user_id**: The user's ID
+    - **location_id**: The location's ID to delete
+    
+    Note: This operation is prohibited if the location contains any documents. 
+    All documents must be moved out of the location before deletion.
+    """
+    try:
+        # Verify user exists
+        user = UserService.get_user_by_id(db, user_id)
+        if not user:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"User with ID {user_id} not found"
+            )
+        
+        from app.models.storage_location import StorageLocation
+        from app.models.document import Document
+        
+        # Get the location
+        location = db.query(StorageLocation).filter(
+            StorageLocation.id == location_id,
+            StorageLocation.user_id == user_id
+        ).first()
+        
+        if not location:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Location with ID {location_id} not found for user {user_id}"
+            )
+        
+        # Check if there are any documents in this location
+        documents_count = db.query(Document).filter(
+            Document.current_location_id == location_id,
+            Document.owner_id == user_id
+        ).count()
+        
+        if documents_count > 0:
+            # Get document IDs for error message (limit to 10 for response)
+            documents = db.query(Document.id).filter(
+                Document.current_location_id == location_id,
+                Document.owner_id == user_id
+            ).limit(10).all()
+            document_ids = [doc.id for doc in documents]
+            
+            # Prepare error message
+            error_detail = {
+                "error": "Cannot delete location that contains documents",
+                "message": f"Location {location_id} contains {documents_count} document(s). Please move all documents out of this location before deleting it.",
+                "location_id": location_id,
+                "document_count": documents_count,
+                "sample_document_ids": document_ids[:10] if documents_count > 10 else document_ids
+            }
+            if documents_count > 10:
+                error_detail["note"] = f"Showing first 10 of {documents_count} documents"
+            
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=error_detail
+            )
+        
+        # Delete the location (safe to delete as no documents use it)
+        db.delete(location)
+        db.commit()
+        
+        return None
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to delete user location: {str(e)}"
         )
