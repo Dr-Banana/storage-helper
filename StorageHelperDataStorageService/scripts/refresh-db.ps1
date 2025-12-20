@@ -50,7 +50,7 @@ Write-Host "[OK] Found schema.sql"
 Write-Host ""
 
 # Check if MySQL container exists and clean up if needed
-Write-Host "[INFO] Checking MySQL container status..."
+Write-Host "[INFO] Checking database container status..."
 
 # Force complete cleanup with docker-compose down -v (removes volumes)
 Write-Host "[INFO] Bringing down docker-compose (will remove volumes)..."
@@ -63,6 +63,7 @@ Write-Host "[INFO] Removing any remaining data volumes..."
 $ErrorActionPreference = "Continue"
 docker volume rm storage-helper-db-data 2>&1 | Out-Null
 docker volume rm mysql_data 2>&1 | Out-Null
+docker volume rm postgres_data 2>&1 | Out-Null
 docker volume rm storage-helper-data 2>&1 | Out-Null
 
 # Clean up any orphaned containers
@@ -72,57 +73,57 @@ $ErrorActionPreference = "Stop"
 
 Write-Host ""
 
-# Start MySQL container
-Write-Host "[INFO] Starting database container with MySQL 9.0..."
+# Start PostgreSQL container
+Write-Host "[INFO] Starting database container with PostgreSQL (pgvector)..."
 $ErrorActionPreference = "Continue"
-docker-compose up -d mysql 2>&1 | Out-Null
+docker-compose up -d postgres 2>&1 | Out-Null
 $startResult = $LASTEXITCODE
 $ErrorActionPreference = "Stop"
 
 if ($startResult -ne 0) {
     Write-Host "[WARNING] Could not start via docker-compose, trying to clean up and retry..."
     docker rm -f storage-helper-db 2>&1 | Out-Null
-    docker-compose up -d mysql
+    docker-compose up -d postgres
     if ($LASTEXITCODE -ne 0) {
-        Write-Host "[ERROR] Failed to start MySQL container"
+        Write-Host "[ERROR] Failed to start PostgreSQL container"
         exit 1
     }
 }
 
-# Wait for MySQL to be ready
-Write-Host "[INFO] Waiting for MySQL to start..."
+# Wait for PostgreSQL to be ready
+Write-Host "[INFO] Waiting for PostgreSQL to start..."
 $ErrorActionPreference = "Continue"
-$mysqlReady = $false
+$postgresReady = $false
 for ($i = 1; $i -le 30; $i++) {
-    docker-compose exec -T mysql mysql -uroot -proot -e "SELECT 1" 2>&1 | Out-Null
+    docker-compose exec -T postgres pg_isready -U postgres 2>&1 | Out-Null
     if ($LASTEXITCODE -eq 0) {
-        $mysqlReady = $true
+        $postgresReady = $true
         break
     }
     Start-Sleep -Seconds 1
 }
 $ErrorActionPreference = "Stop"
 
-if (-not $mysqlReady) {
-    Write-Host "[ERROR] MySQL failed to become ready within 30 seconds"
-    Write-Host "   Check logs with: docker-compose logs mysql"
+if (-not $postgresReady) {
+    Write-Host "[ERROR] PostgreSQL failed to become ready within 30 seconds"
+    Write-Host "   Check logs with: docker-compose logs postgres"
     exit 1
 }
 
-Write-Host "[OK] MySQL is ready"
+Write-Host "[OK] PostgreSQL is ready"
 Write-Host ""
 
 # Drop existing database
 Write-Host "[INFO] Dropping existing database..."
 $ErrorActionPreference = "Continue"
-docker-compose exec -T mysql mysql -uroot -proot -e "DROP DATABASE IF EXISTS storage_helper;" 2>&1 | Out-Null
+docker-compose exec -T postgres psql -U postgres -c "DROP DATABASE IF EXISTS storage_helper;" 2>&1 | Out-Null
 $ErrorActionPreference = "Stop"
 Write-Host "[OK] Database dropped"
 Write-Host ""
 
 # Create new database
 Write-Host "[INFO] Creating new database..."
-docker-compose exec -T mysql mysql -uroot -proot -e "CREATE DATABASE storage_helper CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
+docker-compose exec -T postgres psql -U postgres -c "CREATE DATABASE storage_helper;"
 if ($LASTEXITCODE -ne 0) {
     Write-Host "[ERROR] Failed to create database"
     exit 1
@@ -132,13 +133,8 @@ Write-Host ""
 
 # Execute schema.sql
 Write-Host "[INFO] Executing schema.sql..."
-$schemaContent = Get-Content "schema.sql" -Raw
-$ErrorActionPreference = "Continue"
-$schemaContent | docker-compose exec -T mysql mysql -uroot -proot storage_helper 2>&1 | Out-Null
-$schemaResult = $LASTEXITCODE
-$ErrorActionPreference = "Stop"
-
-if ($schemaResult -ne 0) {
+docker-compose exec -T postgres psql -U postgres -d storage_helper -f /docker-entrypoint-initdb.d/schema.sql
+if ($LASTEXITCODE -ne 0) {
     Write-Host "[ERROR] Failed to execute schema.sql"
     Write-Host "   Check the schema.sql file for syntax errors"
     exit 1
@@ -148,12 +144,12 @@ Write-Host ""
 
 # Verify database setup
 Write-Host "[INFO] Verifying database structure..."
-docker-compose exec -T mysql mysql -uroot -proot storage_helper -e "SHOW TABLES;"
+docker-compose exec -T postgres psql -U postgres -d storage_helper -c "\dt"
 Write-Host ""
 
 # Count tables
 $ErrorActionPreference = "Continue"
-$tableCount = docker-compose exec -T mysql mysql -uroot -proot storage_helper -e "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='storage_helper';" 2>&1
+$tableCount = docker-compose exec -T postgres psql -U postgres -d storage_helper -t -c "SELECT count(*) FROM information_schema.tables WHERE table_schema='public';" 2>&1
 $ErrorActionPreference = "Stop"
 
 $tableCountLine = $tableCount -split "`n" | Select-Object -Last 1
@@ -166,13 +162,13 @@ Write-Host "================================"
 Write-Host ""
 Write-Host "Connection details:"
 Write-Host "  Host: localhost"
-Write-Host "  Port: 3306"
-Write-Host "  User: root"
+Write-Host "  Port: 5432"
+Write-Host "  User: postgres"
 Write-Host "  Password: root"
 Write-Host "  Database: storage_helper"
 Write-Host ""
 Write-Host "Next steps:"
-Write-Host '  - Verify tables: docker-compose exec mysql mysql -uroot -proot storage_helper -e "DESCRIBE document;"'
+Write-Host "  - Verify tables: docker-compose exec postgres psql -U postgres -d storage_helper -c '\dt'"
 Write-Host "  - Insert test data: add data to your tables"
 Write-Host "  - Stop container: docker-compose down"
-Write-Host "  - View logs: docker-compose logs mysql"
+Write-Host "  - View logs: docker-compose logs postgres"
