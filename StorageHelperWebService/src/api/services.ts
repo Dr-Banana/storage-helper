@@ -295,6 +295,27 @@ export const documentService = {
   },
 
   /**
+   * Update document storage location
+   * PUT /api/documents/{document_id}/location
+   */
+  updateLocation: async (
+    documentId: number,
+    locationId: number | null
+  ): Promise<{
+    document_id: number
+    location_id: number | null
+    status: string
+    message: string
+  }> => {
+    // Use -1 to represent "no location" (null)
+    const locationIdValue = locationId === null ? -1 : locationId
+    const response = await apiClient.put(`/documents/${documentId}/location`, {
+      location_id: locationIdValue
+    })
+    return response.data
+  },
+
+  /**
    * Search for similar documents by embedding
    * POST /api/v1/documents/search-similar
    */
@@ -423,6 +444,39 @@ export const locationService = {
   getById: async (userId: number, locationId: number): Promise<StorageLocation | null> => {
     const response = await locationService.getByUserId(userId)
     return response.locations.find(l => l.id === locationId) || null
+  },
+  
+  /**
+   * Create a new location for a user
+   * POST /api/users/{user_id}/locations
+   */
+  create: async (userId: number, data: { name: string; description?: string; photo_url?: string }): Promise<void> => {
+    await apiClient.post(`/users/${userId}/locations`, data)
+  },
+  
+  /**
+   * Update a location for a user
+   * PUT /api/users/{user_id}/locations/{location_id}
+   */
+  update: async (userId: number, locationId: number, data: Partial<{ name: string; description: string; photo_url: string }>): Promise<void> => {
+    await apiClient.put(`/users/${userId}/locations/${locationId}`, data)
+  },
+  
+  /**
+   * Delete a location for a user
+   * DELETE /api/users/{user_id}/locations/{location_id}
+   */
+  delete: async (userId: number, locationId: number): Promise<void> => {
+    await apiClient.delete(`/users/${userId}/locations/${locationId}`)
+  },
+  
+  /**
+   * Get all documents in a location for a user
+   * GET /api/users/{user_id}/locations/{location_id}/documents
+   */
+  getLocationDocuments: async (userId: number, locationId: number): Promise<{ user_id: number; location_id: number; total: number; document_ids: number[] }> => {
+    const response = await apiClient.get(`/users/${userId}/locations/${locationId}/documents`)
+    return response.data
   },
 }
 
