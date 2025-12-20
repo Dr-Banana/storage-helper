@@ -476,3 +476,42 @@ def update_document_location(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to update document location: {str(e)}"
         )
+
+
+@router.get(
+    "/locations/{location_id}/documents",
+    response_model=List[int],
+    summary="Get all documents in a location",
+    description="Retrieve a list of document IDs stored in a specific physical location."
+)
+def get_location_documents(location_id: int, db: Session = Depends(get_db)):
+    """
+    Get all document IDs for a specific storage location
+    
+    - **location_id**: The storage location's ID
+    
+    Returns a list of document IDs.
+    """
+    try:
+        # Verify location exists
+        location = db.query(StorageLocation).filter(StorageLocation.id == location_id).first()
+        if not location:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Storage location with ID {location_id} not found"
+            )
+        
+        # Get all documents assigned to this location
+        documents = db.query(Document).filter(
+            Document.current_location_id == location_id
+        ).all()
+        
+        return [doc.id for doc in documents]
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to retrieve documents for location: {str(e)}"
+        )
