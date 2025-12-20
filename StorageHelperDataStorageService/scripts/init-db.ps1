@@ -35,58 +35,58 @@ Set-Location $PROJECT_ROOT
 Write-Host "📁 Project directory: $PROJECT_ROOT"
 Write-Host ""
 
-# Check if MySQL image already exists
+# Check if PostgreSQL image already exists
 $ErrorActionPreference = "Continue"
-docker image inspect mysql:8.0 2>&1 | Out-Null
+docker image inspect pgvector/pgvector:pg16 2>&1 | Out-Null
 $imageExists = ($LASTEXITCODE -eq 0)
 $ErrorActionPreference = "Stop"
 
 if ($imageExists) {
-    Write-Host "✅ MySQL image already exists"
+    Write-Host "✅ PostgreSQL (pgvector) image already exists"
 } else {
-    Write-Host "📥 Pulling MySQL image..."
-    docker pull mysql:8.0
+    Write-Host "📥 Pulling PostgreSQL (pgvector) image..."
+    docker pull pgvector/pgvector:pg16
     if ($LASTEXITCODE -ne 0) {
-        Write-Host "❌ Error: Failed to pull MySQL image"
+        Write-Host "❌ Error: Failed to pull PostgreSQL image"
         exit 1
     }
 }
 
-# Start MySQL container
+# Start PostgreSQL container
 Write-Host "🚀 Starting database container..."
-docker-compose up -d mysql
+docker-compose up -d postgres
 if ($LASTEXITCODE -ne 0) {
-    Write-Host "❌ Error: Failed to start MySQL container"
+    Write-Host "❌ Error: Failed to start PostgreSQL container"
     exit 1
 }
 
-# Wait for MySQL to be ready
-Write-Host "⏳ Waiting for MySQL to start..."
+# Wait for PostgreSQL to be ready
+Write-Host "⏳ Waiting for PostgreSQL to start..."
 $ErrorActionPreference = "Continue"
-$mysqlReady = $false
+$postgresReady = $false
 for ($i = 1; $i -le 30; $i++) {
-    docker-compose exec -T mysql mysql -uroot -proot -e "SELECT 1" 2>&1 | Out-Null
+    docker-compose exec -T postgres pg_isready -U postgres 2>&1 | Out-Null
     if ($LASTEXITCODE -eq 0) {
-        $mysqlReady = $true
+        $postgresReady = $true
         break
     }
     Start-Sleep -Seconds 1
 }
 $ErrorActionPreference = "Stop"
 
-if (-not $mysqlReady) {
-    Write-Host "❌ Error: MySQL failed to become ready within 30 seconds"
-    Write-Host "   Check logs with: docker-compose logs mysql"
+if (-not $postgresReady) {
+    Write-Host "❌ Error: PostgreSQL failed to become ready within 30 seconds"
+    Write-Host "   Check logs with: docker-compose logs postgres"
     exit 1
 }
 
-Write-Host "✅ MySQL is ready"
+Write-Host "✅ PostgreSQL is ready"
 Write-Host ""
 
 # Verify database initialization
 Write-Host "📊 Verifying database schema..."
 $ErrorActionPreference = "Continue"
-docker-compose exec -T mysql mysql -uroot -proot storage_helper -e "SHOW TABLES;"
+docker-compose exec -T postgres psql -U postgres -d storage_helper -c "\dt"
 $schemaVerified = ($LASTEXITCODE -eq 0)
 $ErrorActionPreference = "Stop"
 
@@ -94,7 +94,7 @@ if (-not $schemaVerified) {
     Write-Host ""
     Write-Host "❌ Error: Failed to verify database schema"
     Write-Host "   The database may not have been initialized correctly"
-    Write-Host "   Check logs with: docker-compose logs mysql"
+    Write-Host "   Check logs with: docker-compose logs postgres"
     exit 1
 }
 
@@ -105,10 +105,10 @@ Write-Host "================================"
 Write-Host ""
 Write-Host "Connection details:"
 Write-Host "  Host: localhost"
-Write-Host "  Port: 3306"
-Write-Host "  User: root"
+Write-Host "  Port: 5432"
+Write-Host "  User: postgres"
 Write-Host "  Password: root"
 Write-Host "  Database: storage_helper"
 Write-Host ""
 Write-Host "To stop the container: docker-compose down"
-Write-Host "To view logs: docker-compose logs mysql"
+Write-Host "To view logs: docker-compose logs postgres"
