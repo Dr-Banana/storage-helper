@@ -84,6 +84,9 @@ class IngestResponse(BaseModel):
     
     # Embedding保存错误（如果embedding保存失败）
     embedding_save_error: Optional[str] = Field(None, description="Error message if embedding save failed")
+    
+    # Recommendation生成错误（如果recommendation生成失败）
+    recommendation_error: Optional[str] = Field(None, description="Error message if recommendation generation failed")
 
 # ==========================================
 # 2. Feedback (用户反馈)

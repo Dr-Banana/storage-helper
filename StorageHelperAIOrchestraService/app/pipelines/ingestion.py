@@ -1474,6 +1474,17 @@ async def run_unified_ingestion_pipeline(
         if embedding_save_error and base_status == "success":
             base_status = "partial_success"
         
+        # Check recommendation result status - if it failed, mark as failed
+        recommendation_error = None
+        if recommendation_result:
+            recommendation_status = recommendation_result.get("status")
+            if recommendation_status == "llm_error":
+                recommendation_error = recommendation_result.get("error", "Recommendation generation failed after multiple retries.")
+                # If recommendation failed, mark the entire ingestion as failed
+                # Recommendation is a critical step for document classification and storage location
+                base_status = "failed"
+                logger.error(f"Recommendation failed: {recommendation_error}. Marking ingestion as failed.")
+        
         response = {
             "status": base_status,
             "document_id": document_id_int,
@@ -1486,6 +1497,10 @@ async def run_unified_ingestion_pipeline(
         # Add embedding save error if present
         if embedding_save_error:
             response["embedding_save_error"] = embedding_save_error
+        
+        # Add recommendation error if present
+        if recommendation_error:
+            response["recommendation_error"] = recommendation_error
         
         # Add recommendation data if available
         if recommendation_result and recommendation_result.get("status") == "llm_success":

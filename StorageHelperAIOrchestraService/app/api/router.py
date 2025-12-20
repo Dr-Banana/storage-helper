@@ -122,6 +122,7 @@ async def process_document(
         # Extract data from unified pipeline result
         recommendation_data = result.get("recommendation", {})
         embedding_save_error = result.get("embedding_save_error")
+        recommendation_error = result.get("recommendation_error")
         status = result.get("status", "success")
         
         # Normalize status: map "completed" to "success" for consistency
@@ -136,7 +137,8 @@ async def process_document(
             successful_pages=result.get("successful_pages"),
             failed_pages=result.get("failed_pages"),
             page_results=result.get("page_results"),
-            embedding_save_error=embedding_save_error
+            embedding_save_error=embedding_save_error,
+            recommendation_error=recommendation_error
         )
         
         # Only return HTTP 500 for complete failures, not partial successes
