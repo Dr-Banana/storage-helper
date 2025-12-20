@@ -16,7 +16,9 @@ from app.core.database import get_db
 from app.models.document import Document
 from app.models.document_page import DocumentPage
 from app.models.document_embedding import DocumentEmbedding
+from app.models.storage_location import StorageLocation
 from app.schemas.document import DocumentSearchRequest
+from app.schemas.location import LocationResponse
 from app.services.document_service import DocumentService
 
 router = APIRouter(prefix="/documents", tags=["documents"])
@@ -103,6 +105,11 @@ def serve_file(path: str):
 # ============================================================
 # Data Models
 # ============================================================
+
+class DocumentLocationUpdate(BaseModel):
+    """Request model for updating document storage location"""
+    location_id: int
+
 
 class EmbeddingRequest(BaseModel):
     """Request model for updating document embedding"""
@@ -347,4 +354,125 @@ def search_documents(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to search documents: {str(e)}"
+        )
+
+
+@router.get(
+    "/{document_id}/location",
+    response_model=LocationResponse,
+    summary="Get document storage location",
+    description="Retrieve the physical storage location details for a specific document."
+)
+def get_document_location(document_id: int, db: Session = Depends(get_db)):
+    """
+    Get storage location for a specific document
+    
+    - **document_id**: The document's ID
+    
+    Returns the StorageLocation details
+    """
+    try:
+        # Verify document exists
+        document = db.query(Document).filter(Document.id == document_id).first()
+        if not document:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Document with ID {document_id} not found"
+            )
+        
+        if not document.current_location_id:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Document with ID {document_id} has no storage location assigned"
+            )
+        
+        # Get location details
+        location = db.query(StorageLocation).filter(
+            StorageLocation.id == document.current_location_id
+        ).first()
+        
+        if not location:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Storage location with ID {document.current_location_id} not found"
+            )
+        
+        return location
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to retrieve document location: {str(e)}"
+        )
+
+
+@router.put(
+    "/{document_id}/location",
+    response_model=dict,
+    summary="Update document storage location",
+    description="Update the physical storage location for a specific document."
+)
+def update_document_location(
+    document_id: int,
+    location_update: DocumentLocationUpdate,
+    db: Session = Depends(get_db)
+):
+    """
+    Set storage location for a specific document
+    
+    - **document_id**: The document's ID
+    - **location_id**: The storage location ID to assign
+    
+    Returns status and confirmation message
+    """
+    try:
+        # Verify document exists
+        document = db.query(Document).filter(Document.id == document_id).first()
+        if not document:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Document with ID {document_id} not found"
+            )
+        
+        # Verify location exists (if location_id is not -1)
+        if location_update.location_id != -1:
+            location = db.query(StorageLocation).filter(
+                StorageLocation.id == location_update.location_id
+            ).first()
+            if not location:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"Storage location with ID {location_update.location_id} not found"
+                )
+            
+            # Verify location belongs to the same user as the document
+            if location.user_id != document.owner_id:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Storage location does not belong to the document owner"
+                )
+            
+            document.current_location_id = location_update.location_id
+        else:
+            # -1 means remove location
+            document.current_location_id = None
+        
+        db.commit()
+        
+        return {
+            "document_id": document_id,
+            "location_id": document.current_location_id,
+            "status": "updated",
+            "message": "Document storage location updated successfully"
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to update document location: {str(e)}"
         )
