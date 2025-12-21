@@ -1,11 +1,12 @@
 import { useState, useEffect } from 'react'
-import { useParams, Link, useLocation } from 'react-router-dom'
-import { ArrowLeft, Calendar, User, FileText, MapPin, Tag } from 'lucide-react'
+import { useParams, Link, useLocation, useNavigate } from 'react-router-dom'
+import { ArrowLeft, Calendar, User, FileText, MapPin, Tag, Trash2 } from 'lucide-react'
 import { documentService, userService, categoryService, locationService, Document, DocumentPage, DocumentFile, DocumentCategory, StorageLocation } from '../api/services'
 
 const DocumentDetailPage = () => {
   const { id } = useParams<{ id: string }>()
   const location = useLocation()
+  const navigate = useNavigate()
   const [document, setDocument] = useState<Document | null>(null)
   const [pages, setPages] = useState<DocumentPage[]>([])
   const [files, setFiles] = useState<DocumentFile[]>([])
@@ -13,6 +14,7 @@ const DocumentDetailPage = () => {
   const [users, setUsers] = useState<Array<{ id: number; display_name: string }>>([])
   const [category, setCategory] = useState<DocumentCategory | null>(null)
   const [storageLocation, setStorageLocation] = useState<StorageLocation | null>(null)
+  const [deleting, setDeleting] = useState(false)
   
   // Get owner_id from location state if available
   const ownerIdFromState = (location.state as { ownerId?: number })?.ownerId
@@ -28,6 +30,22 @@ const DocumentDetailPage = () => {
     }
     loadUsers()
   }, [])
+
+  const handleDelete = async () => {
+    if (!id || !window.confirm('Are you sure you want to delete this document? This action cannot be undone.')) {
+      return
+    }
+
+    try {
+      setDeleting(true)
+      await documentService.delete(parseInt(id))
+      navigate('/documents')
+    } catch (error) {
+      console.error('Failed to delete document:', error)
+      alert('Failed to delete document. Please try again.')
+      setDeleting(false)
+    }
+  }
 
   useEffect(() => {
     const loadDocument = async () => {
@@ -164,19 +182,29 @@ const DocumentDetailPage = () => {
       <div className="card mb-6">
         <div className="flex flex-col md:flex-row gap-6">
           <div className="flex-1">
-            <h1 className="text-3xl font-bold text-home-text-dark mb-4">
-              {(() => {
-                // If title is "Document page X" format, use Document #ID instead
-                if (document.title && /^Document page \d+$/i.test(document.title)) {
-                  return `Document #${document.id}`
-                }
-                // If title is empty or just "Document #X", try to use a better default
-                if (!document.title || document.title === `Document #${document.id}`) {
-                  return `Document #${document.id}`
-                }
-                return document.title
-              })()}
-            </h1>
+            <div className="flex justify-between items-start mb-4">
+              <h1 className="text-3xl font-bold text-home-text-dark">
+                {(() => {
+                  // If title is "Document page X" format, use Document #ID instead
+                  if (document.title && /^Document page \d+$/i.test(document.title)) {
+                    return `Document #${document.id}`
+                  }
+                  // If title is empty or just "Document #X", try to use a better default
+                  if (!document.title || document.title === `Document #${document.id}`) {
+                    return `Document #${document.id}`
+                  }
+                  return document.title
+                })()}
+              </h1>
+              <button
+                onClick={handleDelete}
+                disabled={deleting}
+                className="btn-danger flex items-center gap-2"
+              >
+                <Trash2 size={18} />
+                {deleting ? 'Deleting...' : 'Delete'}
+              </button>
+            </div>
             <div className="space-y-3">
               <div className="flex items-center gap-2 text-home-text-light">
                 <Calendar size={18} />
@@ -259,7 +287,6 @@ const DocumentDetailPage = () => {
                     <div className="w-full h-[600px] rounded-home overflow-hidden bg-home-background-dark">
                       <iframe
                         src={file.url}
-                        type="application/pdf"
                         className="w-full h-full border-0"
                         title={`PDF Preview ${index + 1}`}
                       />

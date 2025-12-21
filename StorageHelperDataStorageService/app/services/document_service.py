@@ -571,3 +571,52 @@ class DocumentService:
                     pass  # Log but don't raise
             
             raise ValueError(f"Failed to upload document page: {str(e)}")
+    
+    @staticmethod
+    def delete_document(db: Session, document_id: int) -> bool:
+        """
+        Delete a document and all its associated data (pages, embeddings, files)
+        
+        Args:
+            db: Database session
+            document_id: Document ID to delete
+            
+        Returns:
+            True if deleted successfully
+            
+        Raises:
+            ValueError: If document not found or deletion fails
+        """
+        try:
+            # 1. Get document and its pages
+            document = db.query(Document).filter(Document.id == document_id).first()
+            if not document:
+                raise ValueError(f"Document {document_id} not found")
+            
+            # 2. Get all page image URLs to delete from storage
+            pages = db.query(DocumentPage).filter(DocumentPage.document_id == document_id).all()
+            image_urls = [page.image_url for page in pages if page.image_url]
+            
+            # Also include document thumbnail if it's different from pages
+            if document.image_url and document.image_url not in image_urls:
+                image_urls.append(document.image_url)
+            
+            # 3. Delete files from storage
+            for url in image_urls:
+                try:
+                    StorageClient.delete_image(url)
+                except StorageException as e:
+                    logger.warning(f"Failed to delete file from storage: {url}. Error: {e}")
+            
+            # 4. Delete from database (cascading will handle pages and embeddings)
+            db.delete(document)
+            db.commit()
+            
+            return True
+            
+        except Exception as e:
+            db.rollback()
+            if isinstance(e, ValueError):
+                raise e
+            logger.error(f"Failed to delete document: {e}")
+            raise ValueError(f"Failed to delete document: {str(e)}")

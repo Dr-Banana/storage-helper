@@ -515,3 +515,35 @@ def get_location_documents(location_id: int, db: Session = Depends(get_db)):
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to retrieve documents for location: {str(e)}"
         )
+
+
+@router.delete(
+    "/{document_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Delete document",
+    description="Delete a specific document and all its associated data (pages, embeddings, files)."
+)
+def delete_document(document_id: int, db: Session = Depends(get_db)):
+    """
+    Delete a specific document
+    
+    - **document_id**: The document's ID
+    """
+    try:
+        DocumentService.delete_document(db, document_id)
+        return None
+    except ValueError as e:
+        if "not found" in str(e):
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=str(e)
+            )
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e)
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to delete document: {str(e)}"
+        )

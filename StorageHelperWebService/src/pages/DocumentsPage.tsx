@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { Link } from 'react-router-dom'
-import { FileText, Calendar, User, Search } from 'lucide-react'
+import { FileText, Calendar, User, Search, Trash2 } from 'lucide-react'
 import { documentService, userService, Document, DocumentFile } from '../api/services'
 
 interface DocumentWithFiles extends Document {
@@ -137,6 +137,23 @@ const DocumentsPage = () => {
     doc.title?.toLowerCase().includes(searchQuery.toLowerCase())
   )
 
+  const handleDelete = async (e: React.MouseEvent, docId: number) => {
+    e.preventDefault()
+    e.stopPropagation()
+    
+    if (!window.confirm('Are you sure you want to delete this document? This action cannot be undone.')) {
+      return
+    }
+
+    try {
+      await documentService.delete(docId)
+      setDocuments(prevDocs => prevDocs.filter(doc => doc.id !== docId))
+    } catch (error) {
+      console.error('Failed to delete document:', error)
+      alert('Failed to delete document. Please try again.')
+    }
+  }
+
   return (
     <div className="max-w-7xl mx-auto">
       {/* Page title and actions */}
@@ -204,8 +221,17 @@ const DocumentsPage = () => {
               key={doc.id}
               to={`/documents/${doc.id}`}
               state={{ ownerId: doc.owner_id }}
-              className="card hover:shadow-home-lg transition-all duration-200 group"
+              className="card hover:shadow-home-lg transition-all duration-200 group relative"
             >
+              {/* Delete button */}
+              <button
+                onClick={(e) => handleDelete(e, doc.id)}
+                className="absolute top-2 right-2 p-2 bg-red-50 text-red-500 rounded-full opacity-0 group-hover:opacity-100 transition-opacity duration-200 hover:bg-red-100 z-10"
+                title="Delete document"
+              >
+                <Trash2 size={18} />
+              </button>
+
               {/* Show preview files if available */}
               {doc.previewFiles && doc.previewFiles.length > 0 ? (
                 <div className="mb-4 space-y-2">
@@ -216,7 +242,6 @@ const DocumentsPage = () => {
                           <div className="w-full h-48 rounded-home overflow-hidden bg-home-background-dark relative border border-home-primary-100">
                             <iframe
                               src={`${file.url}#toolbar=0&navpanes=0&scrollbar=0&page=1&zoom=page-fit`}
-                              type="application/pdf"
                               className="w-full h-full border-0"
                               title={`PDF Preview ${idx + 1}`}
                               style={{ 

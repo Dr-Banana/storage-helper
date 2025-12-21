@@ -372,6 +372,14 @@ export const documentService = {
     })
     return response.data
   },
+
+  /**
+   * Delete document
+   * DELETE /api/documents/{document_id}
+   */
+  delete: async (id: number): Promise<void> => {
+    await apiClient.delete(`/documents/${id}`)
+  },
 }
 
 // ============================================================================
