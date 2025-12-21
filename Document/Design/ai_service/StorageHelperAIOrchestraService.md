@@ -34,12 +34,19 @@ The ingestion pipeline orchestrates the complete document processing workflow fr
     - `owner_id`: `int` – Document owner user ID (required).
     - `document_id`: `Optional[int]` – Existing document ID (optional; if omitted, the first processed page will create one).
     - `file_type`: `Optional[str]` – Optional file type override: `"image"` or `"pdf"` (mainly for single-file uploads; otherwise auto-detected).
-  - **Server-side ingestion behavior** (high level):
-    1. Save uploaded files to a **temporary directory** for OCR / PDF processing.
-    2. For each original file (image or PDF), call the DataStorageService `/api/v1/documents/upload` **exactly once** to store the file and obtain a single `image_url` for that file.
-    3. Run the full AI pipeline on a **per-page basis** (OCR → Vision → Cleaning → [Parallel: Recommendation + Embedding]).
-    4. For each logical page, call `/api/v1/documents/process` using the shared `image_url` for that file, plus `page_number`, `ocr_text`, and `document_id`.
-    5. Clean up temporary files after processing completes.
+  - **Preview Mode (Two-Step Workflow)**:
+    - **Step 1 - Preview**: The `/api/v1/ingestion` endpoint now runs in **preview mode** by default:
+      1. Save uploaded files to a **temporary directory** for OCR / PDF processing.
+      2. For each original file (image or PDF), call the DataStorageService `/api/v1/documents/upload` **exactly once** to store the file and obtain a single `image_url` for that file.
+      3. Run the full AI pipeline on a **per-page basis** (OCR → Vision → Cleaning → [Parallel: Recommendation + Embedding]).
+      4. **Skip database processing**: Do NOT call `/api/v1/documents/process` (user will confirm first).
+      5. Return preview results with `preview_mode: true`, including recommendation, OCR text, and embedding data.
+      6. Clean up temporary files after processing completes.
+    - **Step 2 - Confirmation**: User reviews preview results and calls `/api/v1/ingestion/confirm`:
+      1. User can modify `category_id` and `location_id` from AI recommendations.
+      2. API processes each page with user-modified data via `/api/v1/documents/process`.
+      3. Saves embedding if available.
+      4. Returns final upload results with `document_id` and `page_id`.
 
 **Batch Processing Support:**
 - **Single File**: Upload one file via `files` parameter: `files=[UploadFile(...)]`.  
@@ -92,19 +99,35 @@ flowchart TD
     Recommendation --> Merge{Merge Results}
     Embedding --> Merge
     
-    Merge --> SaveEmbedding["STEP 3C: SAVE EMBEDDING<br/>app/storage/pipeline_storage.py<br/>─────────────────<br/>• Save embedding to DataStorageService<br/>  via HTTP API<br/>• POST /api/documents/{document_id}/embedding<br/>• Executed after pages processed<br/>  (document_id available)<br/>• Validates 768-dimensional vector<br/>• Request format:<br/>  document_id: int<br/>  embedding: List[float]<br/>• Non-blocking, continues if fails<br/>• Called in both single and batch<br/>  processing pipelines<br/>─────────────────<br/>OUTPUT: save_success: bool<br/>Logs success/failure status"]
+    Merge --> PreviewCheck{"Preview Mode?<br/>(preview_mode=True)"}
     
-    SaveEmbedding --> ProcessDoc["STEP 4B: PROCESS DOCUMENT<br/>app/storage/pipeline_storage.py<br/>─────────────────<br/>• Process document page metadata<br/>  AFTER full AI pipeline completes<br/>  (OCR / Vision / Cleaning / Recommendation / Embedding)<br/>• POST /api/v1/documents/process<br/>  - image_url: from upload step (/documents/upload)<br/>  - owner_id<br/>  - page_number: 1-indexed<br/>  - ocr_text: cleaned_text (optional)<br/>  - document_id: optional<br/>• Sends structured AI results (cleaned_text)<br/>  **together with** file storage path (image_url)<br/>• First page creates document (returns document_id)<br/>• Subsequent pages reuse the same document_id<br/>• Non-blocking, continues if fails<br/>─────────────────<br/>OUTPUT: process_result<br/>  - document_id: int<br/>  - page_id<br/>  - image_url<br/>  - status: created/updated<br/>OUTPUT: file_upload_error if fails"]
+    PreviewCheck -->|Yes| PreviewResponse["PREVIEW RESPONSE<br/>─────────────────<br/>Skip database processing<br/>Return preview results:<br/>• status: success/partial_success/failed<br/>• document_id: null (not saved)<br/>• recommendation: Dict<br/>  - category_id, location_id<br/>  - recommendation_reason<br/>• page_results: List<br/>  - ocr_text, file_url<br/>  - NO page_id (not saved yet)<br/>• embedding: List[float]<br/>• embedding_dimension: int<br/>• preview_mode: true<br/>─────────────────<br/>User reviews and confirms"]
+    
+    PreviewCheck -->|No| ProcessDoc["STEP 4B: PROCESS DOCUMENT<br/>app/storage/pipeline_storage.py<br/>─────────────────<br/>• Process document page metadata<br/>  AFTER full AI pipeline completes<br/>  (OCR / Vision / Cleaning / Recommendation / Embedding)<br/>• POST /api/v1/documents/process<br/>  - image_url: from upload step<br/>  - owner_id<br/>  - page_number: 1-indexed<br/>  - ocr_text: cleaned_text<br/>  - document_id: optional<br/>  - category_id: from recommendation<br/>  - location_id: from recommendation<br/>• First page creates document<br/>• Subsequent pages reuse document_id<br/>─────────────────<br/>OUTPUT: process_result<br/>  - document_id: int<br/>  - page_id: int<br/>  - image_url<br/>  - status: created/updated"]
     
     ProcessDoc --> Persistence["STEP 4: PERSISTENCE<br/>app/pipelines/ingestion.py<br/>─────────────────<br/>STORAGE LOGIC REMOVED:<br/>• Generate UUID for document_id<br/>• No local file storage<br/>• No remote API calls<br/>• Persistence handled by API layer<br/>─────────────────<br/>OUTPUT: document_id UUID string<br/>for API response"]
     
     Persistence --> Response["RESPONSE: Complete Pipeline Output<br/>─────────────────<br/>Returns full pipeline results<br/>• status: success / partial_success / failed<br/>• document_id: int, not UUID string<br/>• recommendation: Dict with all recommendation data<br/>  - category_id: int, no category_code<br/>  - location_id: int, no location_name<br/>  - recommendation_reason<br/>  - suggested_tags<br/>• For batch processing:<br/>  - total_pages: int<br/>  - successful_pages: int<br/>  - failed_pages: int<br/>  - page_results: List of PageProcessingResult<br/>    Each page: page_number, status,<br/>    error, ocr_text, file_url<br/>• Single file: page_results = None"]
+    
+    PreviewResponse --> ConfirmAPI["CONFIRMATION API<br/>POST /api/v1/ingestion/confirm<br/>─────────────────<br/>User confirms and uploads:<br/>• Receives preview results<br/>• User-modified category_id<br/>• User-modified location_id"]
+    
+    ConfirmAPI --> ProcessDocConfirm["STEP 4B: PROCESS DOCUMENT<br/>(Confirmation Mode)<br/>app/storage/pipeline_storage.py<br/>─────────────────<br/>• Process document page metadata<br/>  with user-modified data<br/>• POST /api/v1/documents/process<br/>  - image_url: from preview<br/>  - owner_id<br/>  - page_number: from preview<br/>  - ocr_text: from preview<br/>  - document_id: optional<br/>  - category_id: user-modified<br/>  - location_id: user-modified<br/>• First page creates document<br/>• Subsequent pages reuse document_id<br/>─────────────────<br/>OUTPUT: process_result<br/>  - document_id: int<br/>  - page_id: int<br/>  - image_url<br/>  - status: created/updated"]
+    
+    ProcessDocConfirm --> SaveEmbeddingConfirm["SAVE EMBEDDING<br/>(Confirmation Mode)<br/>app/storage/pipeline_storage.py<br/>─────────────────<br/>• Save embedding from preview<br/>  to DataStorageService<br/>• POST /api/documents/{document_id}/embedding<br/>• Uses embedding from preview<br/>• Validates 768-dimensional vector<br/>─────────────────<br/>OUTPUT: save_success: bool"]
+    
+    SaveEmbeddingConfirm --> ConfirmResponse["CONFIRMATION RESPONSE<br/>─────────────────<br/>Returns upload results:<br/>• status: success/partial_success/failed<br/>• document_id: int<br/>• total_pages: int<br/>• successful_pages: int<br/>• failed_pages: int<br/>• page_results: List<br/>  - page_id: int (now saved)<br/>  - document_id: int<br/>• embedding_save_error: Optional[str]"]
     
     style Start fill:#0000
     style Stop1 fill:#0000
     style Response fill:#0000
     style Parallel fill:#0000
     style Merge fill:#0000
+    style PreviewCheck fill:#0000
+    style PreviewResponse fill:#0000
+    style ConfirmAPI fill:#0000
+    style ProcessDocConfirm fill:#0000
+    style SaveEmbeddingConfirm fill:#0000
+    style ConfirmResponse fill:#0000
 ```
 
 #### Key Design Features
@@ -172,15 +195,36 @@ flowchart TD
      - **Validation**: Ensures 768-dimensional vector before saving
      - **Error handling**: Save failures logged but don't stop pipeline execution
      - **Integration**: Called automatically in both single-file and batch processing pipelines
-8. **Response Format**:
+8. **Preview Mode (Two-Step Workflow)**:
+   - **Step 1 - Preview**: `/api/v1/ingestion` runs in preview mode by default
+     - Executes full AI pipeline (OCR → Vision → Cleaning → Recommendation → Embedding)
+     - Uploads files to get `image_url`
+     - **Skips database processing** (does not call `/api/v1/documents/process`)
+     - Returns preview results with `preview_mode: true`
+     - Includes all necessary data for user review: recommendation, OCR text, embedding, file URLs
+   - **Step 2 - Confirmation**: `/api/v1/ingestion/confirm` handles user confirmation
+     - User can modify `category_id` and `location_id` from AI recommendations
+     - Processes each page with user-modified data via `/api/v1/documents/process`
+     - Saves embedding if available
+     - Returns final upload results with `document_id` and `page_id`
+   - **Benefits**:
+     - User can review AI recommendations before committing to database
+     - User can correct category and location assignments
+     - Prevents incorrect data from being saved
+     - Better user experience with confirmation step
+9. **Response Format**:
    - **Unified Structure**: Single response format for both single and batch processing
    - **Document ID**: Integer type (not UUID string) for consistency with database
    - **Recommendation Field**: All recommendation data in single `recommendation` Dict
      - Uses `category_id` (int) instead of `category_code` (string) to save space
      - Uses `location_id` (int) instead of `location_name` (string)
      - Removed redundant fields: `detected_type_code`, `recommended_location_id`, `recommended_location_reason`
+   - **Preview Mode Fields**: 
+     - `preview_mode: bool` – Indicates this is a preview result requiring user confirmation
+     - `embedding: Optional[List[float]]` – Document embedding vector (needed for confirmation)
+     - `embedding_dimension: Optional[int]` – Embedding dimension (needed for confirmation)
    - **Batch Fields**: `total_pages`, `successful_pages`, `failed_pages`, `page_results` (only present for batch)
-8. **Comprehensive Logging**: Each step logs progress, timing, and results for debugging and monitoring
+10. **Comprehensive Logging**: Each step logs progress, timing, and results for debugging and monitoring
 
 #### Module Details
 
@@ -505,10 +549,13 @@ Response: {
 ### Endpoints
 
 #### POST `/api/v1/ingestion`
-**Unified ingestion endpoint for single and batch processing**
+**Unified ingestion endpoint for single and batch processing (Preview Mode)**
 
-**🆕 API Design (File Binary Upload via Multipart Form Data):**
+**API Design (File Binary Upload via Multipart Form Data):**
 The frontend uploads raw file binaries via `multipart/form-data`, which avoids any need for the browser to know local absolute paths.
+
+**Preview Mode Behavior:**
+This endpoint now runs in **preview mode** by default. It executes the full AI pipeline (OCR, Vision, Cleaning, Recommendation, Embedding) and uploads files, but **does NOT save to database**. User must call `/api/v1/ingestion/confirm` to actually persist the data.
 
 **Request (multipart/form-data):**
 ```
@@ -545,11 +592,11 @@ fetch('http://localhost:8001/api/v1/ingestion', {
 });
 ```
 
-**Response (Single File, Single Page):**
+**Response (Preview Mode - Single File, Single Page):**
 ```json
 {
   "status": "success",
-  "document_id": 13,
+  "document_id": null,
   "recommendation": {
     "category_id": 4,
     "location_id": 1,
@@ -565,13 +612,20 @@ fetch('http://localhost:8001/api/v1/ingestion', {
       "status": "success",
       "error": null,
       "ocr_text": "Extracted text...",
-      "file_url": "./tmp\\\\documents/1/pages/xxxx.pdf",
-      "document_id": 13,
-      "page_id": 62
+      "file_url": "http://localhost:8000/uploads/xxxx.pdf",
+      "document_id": null,
+      "page_id": null
     }
-  ]
+  ],
+  "embedding": [0.123, -0.456, 0.789, ...],
+  "embedding_dimension": 768,
+  "embedding_save_error": null,
+  "recommendation_error": null,
+  "preview_mode": true
 }
 ```
+
+**Note**: In preview mode, `document_id` and `page_id` are `null` because data is not yet saved to database. User must call `/api/v1/ingestion/confirm` to persist the data.
 
 **Response (Batch Processing – Multiple Files and/or Multi-page PDFs):**
 ```json
@@ -612,13 +666,110 @@ fetch('http://localhost:8001/api/v1/ingestion', {
 ```
 
 **Key Features:**
+- **Preview Mode**: Executes full AI pipeline but skips database processing
 - **Unified API**: Single endpoint handles both single-file and batch ingestion via `multipart/form-data` (`files` list).
 - **Per-file upload**: Each original file is uploaded once; all its pages reuse the same `image_url`.
 - **PDF Splitting**: Multi-page PDFs are split into logical pages for AI processing, with page numbers defined **within each file** (1..N_file).
-- **Document ID**: Integer type; the first successfully processed page establishes the `document_id`, and all subsequent pages reuse it.
+- **Preview Response**: Returns preview results with `preview_mode: true`
+  - Includes recommendation, OCR text, embedding, and file URLs
+  - `document_id` and `page_id` are `null` (not saved yet)
 - **Recommendation**: All recommendation data is returned in a single `recommendation` field.
   - Uses IDs (`category_id`, `location_id`) instead of codes/names to save space.
   - Removes redundant fields for a cleaner response.
+
+---
+
+#### POST `/api/v1/ingestion/confirm`
+**User confirmation and database upload endpoint**
+
+**Purpose:**
+After user reviews preview results from `/api/v1/ingestion`, this endpoint handles the actual database upload with user-modified category and location information.
+
+**Request (JSON):**
+```json
+{
+  "page_results": [
+    {
+      "page_number": 1,
+      "status": "success",
+      "error": null,
+      "ocr_text": "Extracted text from preview...",
+      "file_url": "http://localhost:8000/uploads/xxxx.pdf",
+      "document_id": null,
+      "page_id": null
+    }
+  ],
+  "recommendation": {
+    "category_id": 4,
+    "location_id": 1,
+    "recommendation_reason": "...",
+    "suggested_tags": [...]
+  },
+  "owner_id": 1,
+  "document_id": null,
+  "category_id": 5,
+  "location_id": 2,
+  "embedding": [0.123, -0.456, ...],
+  "embedding_dimension": 768
+}
+```
+
+**Request Fields:**
+- `page_results`: `List[PageProcessingResult]` – Page results from preview (required)
+- `recommendation`: `Dict[str, Any]` – Recommendation data from preview (required)
+- `owner_id`: `int` – Document owner user ID (required)
+- `document_id`: `Optional[int]` – Optional existing document ID
+- `category_id`: `Optional[int]` – User-modified category ID (overrides recommendation)
+- `location_id`: `Optional[int]` – User-modified location ID (overrides recommendation, use -1 for no location)
+- `embedding`: `Optional[List[float]]` – Document embedding vector from preview (optional)
+- `embedding_dimension`: `Optional[int]` – Embedding dimension from preview (optional)
+
+**Response:**
+```json
+{
+  "status": "success",
+  "document_id": 123,
+  "total_pages": 1,
+  "successful_pages": 1,
+  "failed_pages": 0,
+  "page_results": [
+    {
+      "page_number": 1,
+      "status": "success",
+      "error": null,
+      "ocr_text": "Extracted text...",
+      "file_url": "http://localhost:8000/uploads/xxxx.pdf",
+      "document_id": 123,
+      "page_id": 456
+    }
+  ],
+  "embedding_save_error": null
+}
+```
+
+**Process (Step-by-Step):**
+1. **STEP 4B: PROCESS DOCUMENT** - For each page in `page_results`, call `/api/v1/documents/process` via `pipeline_storage.process_document_page()`:
+   - `image_url`: From preview `file_url`
+   - `owner_id`: From request
+   - `page_number`: From page result
+   - `ocr_text`: From page result
+   - `document_id`: From request (or None to create new)
+   - `category_id`: User-modified value (or from recommendation if not provided)
+   - `location_id`: User-modified value (or from recommendation if not provided, -1 for no location)
+   - This step creates/updates document pages in the database and returns `document_id` and `page_id`
+2. **SAVE EMBEDDING** - Save embedding if available via `/api/documents/{document_id}/embedding`:
+   - Uses embedding vector from preview results
+   - Validates 768-dimensional vector
+   - Saves to DataStorageService for future search use
+3. **Return Results** - Return upload results with `document_id` and `page_id` for each page
+
+**Note**: The confirmation endpoint executes the same STEP 4B: PROCESS DOCUMENT logic that would have been executed in non-preview mode, but with user-modified category and location values.
+
+**Key Features:**
+- **User Control**: User can modify `category_id` and `location_id` before upload
+- **Batch Support**: Handles multiple pages in single request
+- **Error Handling**: Tracks per-page success/failure status
+- **Embedding Persistence**: Automatically saves embedding if available
 
 ---
 
@@ -927,6 +1078,43 @@ StorageHelperAIOrchestraService/
       - **Real-time updates**: Categories and locations immediately available after creation
       - **Database consistency**: All data stored in centralized database with proper foreign keys
       - **Scalability**: Supports multiple users without file conflicts
+*   **Preview Mode and Confirmation Workflow** (December 21, 2025):
+    - **Two-Step Workflow**: Implemented preview mode for user confirmation before database upload
+      - **Step 1 - Preview**: `/api/v1/ingestion` runs in preview mode by default
+        - Executes full AI pipeline (OCR → Vision → Cleaning → Recommendation → Embedding)
+        - Uploads files to get `image_url`
+        - **Skips database processing** (does not call `/api/v1/documents/process`)
+        - Returns preview results with `preview_mode: true`
+        - Includes all necessary data: recommendation, OCR text, embedding, file URLs
+      - **Step 2 - Confirmation**: `/api/v1/ingestion/confirm` handles user confirmation
+        - User can modify `category_id` and `location_id` from AI recommendations
+        - Processes each page with user-modified data via `/api/v1/documents/process`
+        - Saves embedding if available
+        - Returns final upload results with `document_id` and `page_id`
+    - **Implementation Details**:
+      - Added `preview_mode` parameter to `run_unified_ingestion_pipeline()` function
+      - Modified pipeline to skip `step_process_document()` and embedding save in preview mode
+      - Created new `/api/v1/ingestion/confirm` endpoint in `app/api/router.py`
+      - Added `IngestConfirmRequest` and `IngestConfirmResponse` schemas
+      - Updated `IngestResponse` to include `preview_mode`, `embedding`, and `embedding_dimension` fields
+    - **Frontend Integration**:
+      - Updated `UploadPage.tsx` to show confirmation step after preview
+      - Added UI for reviewing AI recommendations and modifying category/location
+      - Added OCR text preview with expand/collapse functionality
+      - Implemented confirmation API call with user-modified data
+    - **Benefits**:
+      - User can review AI recommendations before committing to database
+      - User can correct category and location assignments
+      - Prevents incorrect data from being saved
+      - Better user experience with confirmation step
+*   **Code Internationalization** (December 21, 2025):
+    - **All code converted to English**: Removed all Chinese comments and documentation strings
+    - **Removed emoji**: Cleaned up all emoji characters from code and comments
+    - **Updated files**:
+      - `app/api/router.py`: All docstrings and comments in English
+      - `app/api/schemas.py`: All field descriptions and docstrings in English
+      - `app/pipelines/ingestion.py`: All comments and log messages in English
+      - `src/pages/UploadPage.tsx`: All UI text in English
 *   **Pending Work**: 
     - Feedback handler implementation (endpoint exists, storage logic removed, needs API integration)
     - Comprehensive test suite (unit and integration tests)

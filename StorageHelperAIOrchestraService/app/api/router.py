@@ -6,7 +6,8 @@ import tempfile
 import os
 from app.api.schemas import (
     IngestResponse, 
-    FeedbackRequest, FeedbackResponse
+    FeedbackRequest, FeedbackResponse,
+    IngestConfirmRequest, IngestConfirmResponse
 )
 from app.pipelines import ingestion, feedback
 
@@ -18,11 +19,11 @@ api_router = APIRouter()
 async def process_document(
     files: List[UploadFile] = File(..., description="Document files to process (images or PDFs). Can upload single or multiple files."),
     owner_id: int = Form(..., description="Document owner user ID"),
-    # 使用字符串接收，允许前端统一传 4 个字段，哪怕 document_id 为空字符串也不会解析失败
+    # Use string to receive, allowing frontend to pass empty string without parsing failure
     document_id: str = Form(
         "", description="Optional existing document ID (string). Empty string means 'no document_id'."
     ),
-    # 同理，file_type 也允许传空字符串，后面统一归一化为 None
+    # Similarly, file_type also allows empty string, which will be normalized to None
     file_type: str = Form(
         "", description="Optional file type override: 'image' or 'pdf' (auto-detected if not provided). Only used for single file upload."
     )
@@ -31,27 +32,27 @@ async def process_document(
     [Ingestion Pipeline]
     Process document(s) for AI ingestion pipeline.
     
-    🔑 **API 设计（接收文件二进制数据）：**
-    - 前端通过 `multipart/form-data` 上传文件（类似 `/api/v1/documents/upload`）
-    - 支持单文件或多文件上传（`files` 参数可以是单个或多个 `UploadFile`）
-    - AIOrchestraService 接收文件后：
-      1. 临时保存文件到临时目录（或直接使用内存数据）
-      2. 调用 DataStorageService 的 `/api/v1/documents/upload` 上传文件，获取 `image_url`
-      3. 执行完整的 AI pipeline（OCR -> Vision -> Cleaning -> Recommendation -> Embedding）
-      4. 调用 `/api/v1/documents/process` 保存结构化结果和 `ocr_text`
+    **API Design (receives file binary data):**
+    - Frontend uploads files via `multipart/form-data` (similar to `/api/v1/documents/upload`)
+    - Supports single or multiple file uploads (`files` parameter can be single or multiple `UploadFile`)
+    - After AIOrchestraService receives files:
+      1. Temporarily save files to temp directory (or use in-memory data)
+      2. Call DataStorageService `/api/v1/documents/upload` to upload file and get `image_url`
+      3. Execute full AI pipeline (OCR -> Vision -> Cleaning -> Recommendation -> Embedding)
+      4. Call `/api/v1/documents/process` to save structured results and `ocr_text`
     
     Pipeline flow:
-    - **单文件**：
-      1. OCR -> Vision(可选) -> Cleaning
-      2. 通过 `PipelineStorage.upload_file_only()` 调用 DataStorageService 的
-         `/api/v1/documents/upload` 完成文件上传，获取 `image_url`
-      3. Recommendation + Embedding（并行）
-      4. 调用 `/api/v1/documents/process` 保存页面元数据和 `ocr_text`，获取 `document_id` / `page_id`
-    - **多文件 / 多页 PDF**：
-      1. PDF 拆页 -> 为每一页创建独立的 page task
-      2. 每一页：OCR -> Vision(可选) -> Cleaning -> Upload(`/documents/upload`)
-      3. 聚合所有页的文本做一次 Recommendation + Embedding
-      4. 为每一页调用 `/documents/process`，统一使用同一个 `document_id`
+    - **Single file**:
+      1. OCR -> Vision(optional) -> Cleaning
+      2. Call DataStorageService `/api/v1/documents/upload` via `PipelineStorage.upload_file_only()`
+         to complete file upload and get `image_url`
+      3. Recommendation + Embedding (parallel)
+      4. Call `/api/v1/documents/process` to save page metadata and `ocr_text`, get `document_id` / `page_id`
+    - **Multiple files / Multi-page PDF**:
+      1. Split PDF into pages -> Create independent page task for each page
+      2. Each page: OCR -> Vision(optional) -> Cleaning -> Upload(`/documents/upload`)
+      3. Aggregate text from all pages for one Recommendation + Embedding
+      4. Call `/documents/process` for each page, using the same `document_id`
     
     For batch processing:
     - Multiple PDF files are split into individual pages
@@ -94,7 +95,7 @@ async def process_document(
             
             logger.info(f"Saved uploaded file {filename} to temporary path: {temp_file_path}")
         
-        # 规范化 document_id（字符串 -> Optional[int]），允许前端传空字符串
+        # Normalize document_id (string -> Optional[int]), allow frontend to pass empty string
         normalized_document_id: Optional[int] = None
         if document_id is not None and str(document_id).strip() != "":
             try:
@@ -105,18 +106,21 @@ async def process_document(
                     detail="document_id must be a valid integer or empty string"
                 )
         
-        # 规范化 file_type（空字符串视为 None）
+        # Normalize file_type (empty string treated as None)
         normalized_file_type: Optional[str] = None
         if file_type is not None and str(file_type).strip() != "":
             normalized_file_type = str(file_type).strip()
         
         # Use unified ingestion pipeline for both single and multiple files
-        logger.info(f"Processing {len(file_paths)} file(s) using unified pipeline")
+        # Enable preview mode: process AI pipeline but skip database upload
+        # User will confirm and upload via /ingestion/confirm endpoint
+        logger.info(f"Processing {len(file_paths)} file(s) using unified pipeline (preview mode)")
         result = await run_unified_ingestion_pipeline(
             file_urls=file_paths,
             owner_id=owner_id,
             document_id=normalized_document_id,
-            file_type=normalized_file_type  # Pass file_type parameter for single file uploads
+            file_type=normalized_file_type,  # Pass file_type parameter for single file uploads
+            preview_mode=True  # Enable preview mode - skip database upload
         )
         
         # Extract data from unified pipeline result
@@ -138,7 +142,10 @@ async def process_document(
             failed_pages=result.get("failed_pages"),
             page_results=result.get("page_results"),
             embedding_save_error=embedding_save_error,
-            recommendation_error=recommendation_error
+            recommendation_error=recommendation_error,
+            embedding=result.get("embedding"),  # Include embedding for confirmation
+            embedding_dimension=result.get("embedding_dimension"),  # Include embedding dimension for confirmation
+            preview_mode=True  # Mark as preview result
         )
         
         # Only return HTTP 500 for complete failures, not partial successes
@@ -166,6 +173,173 @@ async def process_document(
                     shutil.rmtree(temp_file)
             except Exception as e:
                 logger.warning(f"Failed to clean up temp file {temp_file}: {e}")
+
+
+@api_router.post("/ingestion/confirm", response_model=IngestConfirmResponse)
+async def confirm_and_upload_document(request: IngestConfirmRequest):
+    """
+    [Ingestion Confirmation]
+    User confirms preview results and uploads document to database.
+    
+    This API receives preview results and user-modified category_id, location_id,
+    then executes database upload operation.
+    
+    Process:
+    1. Call /api/v1/documents/process for each page with user-modified category_id and location_id
+    2. Save embedding (if available)
+    3. Return upload results
+    """
+    from app.pipelines.ingestion import IngestionPipeline
+    from app.modules.embedding import EmbeddingResult
+    
+    logger.info(f"Confirming and uploading document for owner_id={request.owner_id}, document_id={request.document_id}")
+    
+    pipeline = IngestionPipeline()
+    page_results = []
+    successful_pages = 0
+    failed_pages = 0
+    final_document_id = request.document_id
+    
+    try:
+        # Process each page with user-modified category_id and location_id
+        for page_result in request.page_results:
+            if page_result.status != "success":
+                # Skip failed pages
+                page_results.append({
+                    "page_number": page_result.page_number,
+                    "status": "failed",
+                    "error": page_result.error or "Page processing failed in preview",
+                    "ocr_text": page_result.ocr_text,
+                    "file_url": page_result.file_url,
+                    "document_id": page_result.document_id,
+                    "page_id": page_result.page_id
+                })
+                failed_pages += 1
+                continue
+            
+            if not page_result.file_url:
+                # Missing file_url - cannot process
+                page_results.append({
+                    "page_number": page_result.page_number,
+                    "status": "failed",
+                    "error": "Missing file_url - cannot process page",
+                    "ocr_text": page_result.ocr_text,
+                    "file_url": None,
+                    "document_id": page_result.document_id,
+                    "page_id": None
+                })
+                failed_pages += 1
+                continue
+            
+            try:
+                # Use user-modified category_id and location_id (override recommendation)
+                category_id = request.category_id
+                location_id = request.location_id
+                
+                # If user didn't provide category_id, try to get from recommendation
+                if category_id is None and request.recommendation:
+                    category_id = request.recommendation.get("category_id")
+                
+                # If user didn't provide location_id, try to get from recommendation
+                if location_id is None and request.recommendation:
+                    location_id = request.recommendation.get("location_id") or request.recommendation.get("suggested_location_id")
+                
+                # Normalize location_id: None means no location, convert to -1
+                if location_id is None:
+                    location_id = -1
+                
+                # Process document page with user-modified data
+                process_result = await pipeline.pipeline_storage.process_document_page(
+                    image_url=page_result.file_url,
+                    owner_id=request.owner_id,
+                    page_number=page_result.page_number,
+                    ocr_text=page_result.ocr_text or "",
+                    document_id=final_document_id,  # Use document_id from request or None (creates new)
+                    category_id=category_id,
+                    location_id=location_id
+                )
+                
+                if process_result:
+                    # Update final_document_id from first successful page
+                    if final_document_id is None and process_result.get("document_id"):
+                        final_document_id = process_result.get("document_id")
+                    
+                    page_results.append({
+                        "page_number": process_result.get("page_number", page_result.page_number),
+                        "status": "success",
+                        "error": None,
+                        "ocr_text": page_result.ocr_text,
+                        "file_url": process_result.get("image_url") or page_result.file_url,
+                        "document_id": process_result.get("document_id") or final_document_id,
+                        "page_id": process_result.get("page_id")
+                    })
+                    successful_pages += 1
+                else:
+                    # Processing failed
+                    page_results.append({
+                        "page_number": page_result.page_number,
+                        "status": "failed",
+                        "error": "Failed to process document page via API",
+                        "ocr_text": page_result.ocr_text,
+                        "file_url": page_result.file_url,
+                        "document_id": final_document_id,
+                        "page_id": None
+                    })
+                    failed_pages += 1
+                    
+            except Exception as e:
+                logger.error(f"Error processing page {page_result.page_number}: {e}", exc_info=True)
+                page_results.append({
+                    "page_number": page_result.page_number,
+                    "status": "failed",
+                    "error": f"Error processing page: {str(e)}",
+                    "ocr_text": page_result.ocr_text,
+                    "file_url": page_result.file_url,
+                    "document_id": final_document_id,
+                    "page_id": None
+                })
+                failed_pages += 1
+        
+        # Save embedding if available
+        embedding_save_error = None
+        if final_document_id and request.embedding and request.embedding_dimension:
+            try:
+                # Validate embedding dimension
+                if request.embedding_dimension == 768 and len(request.embedding) == 768:
+                    save_success = await pipeline.pipeline_storage.save_document_embedding(
+                        document_id=final_document_id,
+                        embedding=request.embedding
+                    )
+                    if not save_success:
+                        embedding_save_error = "Failed to save document embedding via API"
+                else:
+                    embedding_save_error = f"Invalid embedding dimension: expected 768, got {request.embedding_dimension} or length {len(request.embedding)}"
+            except Exception as e:
+                logger.error(f"Error saving embedding: {e}", exc_info=True)
+                embedding_save_error = f"Error saving embedding: {str(e)}"
+        
+        # Determine status
+        total_pages = len(request.page_results)
+        if failed_pages == 0:
+            status = "success"
+        elif successful_pages > 0:
+            status = "partial_success"
+        else:
+            status = "failed"
+        
+        return IngestConfirmResponse(
+            status=status,
+            document_id=final_document_id,
+            total_pages=total_pages,
+            successful_pages=successful_pages,
+            failed_pages=failed_pages,
+            page_results=page_results,
+            embedding_save_error=embedding_save_error
+        )
+        
+    except Exception as e:
+        logger.error(f"Error in confirmation pipeline: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Confirmation failed: {str(e)}")
 
 
 @api_router.post("/feedback", response_model=FeedbackResponse)

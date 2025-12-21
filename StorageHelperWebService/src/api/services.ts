@@ -99,6 +99,37 @@ export interface IngestionResponse {
   successful_pages?: number | null
   failed_pages?: number | null
   page_results?: PageProcessingResult[] | null
+  embedding?: number[] | null
+  embedding_dimension?: number | null
+  embedding_save_error?: string | null
+  recommendation_error?: string | null
+  preview_mode?: boolean
+}
+
+export interface IngestionConfirmRequest {
+  page_results: PageProcessingResult[]
+  recommendation: {
+    category_id?: number
+    location_id?: number
+    recommendation_reason?: string
+    suggested_tags?: string[]
+    [key: string]: any
+  }
+  owner_id: number
+  document_id?: number | null
+  category_id?: number | null
+  location_id?: number | null
+  embedding?: number[] | null
+  embedding_dimension?: number | null
+}
+
+export interface IngestionConfirmResponse {
+  status: 'success' | 'partial_success' | 'failed'
+  document_id: number | null
+  total_pages?: number | null
+  successful_pages?: number | null
+  failed_pages?: number | null
+  page_results?: PageProcessingResult[] | null
   embedding_save_error?: string | null
 }
 
@@ -363,16 +394,18 @@ const aiOrchestraClient = axios.create({
 
 export const ingestionService = {
   /**
-   * Process documents through AI ingestion pipeline
+   * Process documents through AI ingestion pipeline (Preview Mode)
    * POST /api/v1/ingestion (AIOrchestraService)
    * 
    * This endpoint:
    * 1. Uploads files to DataStorageService
    * 2. Runs OCR, Vision, Cleaning, Recommendation, and Embedding
-   * 3. Saves document metadata and page information
+   * 3. Returns preview results WITHOUT saving to database
+   * 
+   * User must call confirm() to actually save to database.
    * 
    * @param request - Ingestion request with files and metadata
-   * @returns Ingestion response with document_id, recommendation, and page results
+   * @returns Ingestion response with preview_mode=true, recommendation, and page results
    */
   ingest: async (request: IngestionRequest): Promise<IngestionResponse> => {
     const formData = new FormData()
@@ -397,6 +430,24 @@ export const ingestionService = {
     // Don't set Content-Type header - browser will set it automatically with boundary
     const response = await aiOrchestraClient.post('/ingestion', formData)
     
+    return response.data
+  },
+
+  /**
+   * Confirm and upload document to database
+   * POST /api/v1/ingestion/confirm (AIOrchestraService)
+   * 
+   * This endpoint:
+   * 1. Takes preview results from ingest()
+   * 2. Uses user-modified category_id and location_id
+   * 3. Saves document metadata and page information to database
+   * 4. Saves embedding if available
+   * 
+   * @param request - Confirmation request with preview results and user modifications
+   * @returns Confirmation response with document_id and page results
+   */
+  confirm: async (request: IngestionConfirmRequest): Promise<IngestionConfirmResponse> => {
+    const response = await aiOrchestraClient.post('/ingestion/confirm', request)
     return response.data
   },
 }

@@ -1,7 +1,7 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Upload, FileText, Image, X, CheckCircle, AlertCircle } from 'lucide-react'
-import { ingestionService } from '../api/services'
+import { Upload, FileText, Image, X, CheckCircle, AlertCircle, Eye, Edit2 } from 'lucide-react'
+import { ingestionService, categoryService, locationService, DocumentCategory, StorageLocation } from '../api/services'
 
 const UploadPage = () => {
   const navigate = useNavigate()
@@ -12,6 +12,15 @@ const UploadPage = () => {
   const [uploadedFiles, setUploadedFiles] = useState<Set<string>>(new Set())
   const [uploadError, setUploadError] = useState<string | null>(null)
   const [ingestionResult, setIngestionResult] = useState<any>(null)
+  
+  // Confirmation step states
+  const [showConfirmation, setShowConfirmation] = useState(false)
+  const [confirming, setConfirming] = useState(false)
+  const [selectedCategoryId, setSelectedCategoryId] = useState<number | null>(null)
+  const [selectedLocationId, setSelectedLocationId] = useState<number | null>(null)
+  const [categories, setCategories] = useState<DocumentCategory[]>([])
+  const [locations, setLocations] = useState<StorageLocation[]>([])
+  const [expandedPageIndex, setExpandedPageIndex] = useState<number | null>(null)
 
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files) {
@@ -23,6 +32,30 @@ const UploadPage = () => {
   const removeFile = (index: number) => {
     setFiles((prev) => prev.filter((_, i) => i !== index))
   }
+
+  // Load categories and locations when ownerId changes
+  useEffect(() => {
+    const loadCategoriesAndLocations = async () => {
+      if (!ownerId) return
+      
+      try {
+        const ownerIdNum = parseInt(ownerId)
+        if (isNaN(ownerIdNum)) return
+
+        const [categoriesRes, locationsRes] = await Promise.all([
+          categoryService.getByUserId(ownerIdNum),
+          locationService.getByUserId(ownerIdNum)
+        ])
+        
+        setCategories(categoriesRes.categories || [])
+        setLocations(locationsRes.locations || [])
+      } catch (error) {
+        console.error('Failed to load categories/locations:', error)
+      }
+    }
+
+    loadCategoriesAndLocations()
+  }, [ownerId])
 
   const handleUpload = async () => {
     if (files.length === 0 || !ownerId) {
@@ -55,20 +88,27 @@ const UploadPage = () => {
 
       // Check if ingestion was successful
       if (result.status === 'success' || result.status === 'partial_success') {
-        // Only update progress and mark files as uploaded for successful outcomes
+        // Update progress to 100% (preview complete)
         files.forEach((file, index) => {
           const fileKey = `${file.name}-${index}`
           progressUpdates[fileKey] = 100
-          newUploadedFiles.add(fileKey)
         })
         setUploadProgress(progressUpdates)
-        setUploadedFiles((prev) => new Set([...prev, ...Array.from(newUploadedFiles)]))
         
-        console.log('Ingestion successful:', result)
-        // Navigate to documents page after a short delay
-        setTimeout(() => {
-          navigate('/documents')
-        }, 2000)
+        // Initialize category and location from recommendation
+        const rec = result.recommendation || {}
+        setSelectedCategoryId(rec.category_id || null)
+        // location_id can be -1 (no location) or a number, or null/undefined
+        const recommendedLocationId = rec.location_id
+        if (recommendedLocationId === -1 || recommendedLocationId === null || recommendedLocationId === undefined) {
+          setSelectedLocationId(-1) // -1 means no location
+        } else {
+          setSelectedLocationId(recommendedLocationId)
+        }
+        
+        // Show confirmation step
+        setShowConfirmation(true)
+        console.log('Preview successful, showing confirmation:', result)
       } else {
         // Mark all files as failed when ingestion status is 'failed'
         files.forEach((file, index) => {
@@ -91,6 +131,58 @@ const UploadPage = () => {
     } finally {
       setUploading(false)
     }
+  }
+
+  const handleConfirm = async () => {
+    if (!ingestionResult || !ingestionResult.page_results) {
+      setUploadError('No preview results available')
+      return
+    }
+
+    setConfirming(true)
+    setUploadError(null)
+
+    try {
+      const confirmRequest = {
+        page_results: ingestionResult.page_results,
+        recommendation: ingestionResult.recommendation || {},
+        owner_id: parseInt(ownerId),
+        document_id: ingestionResult.document_id || null,
+        category_id: selectedCategoryId,
+        location_id: selectedLocationId !== null ? selectedLocationId : -1, // -1 means no location
+        embedding: ingestionResult.embedding || null,
+        embedding_dimension: ingestionResult.embedding_dimension || null,
+      }
+
+      const result = await ingestionService.confirm(confirmRequest)
+
+      if (result.status === 'success' || result.status === 'partial_success') {
+        console.log('Confirmation successful:', result)
+        // Navigate to documents page after a short delay
+        setTimeout(() => {
+          navigate('/documents')
+        }, 2000)
+      } else {
+        setUploadError(`Confirmation failed: ${result.status}`)
+        console.error('Confirmation failed:', result)
+      }
+    } catch (error: any) {
+      console.error('Failed to confirm upload:', error)
+      setUploadError(error.response?.data?.detail || error.message || 'Failed to confirm upload')
+    } finally {
+      setConfirming(false)
+    }
+  }
+
+  const handleCancelConfirmation = () => {
+    setShowConfirmation(false)
+    setIngestionResult(null)
+    setSelectedCategoryId(null)
+    setSelectedLocationId(null)
+    setFiles([])
+    setUploadProgress({})
+    setUploadedFiles(new Set())
+    setUploadError(null)
   }
 
   const getFileIcon = (file: File) => {
@@ -218,8 +310,163 @@ const UploadPage = () => {
         </div>
       )}
 
-      {/* Success message */}
-      {ingestionResult && (ingestionResult.status === 'success' || ingestionResult.status === 'partial_success') && (
+      {/* Confirmation Step */}
+      {showConfirmation && ingestionResult && (
+        <div className="card mb-6 border-2 border-home-primary-300">
+          <div className="flex items-center gap-3 mb-4">
+            <Eye className="text-home-primary-500" size={24} />
+            <h2 className="text-xl font-semibold text-home-text-dark">
+              Preview Results - Please Review and Modify Information
+            </h2>
+          </div>
+
+          {/* AI Recommendation Summary */}
+          {ingestionResult.recommendation && (
+            <div className="mb-6 p-4 bg-home-primary-50 rounded-home">
+              <h3 className="text-sm font-semibold text-home-text-dark mb-2">
+                AI Recommendation
+              </h3>
+              {ingestionResult.recommendation.recommendation_reason && (
+                <p className="text-sm text-home-text-light mb-3">
+                  {ingestionResult.recommendation.recommendation_reason}
+                </p>
+              )}
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <p className="text-xs text-home-text-light mb-1">Recommended Category</p>
+                  <p className="text-sm font-medium text-home-text-dark">
+                    {categories.find(c => c.id === ingestionResult.recommendation.category_id)?.name || 
+                     `ID: ${ingestionResult.recommendation.category_id || 'N/A'}`}
+                  </p>
+                </div>
+                <div>
+                  <p className="text-xs text-home-text-light mb-1">Recommended Location</p>
+                  <p className="text-sm font-medium text-home-text-dark">
+                    {ingestionResult.recommendation.location_id && ingestionResult.recommendation.location_id !== -1
+                      ? (locations.find(l => l.id === ingestionResult.recommendation.location_id)?.name || 
+                         `ID: ${ingestionResult.recommendation.location_id}`)
+                      : 'No Location'}
+                  </p>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Category Selection */}
+          <div className="mb-4">
+            <label className="block text-sm font-medium text-home-text-dark mb-2">
+              Document Category *
+            </label>
+            <select
+              value={selectedCategoryId || ''}
+              onChange={(e) => setSelectedCategoryId(e.target.value ? parseInt(e.target.value) : null)}
+              className="input"
+            >
+              <option value="">-- Select Category --</option>
+              {categories.map((cat) => (
+                <option key={cat.id} value={cat.id}>
+                  {cat.name} ({cat.code})
+                </option>
+              ))}
+            </select>
+          </div>
+
+          {/* Location Selection */}
+          <div className="mb-4">
+            <label className="block text-sm font-medium text-home-text-dark mb-2">
+              Storage Location
+            </label>
+            <select
+              value={selectedLocationId !== null && selectedLocationId !== -1 ? selectedLocationId : ''}
+              onChange={(e) => {
+                const value = e.target.value
+                setSelectedLocationId(value ? parseInt(value) : -1)
+              }}
+              className="input"
+            >
+              <option value="">-- No Location --</option>
+              {locations.map((loc) => (
+                <option key={loc.id} value={loc.id}>
+                  {loc.name}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          {/* Page Results Preview */}
+          {ingestionResult.page_results && ingestionResult.page_results.length > 0 && (
+            <div className="mb-4">
+              <h3 className="text-sm font-semibold text-home-text-dark mb-3">
+                Page Preview ({ingestionResult.page_results.length} pages)
+              </h3>
+              <div className="space-y-3">
+                {ingestionResult.page_results.map((page: any, index: number) => (
+                  <div
+                    key={index}
+                    className="border border-home-primary-200 rounded-home p-3"
+                  >
+                    <div className="flex items-center justify-between mb-2">
+                      <div className="flex items-center gap-2">
+                        <FileText className="text-home-primary-500" size={20} />
+                        <span className="text-sm font-medium text-home-text-dark">
+                          Page {page.page_number}
+                        </span>
+                        {page.status === 'success' && (
+                          <CheckCircle className="text-home-success-500" size={16} />
+                        )}
+                        {page.status === 'failed' && (
+                          <AlertCircle className="text-home-error-500" size={16} />
+                        )}
+                      </div>
+                      {page.ocr_text && (
+                        <button
+                          onClick={() => setExpandedPageIndex(expandedPageIndex === index ? null : index)}
+                          className="text-xs text-home-primary-500 hover:text-home-primary-700 flex items-center gap-1"
+                        >
+                          <Edit2 size={14} />
+                          {expandedPageIndex === index ? 'Collapse' : 'View OCR Text'}
+                        </button>
+                      )}
+                    </div>
+                    {page.status === 'failed' && page.error && (
+                      <p className="text-xs text-home-error-600 mb-2">{page.error}</p>
+                    )}
+                    {expandedPageIndex === index && page.ocr_text && (
+                      <div className="mt-2 p-3 bg-home-background-dark rounded-home">
+                        <p className="text-xs text-home-text-light mb-1">OCR Extracted Text:</p>
+                        <p className="text-sm text-home-text-dark whitespace-pre-wrap max-h-48 overflow-y-auto">
+                          {page.ocr_text}
+                        </p>
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Confirmation Buttons */}
+          <div className="flex gap-4 pt-4 border-t border-home-primary-200">
+            <button
+              onClick={handleConfirm}
+              disabled={confirming || !selectedCategoryId}
+              className="btn-primary flex-1 disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {confirming ? 'Uploading...' : 'Confirm and Upload to Database'}
+            </button>
+            <button
+              onClick={handleCancelConfirmation}
+              disabled={confirming}
+              className="btn-secondary disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Success message (only show if not in confirmation step) */}
+      {ingestionResult && !showConfirmation && (ingestionResult.status === 'success' || ingestionResult.status === 'partial_success') && (
         <div className={`card mb-6 border ${
           ingestionResult.status === 'success' 
             ? 'bg-home-success-50 border-home-success-300' 
@@ -257,15 +504,15 @@ const UploadPage = () => {
         </div>
       )}
 
-      {/* Upload button */}
-      {files.length > 0 && (
+      {/* Upload button (only show if not in confirmation step) */}
+      {files.length > 0 && !showConfirmation && (
         <div className="flex gap-4">
           <button
             onClick={handleUpload}
             disabled={uploading || !ownerId}
             className="btn-primary flex-1 disabled:opacity-50 disabled:cursor-not-allowed"
           >
-            {uploading ? 'Processing with AI...' : 'Start Processing'}
+            {uploading ? 'Processing...' : 'Start AI Processing (Preview)'}
           </button>
           <button
             onClick={() => {
@@ -274,6 +521,7 @@ const UploadPage = () => {
               setUploadedFiles(new Set())
               setUploadError(null)
               setIngestionResult(null)
+              setShowConfirmation(false)
             }}
             disabled={uploading}
             className="btn-secondary disabled:opacity-50 disabled:cursor-not-allowed"

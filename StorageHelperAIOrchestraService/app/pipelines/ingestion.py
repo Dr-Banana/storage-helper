@@ -358,7 +358,7 @@ class IngestionPipeline:
                 # File upload failed but AI processing can still continue
                 state.file_upload_error = "File upload to DataStorageService failed"
                 logger.warning("File upload failed, but continuing with AI processing")
-                # 返回 False，让调用方知道这个页面的存储相关信息不可用
+                # Return False to let caller know storage info is unavailable for this page
                 return False
             
         except Exception as upload_error:
@@ -366,7 +366,7 @@ class IngestionPipeline:
             error_msg = str(upload_error)
             state.file_upload_error = f"File upload error: {error_msg}"
             logger.warning(f"File upload error (non-critical): {upload_error}")
-            # 返回 False，让调用方知道上传失败
+            # Return False to let caller know upload failed
             return False
     
     async def step_process_document(self, state: PipelineState, page_number: int = 1) -> bool:
@@ -816,7 +816,8 @@ async def run_unified_ingestion_pipeline(
     file_urls: List[str],
     owner_id: int,
     document_id: Optional[int] = None,
-    file_type: Optional[str] = None
+    file_type: Optional[str] = None,
+    preview_mode: bool = False
 ) -> Dict[str, Any]:
     """
     Unified ingestion pipeline for processing files (single or multiple PDFs, images, or mixed).
@@ -827,11 +828,14 @@ async def run_unified_ingestion_pipeline(
     3. Creates a document on the first page, uses the same document_id for subsequent pages
     4. Processes all pages in parallel (OCR + Cleaning + Upload)
     5. Runs Recommendation and Embedding on combined text from all pages
+    6. If preview_mode=False, processes document pages to database
+    If preview_mode=True, skips database processing and returns preview results for user confirmation
     
     :param file_urls: List of file URLs to process (images or PDFs). Can be single file [url] or multiple files [url1, url2, ...]
     :param owner_id: ID of the user who owns the document
     :param document_id: Optional existing document ID
     :param file_type: Optional file type override ("image" or "pdf"). Only used for single file uploads to override auto-detection.
+    :param preview_mode: If True, skip database processing and return preview results. If False, process to database immediately.
     :return: Dictionary containing processing results with total_pages, successful_pages, failed_pages, page_results
     """
     from app.modules.ocr import detect_file_type
@@ -848,7 +852,7 @@ async def run_unified_ingestion_pipeline(
     # (global_page_index, ocr_source_path, file_type, file_image_url, page_number_within_file)
     page_tasks = []
     temp_files = []  # Track temporary files for cleanup
-    current_page_global = 1  # 全局页序，只用于内部排序 / 映射
+    current_page_global = 1  # Global page index, only for internal sorting/mapping
     
     try:
         # Step 1: Process all files and split PDFs into pages
@@ -865,7 +869,7 @@ async def run_unified_ingestion_pipeline(
             
             file_type_for_task = detected_type
 
-            # 🆕 上传「原始文件」一次，所有页面共享同一个 image_url
+            # Upload original file once, all pages share the same image_url
             file_image_url: Optional[str] = None
             upload_error: Optional[str] = None
             try:
@@ -881,11 +885,11 @@ async def run_unified_ingestion_pipeline(
                 upload_error = f"File upload error: {str(e)}"
                 logger.warning(f"{upload_error} (file: {file_url})")
 
-            # 对当前文件内的页面使用「文件内页码」(1..N)
+            # Use file-internal page number (1..N) for pages within current file
             page_number_within_file = 1
             
             if detected_type == "pdf":
-                # Split PDF into pages（仅用于 OCR / AI，不再单页上传）
+                # Split PDF into pages (only for OCR/AI, no longer upload per page)
                 try:
                     pdf_result = await convert_pdf_to_images(file_url, dpi=300)
                     logger.info(f"PDF split into {len(pdf_result.pages)} pages")
@@ -898,7 +902,7 @@ async def run_unified_ingestion_pipeline(
                         page_num = page_data["page_number"]
                         page_image = page_data["image"]
                         
-                        # Save page image to temporary file（OCR 用）
+                        # Save page image to temporary file (for OCR)
                         temp_file_path = os.path.join(temp_dir, f"page_{page_num}.png")
                         page_image.save(temp_file_path, "PNG")
                         temp_files.append(temp_file_path)
@@ -906,12 +910,12 @@ async def run_unified_ingestion_pipeline(
                         # Add to page tasks
                         page_tasks.append(
                             (
-                                current_page_global,   # 全局索引
-                                temp_file_path,        # OCR 源文件（单页图片）
-                                "image",               # OCR 文件类型
-                                file_image_url,        # 此原始文件的 image_url（整文件上传得到）
-                                page_number_within_file,  # 当前文件内的页码
-                                upload_error           # 上传是否失败的信息
+                                current_page_global,   # Global index
+                                temp_file_path,        # OCR source file (single page image)
+                                "image",               # OCR file type
+                                file_image_url,        # image_url of this original file (from full file upload)
+                                page_number_within_file,  # Page number within current file
+                                upload_error           # Upload failure info
                             )
                         )
                         current_page_global += 1
@@ -919,7 +923,7 @@ async def run_unified_ingestion_pipeline(
                         
                 except Exception as e:
                     logger.error(f"Failed to split PDF {file_url}: {e}")
-                    # Add as failed page（仍然保留一条记录，方便前端看到错误）
+                    # Add as failed page (still keep a record for frontend to see error)
                     page_tasks.append(
                         (
                             current_page_global,
@@ -934,13 +938,13 @@ async def run_unified_ingestion_pipeline(
                     page_number_within_file += 1
                     
             else:
-                # 单张图片文件：视为单页，page_number = 1
+                # Single image file: treat as single page, page_number = 1
                 page_tasks.append(
                     (
                         current_page_global,
-                        file_url,           # OCR 源文件（整张图）
+                        file_url,           # OCR source file (full image)
                         "image",
-                        file_image_url,     # 整个文件上传得到的 image_url
+                        file_image_url,     # image_url from full file upload
                         page_number_within_file,
                         upload_error
                     )
@@ -1012,7 +1016,7 @@ async def run_unified_ingestion_pipeline(
                     document_id=use_document_id,
                     file_type=file_type_info
                 )
-                # 🆕 对于统一上传模式，每一页都共享原始文件的 image_url
+                # For unified upload mode, each page shares the original file's image_url
                 state.file_url = file_image_url
                 
                 # Step 1: OCR
@@ -1037,10 +1041,10 @@ async def run_unified_ingestion_pipeline(
                 # Collect cleaned text for recommendation/embedding
                 cleaned_text = state.cleaned_text or (state.ocr_result.text if state.ocr_result else "")
                 if cleaned_text:
-                    # 这里用「文件内页码」作为标记，后续组合文本时会按页码排序
+                    # Use file-internal page number as marker, text will be sorted by page number when combined
                     all_cleaned_texts.append((page_number_within_file, cleaned_text))
 
-                # 统一上传模式下，这里不再重复上传；如果文件级上传失败，则标记为 failed
+                # In unified upload mode, no need to upload again here; if file-level upload failed, mark as failed
                 if not file_image_url:
                     return ({
                         "page_number": page_number_within_file,
@@ -1103,9 +1107,12 @@ async def run_unified_ingestion_pipeline(
                         # Use global_page_number for database (ensures uniqueness across all files)
                         # Fallback to page_number if global_page_number is not available
                         global_page_num = first_page_result.get("global_page_number") or first_page_result.get("page_number", 1)
-                        # Process first page to establish document_id
-                        logger.info(f"Processing first page to establish document_id (multi-page document, global_page_number={global_page_num}, global_index={first_page_result.get('global_page_index')})...")
-                        await pipeline.step_process_document(first_page_state, page_number=global_page_num)
+                        # Process first page to establish document_id (skip in preview mode)
+                        if not preview_mode:
+                            logger.info(f"Processing first page to establish document_id (multi-page document, global_page_number={global_page_num}, global_index={first_page_result.get('global_page_index')})...")
+                            await pipeline.step_process_document(first_page_state, page_number=global_page_num)
+                        else:
+                            logger.info(f"Preview mode: Skipping first page database processing (multi-page document)")
                         
                         # Update final_document_id from first page's result
                         if first_page_state.document_id is not None:
@@ -1203,8 +1210,9 @@ async def run_unified_ingestion_pipeline(
         # IMPORTANT: 
         # - For single-page documents: Process first page here (deferred from Step 2A) with recommendation
         # - For multi-page documents: Update first page (already processed in Step 2A) with recommendation
+        # Skip in preview mode - user will confirm and upload later
         total_pages = len(page_results)
-        if final_document_id and recommendation_result and recommendation_result.get("status") == "llm_success":
+        if not preview_mode and final_document_id and recommendation_result and recommendation_result.get("status") == "llm_success":
             rec_data = recommendation_result.get("recommendation", {})
             category_id = rec_data.get("category_id")
             location_id = rec_data.get("location_id") or rec_data.get("suggested_location_id")
@@ -1308,8 +1316,9 @@ async def run_unified_ingestion_pipeline(
         # This should be done after pages are processed (document_id is available)
         # Only track embedding_save_error when a save operation is actually attempted and fails
         # Do not set error when save wasn't attempted due to missing preconditions
+        # Skip in preview mode - embedding will be saved after user confirmation
         embedding_save_error = None
-        if final_document_id and embedding_result and isinstance(embedding_result, EmbeddingResult) and embedding_result.is_successful:
+        if not preview_mode and final_document_id and embedding_result and isinstance(embedding_result, EmbeddingResult) and embedding_result.is_successful:
             # All preconditions met - attempt to save embedding
             try:
                 # Convert document_id to int if needed
@@ -1364,91 +1373,96 @@ async def run_unified_ingestion_pipeline(
         # Step 4B: Process document page metadata for each successful page
         # This sends structured results and file storage path to /documents/process API
         # Note: First page was already processed in Step 2A, so skip it here
-        logger.info("Processing document pages metadata after pipeline completion...")
-        processed_page_keys = set()  # Track (document_id, page_number) combinations that have been processed
-        
-        for page_result in processed_results:
-            if page_result.get("status") == "success":
-                # 🔧 BUG FIX: Skip pages that already have page_id (already processed in Step 2A)
-                # Check page_result first, as it's updated directly in Step 2A
-                page_id = page_result.get("page_id")
-                document_id = page_result.get("document_id")
-                page_number = page_result.get("page_number")
-                
-                if page_id is not None:
-                    logger.info(f"Skipping page (page_id={page_id}, page_number={page_number}, document_id={document_id}) - already processed in Step 2A")
-                    # Track this page as processed
-                    if document_id is not None and page_number is not None:
-                        processed_page_keys.add((document_id, page_number))
-                    continue
-                
-                global_page_index = page_result.get("global_page_index")
-                page_state = page_states.get(global_page_index)
-                if page_state:
-                    # 🔧 BUG FIX: Use global_page_number for database (ensures uniqueness across all files)
-                    # This is critical: when multiple files are uploaded, each file's first page would have page_number=1
-                    # But in the database, page_number must be unique within a document
-                    # So we use global_page_number (sequential across all files) instead of file-internal page_number
-                    global_page_num = page_result.get("global_page_number") or page_result.get("page_number", 1)
-                    file_page_number = page_result.get("page_number", 1)
+        # Skip in preview mode - user will confirm and upload later
+        if not preview_mode:
+            logger.info("Processing document pages metadata after pipeline completion...")
+            processed_page_keys = set()  # Track (document_id, page_number) combinations that have been processed
+            
+            for page_result in processed_results:
+                if page_result.get("status") == "success":
+                    # 🔧 BUG FIX: Skip pages that already have page_id (already processed in Step 2A)
+                    # Check page_result first, as it's updated directly in Step 2A
+                    page_id = page_result.get("page_id")
+                    document_id = page_result.get("document_id")
+                    page_number = page_result.get("page_number")
                     
-                    # Double-check: also check page_state.page_id as fallback
-                    if page_state.page_id is not None:
-                        logger.info(f"Skipping page (global_index={global_page_index}, page_id={page_state.page_id}, global_page_number={global_page_num}) - already processed in Step 2A")
-                        # Track this page as processed (use global_page_num, not file page_number)
-                        if page_state.document_id is not None:
-                            processed_page_keys.add((page_state.document_id, global_page_num))
+                    if page_id is not None:
+                        logger.info(f"Skipping page (page_id={page_id}, page_number={page_number}, document_id={document_id}) - already processed in Step 2A")
+                        # Track this page as processed
+                        if document_id is not None and page_number is not None:
+                            processed_page_keys.add((document_id, page_number))
                         continue
                     
-                    # Additional safety check: if we have document_id and global_page_number, check if already processed
-                    if final_document_id:
-                        page_key = (final_document_id, global_page_num)
-                        if page_key in processed_page_keys:
-                            logger.info(f"Skipping page (document_id={final_document_id}, global_page_number={global_page_num}) - already in processed set")
-                            continue
-                    
-                    logger.info(f"Processing page: global_page_number={global_page_num}, file_page_number={file_page_number}, document_id={final_document_id}, global_index={global_page_index}")
-
-                    # Update document_id in state if we have final_document_id
-                    if final_document_id and not page_state.document_id:
-                        page_state.document_id = final_document_id
-                    
-                    # Add recommendation_result to page_state if available (for Step 4B processing)
-                    if recommendation_result and not page_state.recommendation_result:
-                        page_state.recommendation_result = recommendation_result
-                    
-                    # Process document page with structured results (use global page number for database)
-                    await pipeline.step_process_document(page_state, page_number=global_page_num)
-
-                    # Update page_result with values returned from /documents/process
-                    if page_state.page_id is not None:
-                        page_result["page_id"] = page_state.page_id
-                        logger.info(f"Page processed successfully: page_id={page_state.page_id}, document_id={page_state.document_id}, page_number={global_page_num}")
-                    else:
-                        # If page_id is None, document processing may have failed
-                        # Update error status in page_result
-                        if page_state.file_upload_error:
-                            page_result["error"] = page_state.file_upload_error
-                            logger.warning(f"Page processing failed: {page_state.file_upload_error} (page_number={global_page_num})")
-                        else:
-                            logger.warning(f"Page processing returned no page_id (page_number={global_page_num}) - this may indicate a failure")
-                    
-                    if page_state.document_id is not None:
-                        page_result["document_id"] = page_state.document_id
-                        # Track this page as processed (use global_page_num for tracking)
+                    global_page_index = page_result.get("global_page_index")
+                    page_state = page_states.get(global_page_index)
+                    if page_state:
+                        # 🔧 BUG FIX: Use global_page_number for database (ensures uniqueness across all files)
+                        # This is critical: when multiple files are uploaded, each file's first page would have page_number=1
+                        # But in the database, page_number must be unique within a document
+                        # So we use global_page_number (sequential across all files) instead of file-internal page_number
+                        global_page_num = page_result.get("global_page_number") or page_result.get("page_number", 1)
+                        file_page_number = page_result.get("page_number", 1)
+                        
+                        # Double-check: also check page_state.page_id as fallback
                         if page_state.page_id is not None:
-                            processed_page_keys.add((page_state.document_id, global_page_num))
-                    if page_state.file_url is not None:
-                        page_result["file_url"] = page_state.file_url
-                    # Prefer page number returned by storage service as source of truth
-                    if page_state.processed_page_number is not None:
-                        page_result["page_number"] = page_state.processed_page_number
+                            logger.info(f"Skipping page (global_index={global_page_index}, page_id={page_state.page_id}, global_page_number={global_page_num}) - already processed in Step 2A")
+                            # Track this page as processed (use global_page_num, not file page_number)
+                            if page_state.document_id is not None:
+                                processed_page_keys.add((page_state.document_id, global_page_num))
+                            continue
+                        
+                        # Additional safety check: if we have document_id and global_page_number, check if already processed
+                        if final_document_id:
+                            page_key = (final_document_id, global_page_num)
+                            if page_key in processed_page_keys:
+                                logger.info(f"Skipping page (document_id={final_document_id}, global_page_number={global_page_num}) - already in processed set")
+                                continue
+                        
+                        logger.info(f"Processing page: global_page_number={global_page_num}, file_page_number={file_page_number}, document_id={final_document_id}, global_index={global_page_index}")
 
-                    # 如果还没有最终 document_id，则从任意一个成功页中补充
-                    if final_document_id is None and page_state.document_id is not None:
-                        final_document_id = page_state.document_id
+                        # Update document_id in state if we have final_document_id
+                        if final_document_id and not page_state.document_id:
+                            page_state.document_id = final_document_id
+                        
+                        # Add recommendation_result to page_state if available (for Step 4B processing)
+                        if recommendation_result and not page_state.recommendation_result:
+                            page_state.recommendation_result = recommendation_result
+                        
+                        # Process document page with structured results (use global page number for database)
+                        await pipeline.step_process_document(page_state, page_number=global_page_num)
 
-        # 清理内部字段，不暴露给 API 调用方
+                        # Update page_result with values returned from /documents/process
+                        if page_state.page_id is not None:
+                            page_result["page_id"] = page_state.page_id
+                            logger.info(f"Page processed successfully: page_id={page_state.page_id}, document_id={page_state.document_id}, page_number={global_page_num}")
+                        else:
+                            # If page_id is None, document processing may have failed
+                            # Update error status in page_result
+                            if page_state.file_upload_error:
+                                page_result["error"] = page_state.file_upload_error
+                                logger.warning(f"Page processing failed: {page_state.file_upload_error} (page_number={global_page_num})")
+                            else:
+                                logger.warning(f"Page processing returned no page_id (page_number={global_page_num}) - this may indicate a failure")
+                        
+                        if page_state.document_id is not None:
+                            page_result["document_id"] = page_state.document_id
+                            # Track this page as processed (use global_page_num for tracking)
+                            if page_state.page_id is not None:
+                                processed_page_keys.add((page_state.document_id, global_page_num))
+                        if page_state.file_url is not None:
+                            page_result["file_url"] = page_state.file_url
+                        # Prefer page number returned by storage service as source of truth
+                        if page_state.processed_page_number is not None:
+                            page_result["page_number"] = page_state.processed_page_number
+
+                        # If no final document_id yet, supplement from any successful page
+                        if final_document_id is None and page_state.document_id is not None:
+                            final_document_id = page_state.document_id
+        else:
+            # Preview mode: Log that we're skipping database processing
+            logger.info("Preview mode: Skipping document page metadata processing - waiting for user confirmation")
+
+        # Clean up internal fields, don't expose to API callers
         for page_result in processed_results:
             page_result.pop("global_page_index", None)
         
@@ -1503,6 +1517,7 @@ async def run_unified_ingestion_pipeline(
             response["recommendation_error"] = recommendation_error
         
         # Add recommendation data if available
+        # Always include recommendation field (even if empty) to match API schema
         if recommendation_result and recommendation_result.get("status") == "llm_success":
             rec_data = recommendation_result.get("recommendation", {}).copy()
             
@@ -1524,6 +1539,9 @@ async def run_unified_ingestion_pipeline(
             rec_data.pop("category_code", None)
             
             response["recommendation"] = rec_data
+        else:
+            # Ensure recommendation field exists even if recommendation failed
+            response["recommendation"] = {}
         
         # Add embedding info if available
         if embedding_result and isinstance(embedding_result, EmbeddingResult) and embedding_result.is_successful:

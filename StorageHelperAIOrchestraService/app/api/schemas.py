@@ -8,45 +8,45 @@ from datetime import datetime
 
 class DocumentMetadata(BaseModel):
     """
-    对应 SQL 表: document -> metadata (JSON)
-    这里存放从 OCR/LLM 提取出来的动态字段
+    Corresponds to SQL table: document -> metadata (JSON)
+    Stores dynamic fields extracted from OCR/LLM
     """
     tax_year: Optional[int] = None
     issuer_name: Optional[str] = None
     expiry_date: Optional[str] = None
-    # 允许更多任意字段，匹配 SQL 的 JSON 类型
+    # Allow more arbitrary fields, matching SQL JSON type
     extra_fields: Dict[str, Any] = Field(default_factory=dict)
 
 # ==========================================
-# 1. Ingestion Pipeline (存入/处理文档)
+# 1. Ingestion Pipeline (Store/Process Documents)
 # ==========================================
 
 class IngestRequest(BaseModel):
     """
-    前端请求 AI 处理文档的入参。
+    Frontend request parameters for AI document processing.
     
-    🔑 **本地模式与远程模式统一使用 `file_urls` 字段：**
-    - **本地模式（推荐）**：传入 **本地绝对路径** 列表，例如：
-      - 单个文件：`["C:/Users/xxx/Downloads/tax-2024.pdf"]`
-      - 多个文件：`["C:/docs/a.pdf", "C:/docs/b.jpg"]`
-      - AIOrchestraService 会自行读取本地文件，并通过 DataStorageService 的
-        `/api/v1/documents/upload` & `/api/v1/documents/process` 完成上传与入库。
-    - **远程模式（可选）**：也可以传入后端可访问的 HTTP/HTTPS URL，例如：
+    **Local mode and remote mode both use `file_urls` field:**
+    - **Local mode (recommended)**: Pass list of **local absolute paths**, e.g.:
+      - Single file: `["C:/Users/xxx/Downloads/tax-2024.pdf"]`
+      - Multiple files: `["C:/docs/a.pdf", "C:/docs/b.jpg"]`
+      - AIOrchestraService will read local files and complete upload and storage via DataStorageService's
+        `/api/v1/documents/upload` & `/api/v1/documents/process`.
+    - **Remote mode (optional)**: Can also pass HTTP/HTTPS URLs accessible by backend, e.g.:
       - `["https://example.com/file1.jpg"]`
     
-    ❗**重要：**
-    - 前端（浏览器）通常 **不能直接访问本地磁盘绝对路径**，因此本地模式一般适用于
-      桌面应用、后端脚本或与 AI 服务部署在同一台机器的前端。
-    - 无论是本地路径还是 URL，统一放在 `file_urls` 字段中，pipeline 会自动识别并通过
-      `_read_file_content()` 决定是走本地文件读取还是网络下载。
+    **Important:**
+    - Frontend (browser) usually **cannot directly access local disk absolute paths**, so local mode is generally
+      suitable for desktop apps, backend scripts, or frontend deployed on the same machine as AI service.
+    - Whether local path or URL, all are placed in `file_urls` field, pipeline will automatically identify and
+      use `_read_file_content()` to decide whether to read local file or download from network.
     """
     document_id: Optional[int] = Field(None, description="If storage service already created the row, pass ID here.")
     file_urls: List[str] = Field(
         ...,
         min_length=1,
         description=(
-            "待处理文件的列表（本地绝对路径 或 后端可访问的 HTTP/HTTPS URL），"
-            "支持图片和 PDF。单文件也必须使用长度为 1 的列表。"
+            "List of files to process (local absolute paths or HTTP/HTTPS URLs accessible by backend), "
+            "supports images and PDFs. Single file must also use a list of length 1."
         ),
     )
     owner_id: int = Field(..., description="References user.id")
@@ -55,7 +55,7 @@ class IngestRequest(BaseModel):
 
 
 class PageProcessingResult(BaseModel):
-    """单个页面的处理结果"""
+    """Processing result for a single page"""
     page_number: int = Field(..., description="Page number (1-indexed)")
     status: str = Field(..., description="Processing status: 'success', 'failed', 'skipped'")
     error: Optional[str] = Field(None, description="Error message if failed")
@@ -67,34 +67,74 @@ class PageProcessingResult(BaseModel):
 
 class IngestResponse(BaseModel):
     """
-    AI 处理完成后的返回结果
-    支持单个文件和批量处理的响应格式
+    Response after AI processing completes
+    Supports both single file and batch processing response formats
     """
     status: str = Field(..., description="Processing status: 'success', 'partial_success', 'failed'")
     document_id: Optional[int] = Field(None, description="Document ID (integer)")
     
-    # AI 推荐信息 (包含所有recommendation数据)
+    # AI recommendation information (includes all recommendation data)
     recommendation: Dict[str, Any] = Field(default_factory=dict, description="Complete recommendation data including category_code, location_id, recommendation_reason, etc.")
     
-    # 批量处理相关字段（仅在批量处理时使用）
+    # Batch processing related fields (only used for batch processing)
     total_pages: Optional[int] = Field(None, description="Total number of pages (for batch processing)")
     successful_pages: Optional[int] = Field(None, description="Number of successfully processed pages (for batch processing)")
     failed_pages: Optional[int] = Field(None, description="Number of failed pages (for batch processing)")
     page_results: Optional[List[PageProcessingResult]] = Field(None, description="Processing results for each page (for batch processing)")
     
-    # Embedding保存错误（如果embedding保存失败）
+    # Embedding save error (if embedding save failed)
     embedding_save_error: Optional[str] = Field(None, description="Error message if embedding save failed")
     
-    # Recommendation生成错误（如果recommendation生成失败）
+    # Recommendation generation error (if recommendation generation failed)
     recommendation_error: Optional[str] = Field(None, description="Error message if recommendation generation failed")
+    
+    # Embedding information (needed in preview mode, for confirmation upload)
+    embedding: Optional[List[float]] = Field(None, description="Document embedding vector (if available, needed for confirmation)")
+    embedding_dimension: Optional[int] = Field(None, description="Embedding dimension (if available, needed for confirmation)")
+    
+    # Preview mode flag (if True, this is a preview result and requires user confirmation before uploading to database)
+    preview_mode: bool = Field(False, description="If True, this is a preview result and requires user confirmation before uploading to database")
+
+
+class IngestConfirmRequest(BaseModel):
+    """
+    User confirmation and document upload request
+    Contains all necessary information from preview results and user-modified category_id, location_id
+    """
+    # Information from preview results
+    page_results: List[PageProcessingResult] = Field(..., description="Page processing results from preview (must include file_url and ocr_text for each page)")
+    recommendation: Dict[str, Any] = Field(..., description="Recommendation data from preview")
+    owner_id: int = Field(..., description="Document owner user ID")
+    document_id: Optional[int] = Field(None, description="Optional existing document ID")
+    
+    # User-modified information
+    category_id: Optional[int] = Field(None, description="User-modified category ID (overrides recommendation)")
+    location_id: Optional[int] = Field(None, description="User-modified location ID (overrides recommendation, use -1 for no location)")
+    
+    # Embedding information (if available)
+    embedding: Optional[List[float]] = Field(None, description="Document embedding vector (if available from preview)")
+    embedding_dimension: Optional[int] = Field(None, description="Embedding dimension (if available from preview)")
+
+
+class IngestConfirmResponse(BaseModel):
+    """
+    Response after confirmation upload
+    """
+    status: str = Field(..., description="Upload status: 'success', 'partial_success', 'failed'")
+    document_id: Optional[int] = Field(None, description="Document ID after upload")
+    total_pages: Optional[int] = Field(None, description="Total number of pages")
+    successful_pages: Optional[int] = Field(None, description="Number of successfully uploaded pages")
+    failed_pages: Optional[int] = Field(None, description="Number of failed pages")
+    page_results: Optional[List[PageProcessingResult]] = Field(None, description="Upload results for each page")
+    embedding_save_error: Optional[str] = Field(None, description="Error message if embedding save failed")
 
 # ==========================================
-# 2. Feedback (用户反馈)
+# 2. Feedback (User Feedback)
 # ==========================================
 
 class FeedbackRequest(BaseModel):
     """
-    对应 SQL 表: feedback_message
+    Corresponds to SQL table: feedback_message
     """
     document_id: str  # Changed to str to support UUID format
     feedback_type: str = Field(..., description="e.g. 'location_error', 'type_fix'")
