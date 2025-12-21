@@ -75,29 +75,6 @@ if __name__ == "__main__":
         reload=True,
         log_level=settings.LOG_LEVEL.lower()
     )
-
-
-
-@app.get("/", tags=["root"])
-def root():
-    """Root endpoint"""
-    return {
-        "service": settings.API_TITLE,
-        "version": settings.API_VERSION,
-        "status": "running"
-    }
-
-
-@app.get("/health", tags=["health"])
-def health_check():
-    """Health check endpoint"""
-    return {
-        "status": "healthy",
-        "database": "connected"
-    }
-
-
-if __name__ == "__main__":
     import uvicorn
     uvicorn.run(
         "main:app",

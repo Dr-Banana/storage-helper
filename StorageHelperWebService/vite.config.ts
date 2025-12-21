@@ -14,16 +14,16 @@ export default defineConfig({
     port: 3000,
     proxy: {
       '/api/v1/files/upload-temp': {
-        target: 'http://localhost:3001',
+        target: 'http://127.0.0.1:3001',
         changeOrigin: true,
       },
       '/api': {
-        target: 'http://localhost:8000',
+        target: 'http://127.0.0.1:8000',
         changeOrigin: true,
       },
       // Proxy for AIOrchestraService ingestion API (optional, if using relative URLs)
       '/ai-orchestra': {
-        target: 'http://localhost:8888',
+        target: 'http://127.0.0.1:8888',
         changeOrigin: true,
         rewrite: (path) => path.replace(/^\/ai-orchestra/, '/api/v1'),
       },
