@@ -2,15 +2,18 @@ import { useState } from 'react'
 import { Link } from 'react-router-dom'
 import { Search, FileText, Loader } from 'lucide-react'
 import { documentService, Document } from '../api/services'
+import { useAuth } from '../contexts/AuthContext'
+import { ingestionService } from '../api/services'
 
 const SearchPage = () => {
+  const { userId } = useAuth()
   const [searchQuery, setSearchQuery] = useState('')
   const [results, setResults] = useState<Document[]>([])
   const [searching, setSearching] = useState(false)
   const [searched, setSearched] = useState(false)
 
   const handleSearch = async () => {
-    if (!searchQuery.trim()) {
+    if (!searchQuery.trim() || !userId) {
       alert('Please enter search keywords')
       return
     }
@@ -19,13 +22,33 @@ const SearchPage = () => {
     setSearched(true)
 
     try {
-      // TODO: Implement semantic search
-      // Need to call AI service to generate embedding, then search for similar documents
-      // Currently showing empty results
-      setResults([])
+      // Call AI service to search documents
+      const searchResult = await ingestionService.search({
+        query: searchQuery.trim(),
+        owner_id: userId,
+        top_k: 10
+      })
+
+      // Get document details for each document ID
+      const documentPromises = searchResult.document_ids.map(async (docId) => {
+        try {
+          const doc = await documentService.getById(docId)
+          return doc
+        } catch (error) {
+          console.error(`Failed to load document ${docId}:`, error)
+          return null
+        }
+      })
+
+      const documents = (await Promise.all(documentPromises)).filter(
+        (doc): doc is Document => doc !== null
+      )
+
+      setResults(documents)
     } catch (error) {
       console.error('Search failed:', error)
       alert('Search failed, please try again later')
+      setResults([])
     } finally {
       setSearching(false)
     }

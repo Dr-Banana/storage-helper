@@ -5,24 +5,26 @@ import {
   FileText,
   Upload,
   Search,
-  Users,
+  User,
   Settings,
   Menu,
   X,
   Tag,
   MapPin,
 } from 'lucide-react'
+import { useAuth } from '../contexts/AuthContext'
 
 const Layout = () => {
   const location = useLocation()
   const [sidebarOpen, setSidebarOpen] = useState(false)
+  const { userId } = useAuth()
 
   const navigation = [
     { name: 'Home', href: '/', icon: Home },
     { name: 'Documents', href: '/documents', icon: FileText },
     { name: 'Upload', href: '/upload', icon: Upload },
     { name: 'Search', href: '/search', icon: Search },
-    { name: 'Users', href: '/users', icon: Users },
+    { name: 'Profile', href: '/profile', icon: User },
     { name: 'Categories', href: '/categories', icon: Tag },
     { name: 'Locations', href: '/locations', icon: MapPin },
     { name: 'Settings', href: '/settings', icon: Settings },
@@ -64,6 +66,11 @@ const Layout = () => {
               <p className="text-sm text-home-text-light mt-1 hidden lg:block">
                 Your home file management assistant
               </p>
+              {userId && (
+                <p className="text-xs text-home-primary-500 mt-2 hidden lg:block">
+                  User ID: {userId}
+                </p>
+              )}
             </div>
 
             {/* Navigation menu */}

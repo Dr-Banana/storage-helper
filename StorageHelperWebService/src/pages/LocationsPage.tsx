@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from 'react'
-import { MapPin, User, FileText, Plus, Edit2, Trash2, X } from 'lucide-react'
-import { userService, locationService, StorageLocation } from '../api/services'
+import { MapPin, FileText, Plus, Edit2, Trash2, X } from 'lucide-react'
+import { locationService, StorageLocation } from '../api/services'
+import { useAuth } from '../contexts/AuthContext'
 
 interface LocationFormData {
   name: string
@@ -33,8 +34,7 @@ const Modal = ({ show, onClose, title, children }: { show: boolean; onClose: () 
 }
 
 const LocationsPage = () => {
-  const [users, setUsers] = useState<Array<{ id: number; display_name: string }>>([])
-  const [selectedUserId, setSelectedUserId] = useState<number | null>(null)
+  const { userId } = useAuth()
   const [locations, setLocations] = useState<StorageLocation[]>([])
   const [loading, setLoading] = useState(true)
   const [showCreateModal, setShowCreateModal] = useState(false)
@@ -53,26 +53,10 @@ const LocationsPage = () => {
   const [submitting, setSubmitting] = useState(false)
 
   useEffect(() => {
-    const loadUsers = async () => {
-      try {
-        const response = await userService.getAll()
-        setUsers(response.users)
-        // Auto-select first user if available
-        if (response.users.length > 0) {
-          setSelectedUserId(response.users[0].id)
-        }
-      } catch (error) {
-        console.error('Failed to load users:', error)
-      }
+    if (userId) {
+      loadLocations(userId)
     }
-    loadUsers()
-  }, [])
-
-  useEffect(() => {
-    if (selectedUserId) {
-      loadLocations(selectedUserId)
-    }
-  }, [selectedUserId])
+  }, [userId])
 
   const loadLocations = async (userId: number) => {
     try {
@@ -125,7 +109,7 @@ const LocationsPage = () => {
 
   const handleCreateSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
-    if (!selectedUserId) return
+    if (!userId) return
 
     if (!formData.name.trim()) {
       setFormError('Location name is required')
@@ -135,13 +119,13 @@ const LocationsPage = () => {
     try {
       setSubmitting(true)
       setFormError(null)
-      await locationService.create(selectedUserId, {
+      await locationService.create(userId, {
         name: formData.name.trim(),
         description: formData.description.trim() || undefined,
         photo_url: formData.photo_url.trim() || undefined
       })
       setShowCreateModal(false)
-      await loadLocations(selectedUserId)
+      await loadLocations(userId)
     } catch (error: any) {
       console.error('Failed to create location:', error)
       setFormError(error.response?.data?.detail || 'Failed to create location')
@@ -152,7 +136,7 @@ const LocationsPage = () => {
 
   const handleEditSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
-    if (!selectedUserId || !editingLocation) return
+    if (!userId || !editingLocation) return
 
     if (!formData.name.trim()) {
       setFormError('Location name is required')
@@ -162,14 +146,14 @@ const LocationsPage = () => {
     try {
       setSubmitting(true)
       setFormError(null)
-      await locationService.update(selectedUserId, editingLocation.id, {
+      await locationService.update(userId, editingLocation.id, {
         name: formData.name.trim(),
         description: formData.description.trim() || undefined,
         photo_url: formData.photo_url.trim() || undefined
       })
       setShowEditModal(false)
       setEditingLocation(null)
-      await loadLocations(selectedUserId)
+      await loadLocations(userId)
     } catch (error: any) {
       console.error('Failed to update location:', error)
       setFormError(error.response?.data?.detail || 'Failed to update location')
@@ -192,15 +176,15 @@ const LocationsPage = () => {
   }, [])
 
   const handleDeleteConfirm = async () => {
-    if (!selectedUserId || !deletingLocation) return
+    if (!userId || !deletingLocation) return
 
     try {
       setSubmitting(true)
       setDeleteError(null)
-      await locationService.delete(selectedUserId, deletingLocation.id)
+      await locationService.delete(userId, deletingLocation.id)
       setShowDeleteModal(false)
       setDeletingLocation(null)
-      await loadLocations(selectedUserId)
+      await loadLocations(userId)
     } catch (error: any) {
       console.error('Failed to delete location:', error)
       const errorDetail = error.response?.data?.detail
@@ -220,41 +204,21 @@ const LocationsPage = () => {
     <div className="max-w-6xl mx-auto">
       <div className="mb-6 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
         <h1 className="text-3xl font-bold text-home-text-dark">Storage Locations</h1>
-        <div className="flex items-center gap-4">
-          <label className="text-sm font-medium text-home-text-dark">User:</label>
-          <select
-            value={selectedUserId || ''}
-            onChange={(e) => setSelectedUserId(Number(e.target.value))}
-            className="input"
+        {userId && (
+          <button
+            onClick={handleCreate}
+            className="btn-primary flex items-center gap-2"
           >
-            <option value="">Select a user</option>
-            {users.map((user) => (
-              <option key={user.id} value={user.id}>
-                {user.display_name}
-              </option>
-            ))}
-          </select>
-          {selectedUserId && (
-            <button
-              onClick={handleCreate}
-              className="btn-primary flex items-center gap-2"
-            >
-              <Plus size={20} />
-              Add Location
-            </button>
-          )}
-        </div>
+            <Plus size={20} />
+            Add Location
+          </button>
+        )}
       </div>
 
       {loading ? (
         <div className="card text-center py-12">
           <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-home-primary-500 mx-auto"></div>
           <p className="mt-4 text-home-text-light">Loading...</p>
-        </div>
-      ) : !selectedUserId ? (
-        <div className="card text-center py-12">
-          <MapPin className="mx-auto mb-4 text-home-primary-300" size={48} />
-          <p className="text-home-text-light">Please select a user to view locations</p>
         </div>
       ) : locations.length === 0 ? (
         <div className="card text-center py-12">

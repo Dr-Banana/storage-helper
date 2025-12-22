@@ -1,34 +1,18 @@
 import { useState, useEffect } from 'react'
-import { Tag, User, FileText } from 'lucide-react'
-import { userService, categoryService, DocumentCategory } from '../api/services'
+import { Tag, FileText } from 'lucide-react'
+import { categoryService, DocumentCategory } from '../api/services'
+import { useAuth } from '../contexts/AuthContext'
 
 const CategoriesPage = () => {
-  const [users, setUsers] = useState<Array<{ id: number; display_name: string }>>([])
-  const [selectedUserId, setSelectedUserId] = useState<number | null>(null)
+  const { userId } = useAuth()
   const [categories, setCategories] = useState<DocumentCategory[]>([])
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
-    const loadUsers = async () => {
-      try {
-        const response = await userService.getAll()
-        setUsers(response.users)
-        // Auto-select first user if available
-        if (response.users.length > 0) {
-          setSelectedUserId(response.users[0].id)
-        }
-      } catch (error) {
-        console.error('Failed to load users:', error)
-      }
+    if (userId) {
+      loadCategories(userId)
     }
-    loadUsers()
-  }, [])
-
-  useEffect(() => {
-    if (selectedUserId) {
-      loadCategories(selectedUserId)
-    }
-  }, [selectedUserId])
+  }, [userId])
 
   const loadCategories = async (userId: number) => {
     try {
@@ -45,34 +29,14 @@ const CategoriesPage = () => {
 
   return (
     <div className="max-w-6xl mx-auto">
-      <div className="mb-6 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+      <div className="mb-6">
         <h1 className="text-3xl font-bold text-home-text-dark">Document Categories</h1>
-        <div className="flex items-center gap-4">
-          <label className="text-sm font-medium text-home-text-dark">User:</label>
-          <select
-            value={selectedUserId || ''}
-            onChange={(e) => setSelectedUserId(Number(e.target.value))}
-            className="input"
-          >
-            <option value="">Select a user</option>
-            {users.map((user) => (
-              <option key={user.id} value={user.id}>
-                {user.display_name}
-              </option>
-            ))}
-          </select>
-        </div>
       </div>
 
       {loading ? (
         <div className="card text-center py-12">
           <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-home-primary-500 mx-auto"></div>
           <p className="mt-4 text-home-text-light">Loading...</p>
-        </div>
-      ) : !selectedUserId ? (
-        <div className="card text-center py-12">
-          <Tag className="mx-auto mb-4 text-home-primary-300" size={48} />
-          <p className="text-home-text-light">Please select a user to view categories</p>
         </div>
       ) : categories.length === 0 ? (
         <div className="card text-center py-12">

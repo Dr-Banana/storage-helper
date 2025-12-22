@@ -2,94 +2,62 @@ import { useState, useEffect } from 'react'
 import { Link } from 'react-router-dom'
 import { FileText, Calendar, User, Search, Trash2 } from 'lucide-react'
 import { documentService, userService, Document, DocumentFile } from '../api/services'
+import { useAuth } from '../contexts/AuthContext'
 
 interface DocumentWithFiles extends Document {
   previewFiles?: DocumentFile[]
 }
 
 const DocumentsPage = () => {
+  const { userId } = useAuth()
   const [documents, setDocuments] = useState<DocumentWithFiles[]>([])
   const [loading, setLoading] = useState(true)
   const [searchQuery, setSearchQuery] = useState('')
-  const [selectedUserId, setSelectedUserId] = useState<number | null>(null)
-  const [users, setUsers] = useState<Array<{ id: number; display_name: string }>>([])
+  const [user, setUser] = useState<{ id: number; display_name: string } | null>(null)
   const [loadingFiles, setLoadingFiles] = useState<Set<number>>(new Set())
 
   useEffect(() => {
-    const loadUsers = async () => {
+    const loadUser = async () => {
+      if (!userId) return
       try {
-        const usersResponse = await userService.getAll()
-        setUsers(usersResponse.users)
+        const userData = await userService.getById(userId)
+        setUser({ id: userData.id, display_name: userData.display_name })
       } catch (error) {
-        console.error('Failed to load users:', error)
+        console.error('Failed to load user:', error)
       }
     }
-    loadUsers()
-  }, [])
+    loadUser()
+  }, [userId])
 
   useEffect(() => {
     const loadDocuments = async () => {
+      if (!userId) return
+      
       try {
         setLoading(true)
         
-        let usersToProcess: Array<{ id: number; display_name: string }> = []
+        // Get document IDs for current user
+        const docsResponse = await userService.getDocuments(userId)
         
-        if (selectedUserId) {
-          // Get documents for selected user only
-          const user = users.find(u => u.id === selectedUserId)
-          if (user) {
-            usersToProcess = [user]
-          }
-        } else {
-          // Get all users
-          if (users.length === 0) {
-            const usersResponse = await userService.getAll()
-            usersToProcess = usersResponse.users
-          } else {
-            usersToProcess = users
-          }
-        }
-        
-        if (usersToProcess.length === 0) {
-          setDocuments([])
-          setLoading(false)
-          return
-        }
-        
-        // Get documents for each user
-        const allDocuments: Document[] = []
-        
-        for (const user of usersToProcess) {
-          try {
-            // Get document IDs for this user
-            const docsResponse = await userService.getDocuments(user.id)
-            
-            // Create minimal document objects since backend doesn't have GET /api/v1/documents/{id}
-            // Use document IDs and owner_id to create basic document info
-            const userDocs: DocumentWithFiles[] = docsResponse.document_ids.map(docId => ({
-              id: docId,
-              title: `Document #${docId}`,
-              owner_id: user.id,
-              created_at: new Date().toISOString(),
-              updated_at: new Date().toISOString(),
-              previewFiles: [],
-            }))
-            
-            allDocuments.push(...userDocs)
-          } catch (error) {
-            console.error(`Failed to load documents for user ${user.id}:`, error)
-          }
-        }
+        // Create minimal document objects
+        const userDocs: DocumentWithFiles[] = docsResponse.document_ids.map(docId => ({
+          id: docId,
+          title: `Document #${docId}`,
+          owner_id: userId,
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+          previewFiles: [],
+        }))
         
         // Sort by created_at descending (newest first)
-        allDocuments.sort((a, b) => 
+        userDocs.sort((a, b) => 
           new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
         )
         
-        setDocuments(allDocuments)
+        setDocuments(userDocs)
         
         // Load preview files for each document
-        loadPreviewFiles(allDocuments)
+        loadPreviewFiles(userDocs)
       } catch (error) {
         console.error('Failed to load documents:', error)
       } finally {
@@ -98,7 +66,7 @@ const DocumentsPage = () => {
     }
 
     loadDocuments()
-  }, [selectedUserId, users])
+  }, [userId])
 
   const loadPreviewFiles = async (docs: DocumentWithFiles[]) => {
     const loadingSet = new Set<number>()
@@ -181,18 +149,6 @@ const DocumentsPage = () => {
               className="input pl-10"
             />
           </div>
-          <select
-            value={selectedUserId || ''}
-            onChange={(e) => setSelectedUserId(e.target.value ? parseInt(e.target.value) : null)}
-            className="input sm:w-48"
-          >
-            <option value="">All Users</option>
-            {users.map((user) => (
-              <option key={user.id} value={user.id}>
-                {user.display_name}
-              </option>
-            ))}
-          </select>
         </div>
       </div>
 
@@ -288,10 +244,12 @@ const DocumentsPage = () => {
                   <Calendar size={16} />
                   <span>{new Date(doc.created_at).toLocaleDateString('en-US')}</span>
                 </div>
-                <div className="flex items-center gap-1">
-                  <User size={16} />
-                  <span>{users.find(u => u.id === doc.owner_id)?.display_name || `User ${doc.owner_id}`}</span>
-                </div>
+                {user && (
+                  <div className="flex items-center gap-1">
+                    <User size={16} />
+                    <span>{user.display_name}</span>
+                  </div>
+                )}
                 {doc.previewFiles && doc.previewFiles.length > 0 && (
                   <div className="flex items-center gap-1">
                     <FileText size={16} />

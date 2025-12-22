@@ -486,6 +486,22 @@ export const ingestionService = {
     const response = await aiOrchestraClient.get('/category-config')
     return response.data
   },
+
+  /**
+   * Search documents using semantic search
+   * POST /api/v1/search (AIOrchestraService)
+   * 
+   * @param request - Search request with query and owner_id
+   * @returns Search response with matching document IDs
+   */
+  search: async (request: { query: string; owner_id: number; top_k?: number }): Promise<{ query: string; document_ids: number[]; count: number }> => {
+    const response = await aiOrchestraClient.post('/search', {
+      query: request.query,
+      owner_id: request.owner_id,
+      top_k: request.top_k || 5
+    })
+    return response.data
+  },
 }
 
 // ============================================================================

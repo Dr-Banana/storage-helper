@@ -1,35 +1,34 @@
 import { useState, useEffect } from 'react'
-import { useParams, Link, useLocation, useNavigate } from 'react-router-dom'
+import { useParams, Link, useNavigate } from 'react-router-dom'
 import { ArrowLeft, Calendar, User, FileText, MapPin, Tag, Trash2 } from 'lucide-react'
 import { documentService, userService, categoryService, locationService, Document, DocumentPage, DocumentFile, DocumentCategory, StorageLocation } from '../api/services'
+import { useAuth } from '../contexts/AuthContext'
 
 const DocumentDetailPage = () => {
   const { id } = useParams<{ id: string }>()
-  const location = useLocation()
   const navigate = useNavigate()
+  const { userId } = useAuth()
   const [document, setDocument] = useState<Document | null>(null)
   const [pages, setPages] = useState<DocumentPage[]>([])
   const [files, setFiles] = useState<DocumentFile[]>([])
   const [loading, setLoading] = useState(true)
-  const [users, setUsers] = useState<Array<{ id: number; display_name: string }>>([])
+  const [user, setUser] = useState<{ id: number; display_name: string } | null>(null)
   const [category, setCategory] = useState<DocumentCategory | null>(null)
   const [storageLocation, setStorageLocation] = useState<StorageLocation | null>(null)
   const [deleting, setDeleting] = useState(false)
-  
-  // Get owner_id from location state if available
-  const ownerIdFromState = (location.state as { ownerId?: number })?.ownerId
 
   useEffect(() => {
-    const loadUsers = async () => {
+    const loadUser = async () => {
+      if (!userId) return
       try {
-        const usersResponse = await userService.getAll()
-        setUsers(usersResponse.users)
+        const userData = await userService.getById(userId)
+        setUser({ id: userData.id, display_name: userData.display_name })
       } catch (error) {
-        console.error('Failed to load users:', error)
+        console.error('Failed to load user:', error)
       }
     }
-    loadUsers()
-  }, [])
+    loadUser()
+  }, [userId])
 
   const handleDelete = async () => {
     if (!id || !window.confirm('Are you sure you want to delete this document? This action cannot be undone.')) {
@@ -49,87 +48,56 @@ const DocumentDetailPage = () => {
 
   useEffect(() => {
     const loadDocument = async () => {
-      if (!id) return
+      if (!id || !userId) return
       try {
         setLoading(true)
-        const doc = await documentService.getById(parseInt(id))
         
-        // Use owner_id from location state if available, otherwise try to find it
-        if (ownerIdFromState) {
-          doc.owner_id = ownerIdFromState
-        } else if (doc.owner_id === 0 && users.length > 0) {
-          // If owner_id is 0, try to find the actual owner by querying all users
-          // Only search if users are already loaded
-          for (const user of users) {
-            try {
-              const userDocs = await userService.getDocuments(user.id)
-              if (userDocs.document_ids.includes(parseInt(id))) {
-                doc.owner_id = user.id
-                break
-              }
-            } catch (error) {
-              // Continue searching
-            }
-          }
-        }
-        
-        // Use document from pages API if available, otherwise use minimal doc
+        // Use document from pages API
         const pagesData = await documentService.getPages(parseInt(id))
         
         // Backend now returns full document details including category_id and location_id
-        if (pagesData.document) {
-          setDocument(pagesData.document)
-          // Use owner_id from document
-          if (pagesData.document.owner_id) {
-            doc.owner_id = pagesData.document.owner_id
-          }
-        } else {
-          setDocument(doc)
+        const finalDoc = pagesData.document || {
+          id: parseInt(id),
+          title: `Document #${id}`,
+          owner_id: userId,
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
         }
+        
+        // Verify document belongs to current user
+        if (finalDoc.owner_id !== userId) {
+          navigate('/documents')
+          return
+        }
+        
+        setDocument(finalDoc)
         
         // Backend now returns full page details including image_url and unique files
         setPages(pagesData.pages || [])
         setFiles(pagesData.files || [])
         
-        // Load category and location details if available
-        const finalDoc = pagesData.document || doc
-        console.log('Document data:', finalDoc)
-        console.log('Category ID:', finalDoc.category_id, 'Location ID:', finalDoc.current_location_id, 'Owner ID:', finalDoc.owner_id)
-        
-        // Load category if available (category_id exists and is not null/undefined)
-        if (finalDoc.category_id != null && finalDoc.category_id > 0 && finalDoc.owner_id && finalDoc.owner_id > 0) {
+        // Load category if available
+        if (finalDoc.category_id != null && finalDoc.category_id > 0) {
           try {
-            console.log('Loading category:', finalDoc.category_id, 'for user:', finalDoc.owner_id)
-            const cat = await categoryService.getById(finalDoc.owner_id, finalDoc.category_id)
-            console.log('Category loaded:', cat)
+            const cat = await categoryService.getById(userId, finalDoc.category_id)
             if (cat) {
               setCategory(cat)
-            } else {
-              console.warn('Category not found for ID:', finalDoc.category_id)
             }
           } catch (error) {
             console.error('Failed to load category:', error)
           }
-        } else {
-          console.log('Skipping category load - category_id:', finalDoc.category_id, 'owner_id:', finalDoc.owner_id)
         }
         
-        // Load location if available (current_location_id exists, is not null/undefined, and is not -1)
-        if (finalDoc.current_location_id != null && finalDoc.current_location_id > 0 && finalDoc.owner_id && finalDoc.owner_id > 0) {
+        // Load location if available
+        if (finalDoc.current_location_id != null && finalDoc.current_location_id > 0) {
           try {
-            console.log('Loading location:', finalDoc.current_location_id, 'for user:', finalDoc.owner_id)
-            const loc = await locationService.getById(finalDoc.owner_id, finalDoc.current_location_id)
-            console.log('Location loaded:', loc)
+            const loc = await locationService.getById(userId, finalDoc.current_location_id)
             if (loc) {
               setStorageLocation(loc)
-            } else {
-              console.warn('Location not found for ID:', finalDoc.current_location_id)
             }
           } catch (error) {
             console.error('Failed to load location:', error)
           }
-        } else {
-          console.log('Skipping location load - current_location_id:', finalDoc.current_location_id, 'owner_id:', finalDoc.owner_id)
         }
       } catch (error) {
         console.error('Failed to load document:', error)
@@ -139,9 +107,7 @@ const DocumentDetailPage = () => {
     }
 
     loadDocument()
-    // Only depend on id and ownerIdFromState, not users
-    // users is loaded separately and doesn't need to trigger document reload
-  }, [id, ownerIdFromState])
+  }, [id, userId, navigate])
 
   if (loading) {
     return (
@@ -212,7 +178,7 @@ const DocumentDetailPage = () => {
               </div>
               <div className="flex items-center gap-2 text-home-text-light">
                 <User size={18} />
-                <span>Owner: {users.find(u => u.id === document.owner_id)?.display_name || `User ${document.owner_id}`}</span>
+                {user && <span>Owner: {user.display_name}</span>}
               </div>
               {pages.length > 0 && (
                 <div className="flex items-center gap-2 text-home-text-light">

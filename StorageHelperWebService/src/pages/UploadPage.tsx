@@ -3,11 +3,12 @@ import { useNavigate } from 'react-router-dom'
 import { Upload, FileText, Image, X, CheckCircle, AlertCircle, Eye, Edit2 } from 'lucide-react'
 import { ingestionService, categoryService, locationService, DocumentCategory, StorageLocation, CategoryTypeInfo } from '../api/services'
 import apiClient from '../api/client'
+import { useAuth } from '../contexts/AuthContext'
 
 const UploadPage = () => {
   const navigate = useNavigate()
+  const { userId } = useAuth()
   const [files, setFiles] = useState<File[]>([])
-  const [ownerId, setOwnerId] = useState('1')
   const [uploading, setUploading] = useState(false)
   const [uploadProgress, setUploadProgress] = useState<Record<string, number>>({})
   const [uploadedFiles, setUploadedFiles] = useState<Set<string>>(new Set())
@@ -49,18 +50,15 @@ const UploadPage = () => {
     loadCategoryConfig()
   }, [])
 
-  // Load categories and locations when ownerId changes
+  // Load categories and locations when userId changes
   useEffect(() => {
     const loadCategoriesAndLocations = async () => {
-      if (!ownerId) return
+      if (!userId) return
       
       try {
-        const ownerIdNum = parseInt(ownerId)
-        if (isNaN(ownerIdNum)) return
-
         const [categoriesRes, locationsRes] = await Promise.all([
-          categoryService.getByUserId(ownerIdNum),
-          locationService.getByUserId(ownerIdNum)
+          categoryService.getByUserId(userId),
+          locationService.getByUserId(userId)
         ])
         
         setCategories(categoriesRes.categories || [])
@@ -71,11 +69,11 @@ const UploadPage = () => {
     }
 
     loadCategoriesAndLocations()
-  }, [ownerId])
+  }, [userId])
 
   const handleUpload = async () => {
-    if (files.length === 0 || !ownerId) {
-      alert('Please select files and enter user ID')
+    if (files.length === 0 || !userId) {
+      alert('Please select files')
       return
     }
 
@@ -96,7 +94,7 @@ const UploadPage = () => {
       // Call ingestion API with all files
       const result = await ingestionService.ingest({
         files: files,
-        owner_id: parseInt(ownerId),
+        owner_id: userId,
         // document_id and file_type are optional
       })
 
@@ -124,14 +122,13 @@ const UploadPage = () => {
         }
         
         // Reload categories to ensure we have the latest (including any newly created by recommendation)
-        try {
-          const ownerIdNum = parseInt(ownerId)
-          if (!isNaN(ownerIdNum)) {
-            const categoriesRes = await categoryService.getByUserId(ownerIdNum)
+        if (userId) {
+          try {
+            const categoriesRes = await categoryService.getByUserId(userId)
             setCategories(categoriesRes.categories || [])
+          } catch (error) {
+            console.error('Failed to reload categories:', error)
           }
-        } catch (error) {
-          console.error('Failed to reload categories:', error)
         }
         
         // Show confirmation step
@@ -174,7 +171,7 @@ const UploadPage = () => {
       const confirmRequest = {
         page_results: ingestionResult.page_results,
         recommendation: ingestionResult.recommendation || {},
-        owner_id: parseInt(ownerId),
+        owner_id: userId!,
         document_id: ingestionResult.document_id || null,
         category_id: selectedCategoryId,
         location_id: selectedLocationId !== null ? selectedLocationId : -1, // -1 means no location
@@ -223,20 +220,6 @@ const UploadPage = () => {
   return (
     <div className="max-w-4xl mx-auto">
       <h1 className="text-3xl font-bold text-home-text-dark mb-6">Upload Document</h1>
-
-      {/* User ID input */}
-      <div className="card mb-6">
-        <label className="block text-sm font-medium text-home-text-dark mb-2">
-          User ID
-        </label>
-        <input
-          type="number"
-          value={ownerId}
-          onChange={(e) => setOwnerId(e.target.value)}
-          className="input"
-          placeholder="Enter user ID"
-        />
-      </div>
 
       {/* File upload area */}
       <div className="card mb-6">
@@ -406,31 +389,25 @@ const UploadPage = () => {
                     // Check if category already exists
                     let existingCategory = categories.find(cat => cat.code === categoryType.code)
                     
-                    if (!existingCategory) {
+                    if (!existingCategory && userId) {
                       // Create the category
                       try {
-                        const ownerIdNum = parseInt(ownerId)
-                        if (!isNaN(ownerIdNum)) {
-                          await apiClient.post(`/users/${ownerIdNum}/categories`, {
-                            code: categoryType.code,
-                            name: categoryType.name,
-                            description: categoryType.description
-                          })
-                          // Reload categories
-                          const categoriesRes = await categoryService.getByUserId(ownerIdNum)
-                          setCategories(categoriesRes.categories || [])
-                          existingCategory = categoriesRes.categories.find(cat => cat.code === categoryType.code)
-                        }
+                        await apiClient.post(`/users/${userId}/categories`, {
+                          code: categoryType.code,
+                          name: categoryType.name,
+                          description: categoryType.description
+                        })
+                        // Reload categories
+                        const categoriesRes = await categoryService.getByUserId(userId)
+                        setCategories(categoriesRes.categories || [])
+                        existingCategory = categoriesRes.categories.find(cat => cat.code === categoryType.code)
                       } catch (error: any) {
                         console.error('Failed to create category:', error)
                         // If category already exists, try to reload and find it
-                        if (error.response?.status === 400) {
-                          const ownerIdNum = parseInt(ownerId)
-                          if (!isNaN(ownerIdNum)) {
-                            const categoriesRes = await categoryService.getByUserId(ownerIdNum)
-                            setCategories(categoriesRes.categories || [])
-                            existingCategory = categoriesRes.categories.find(cat => cat.code === categoryType.code)
-                          }
+                        if (error.response?.status === 400 && userId) {
+                          const categoriesRes = await categoryService.getByUserId(userId)
+                          setCategories(categoriesRes.categories || [])
+                          existingCategory = categoriesRes.categories.find(cat => cat.code === categoryType.code)
                         } else {
                           alert(`Failed to create category: ${error.response?.data?.detail || error.message}`)
                           return
@@ -602,7 +579,7 @@ const UploadPage = () => {
         <div className="flex gap-4">
           <button
             onClick={handleUpload}
-            disabled={uploading || !ownerId}
+            disabled={uploading || !userId}
             className="btn-primary flex-1 disabled:opacity-50 disabled:cursor-not-allowed"
           >
             {uploading ? 'Processing...' : 'Start AI Processing (Preview)'}
