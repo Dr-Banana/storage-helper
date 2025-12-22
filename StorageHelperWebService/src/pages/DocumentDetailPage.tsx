@@ -1,8 +1,9 @@
 import { useState, useEffect } from 'react'
 import { useParams, Link, useNavigate } from 'react-router-dom'
-import { ArrowLeft, Calendar, User, FileText, MapPin, Tag, Trash2 } from 'lucide-react'
-import { documentService, userService, categoryService, locationService, Document, DocumentPage, DocumentFile, DocumentCategory, StorageLocation } from '../api/services'
+import { ArrowLeft, Calendar, User, FileText, MapPin, Tag, Trash2, Edit2, Save, X } from 'lucide-react'
+import { documentService, userService, categoryService, locationService, ingestionService, Document, DocumentPage, DocumentFile, DocumentCategory, StorageLocation, CategoryTypeInfo } from '../api/services'
 import { useAuth } from '../contexts/AuthContext'
+import apiClient from '../api/client'
 
 const DocumentDetailPage = () => {
   const { id } = useParams<{ id: string }>()
@@ -16,6 +17,13 @@ const DocumentDetailPage = () => {
   const [category, setCategory] = useState<DocumentCategory | null>(null)
   const [storageLocation, setStorageLocation] = useState<StorageLocation | null>(null)
   const [deleting, setDeleting] = useState(false)
+  const [editing, setEditing] = useState(false)
+  const [saving, setSaving] = useState(false)
+  const [selectedCategoryId, setSelectedCategoryId] = useState<number | null>(null)
+  const [selectedLocationId, setSelectedLocationId] = useState<number | null>(null)
+  const [categories, setCategories] = useState<DocumentCategory[]>([])
+  const [locations, setLocations] = useState<StorageLocation[]>([])
+  const [categoryTypes, setCategoryTypes] = useState<CategoryTypeInfo[]>([])
 
   useEffect(() => {
     const loadUser = async () => {
@@ -28,6 +36,26 @@ const DocumentDetailPage = () => {
       }
     }
     loadUser()
+  }, [userId])
+
+  // Load categories, locations, and category types
+  useEffect(() => {
+    const loadData = async () => {
+      if (!userId) return
+      try {
+        const [categoriesRes, locationsRes, categoryConfig] = await Promise.all([
+          categoryService.getByUserId(userId),
+          locationService.getByUserId(userId),
+          ingestionService.getCategoryConfig()
+        ])
+        setCategories(categoriesRes.categories || [])
+        setLocations(locationsRes.locations || [])
+        setCategoryTypes(categoryConfig.category_types || [])
+      } catch (error) {
+        console.error('Failed to load categories/locations:', error)
+      }
+    }
+    loadData()
   }, [userId])
 
   const handleDelete = async () => {
@@ -99,6 +127,10 @@ const DocumentDetailPage = () => {
             console.error('Failed to load location:', error)
           }
         }
+
+        // Initialize edit form values
+        setSelectedCategoryId(finalDoc.category_id || null)
+        setSelectedLocationId(finalDoc.current_location_id || null)
       } catch (error) {
         console.error('Failed to load document:', error)
       } finally {
@@ -108,6 +140,105 @@ const DocumentDetailPage = () => {
 
     loadDocument()
   }, [id, userId, navigate])
+
+  const handleStartEdit = () => {
+    if (document) {
+      setSelectedCategoryId(document.category_id || null)
+      setSelectedLocationId(document.current_location_id || null)
+      setEditing(true)
+    }
+  }
+
+  const handleCancelEdit = () => {
+    if (document) {
+      setSelectedCategoryId(document.category_id || null)
+      setSelectedLocationId(document.current_location_id || null)
+      setEditing(false)
+    }
+  }
+
+  const handleSave = async () => {
+    if (!document || !userId || !id) return
+
+    if (pages.length === 0) {
+      alert('Cannot update document: No pages found. Please ensure the document has been properly uploaded.')
+      return
+    }
+
+    setSaving(true)
+    try {
+      // Prepare page_results from existing pages
+      const pageResults = pages.map((page) => ({
+        page_number: page.page_number,
+        status: 'success' as const,
+        error: null,
+        ocr_text: page.ocr_text || '',
+        file_url: page.image_url,
+        document_id: document.id,
+        page_id: page.id
+      }))
+
+      // Prepare recommendation (can be empty since we're updating existing document)
+      const recommendation = {
+        category_id: selectedCategoryId || document.category_id,
+        location_id: selectedLocationId !== null ? selectedLocationId : -1
+      }
+
+      // Call ingestion/confirm API to update document
+      const confirmRequest = {
+        page_results: pageResults,
+        recommendation: recommendation,
+        owner_id: userId,
+        document_id: document.id,
+        category_id: selectedCategoryId,
+        location_id: selectedLocationId !== null ? selectedLocationId : -1,
+        embedding: null,
+        embedding_dimension: null
+      }
+
+      const result = await ingestionService.confirm(confirmRequest)
+
+      if (result.status === 'success' || result.status === 'partial_success') {
+        // Reload document to get updated data
+        const pagesData = await documentService.getPages(parseInt(id))
+        const updatedDoc = pagesData.document || document
+        
+        setDocument(updatedDoc)
+        
+        // Reload category and location
+        if (selectedCategoryId) {
+          try {
+            const cat = await categoryService.getById(userId, selectedCategoryId)
+            setCategory(cat)
+          } catch (error) {
+            console.error('Failed to load category:', error)
+          }
+        } else {
+          setCategory(null)
+        }
+
+        if (selectedLocationId && selectedLocationId > 0) {
+          try {
+            const loc = await locationService.getById(userId, selectedLocationId)
+            setStorageLocation(loc)
+          } catch (error) {
+            console.error('Failed to load location:', error)
+          }
+        } else {
+          setStorageLocation(null)
+        }
+
+        setEditing(false)
+      } else {
+        alert('Failed to update document. Please try again.')
+      }
+    } catch (error: any) {
+      console.error('Failed to update document:', error)
+      alert(`Failed to update document: ${error.response?.data?.detail || error.message}`)
+    } finally {
+      setSaving(false)
+    }
+  }
 
   if (loading) {
     return (
@@ -162,14 +293,46 @@ const DocumentDetailPage = () => {
                   return document.title
                 })()}
               </h1>
-              <button
-                onClick={handleDelete}
-                disabled={deleting}
-                className="btn-danger flex items-center gap-2"
-              >
-                <Trash2 size={18} />
-                {deleting ? 'Deleting...' : 'Delete'}
-              </button>
+              <div className="flex gap-2">
+                {!editing ? (
+                  <>
+                    <button
+                      onClick={handleStartEdit}
+                      className="btn-secondary flex items-center gap-2"
+                    >
+                      <Edit2 size={18} />
+                      Edit
+                    </button>
+                    <button
+                      onClick={handleDelete}
+                      disabled={deleting}
+                      className="btn-danger flex items-center gap-2"
+                    >
+                      <Trash2 size={18} />
+                      {deleting ? 'Deleting...' : 'Delete'}
+                    </button>
+                  </>
+                ) : (
+                  <>
+                    <button
+                      onClick={handleSave}
+                      disabled={saving}
+                      className="btn-primary flex items-center gap-2"
+                    >
+                      <Save size={18} />
+                      {saving ? 'Saving...' : 'Save'}
+                    </button>
+                    <button
+                      onClick={handleCancelEdit}
+                      disabled={saving}
+                      className="btn-secondary flex items-center gap-2"
+                    >
+                      <X size={18} />
+                      Cancel
+                    </button>
+                  </>
+                )}
+              </div>
             </div>
             <div className="space-y-3">
               <div className="flex items-center gap-2 text-home-text-light">
@@ -186,36 +349,143 @@ const DocumentDetailPage = () => {
                   <span>Page IDs: {pages.map(p => p.id).join(', ')}</span>
                 </div>
               )}
-              {(document.current_location_id != null && document.current_location_id > 0) ? (
-                <div className="flex items-center gap-2 text-home-text-light">
-                  <MapPin size={18} />
-                  <span>
-                    Storage Location: {storageLocation ? (
-                      <>
-                        {storageLocation.name}
-                        {storageLocation.description && ` (${storageLocation.description})`}
-                      </>
-                    ) : (
-                      `#${document.current_location_id}`
-                    )}
-                  </span>
-                </div>
-              ) : null}
-              {(document.category_id != null && document.category_id > 0) ? (
-                <div className="flex items-center gap-2 text-home-text-light">
-                  <Tag size={18} />
-                  <span>
-                    Category: {category ? (
-                      <>
-                        {category.name} ({category.code})
-                        {category.description && ` - ${category.description}`}
-                      </>
-                    ) : (
-                      `#${document.category_id}`
-                    )}
-                  </span>
-                </div>
-              ) : null}
+              {editing ? (
+                <>
+                  {/* Category Selection */}
+                  <div className="mb-4">
+                    <label className="block text-sm font-medium text-home-text-dark mb-2">
+                      Document Category *
+                    </label>
+                    <select
+                      value={selectedCategoryId || ''}
+                      onChange={async (e) => {
+                        const value = e.target.value
+                        if (!value) {
+                          setSelectedCategoryId(null)
+                          return
+                        }
+                        
+                        const categoryId = parseInt(value)
+                        if (!isNaN(categoryId)) {
+                          setSelectedCategoryId(categoryId)
+                        } else {
+                          // It's a category_code - need to create or find the category
+                          const categoryType = categoryTypes.find(ct => ct.code === value)
+                          if (categoryType && userId) {
+                            let existingCategory = categories.find(cat => cat.code === categoryType.code)
+                            
+                            if (!existingCategory) {
+                              try {
+                                await apiClient.post(`/users/${userId}/categories`, {
+                                  code: categoryType.code,
+                                  name: categoryType.name,
+                                  description: categoryType.description
+                                })
+                                const categoriesRes = await categoryService.getByUserId(userId)
+                                setCategories(categoriesRes.categories || [])
+                                existingCategory = categoriesRes.categories.find(cat => cat.code === categoryType.code)
+                              } catch (error: any) {
+                                if (error.response?.status === 400 && userId) {
+                                  const categoriesRes = await categoryService.getByUserId(userId)
+                                  setCategories(categoriesRes.categories || [])
+                                  existingCategory = categoriesRes.categories.find(cat => cat.code === categoryType.code)
+                                } else {
+                                  alert(`Failed to create category: ${error.response?.data?.detail || error.message}`)
+                                  return
+                                }
+                              }
+                            }
+                            
+                            if (existingCategory) {
+                              setSelectedCategoryId(existingCategory.id)
+                            }
+                          }
+                        }
+                      }}
+                      className="input"
+                    >
+                      <option value="">-- Select Category --</option>
+                      {categories.map((cat) => (
+                        <option key={cat.id} value={cat.id}>
+                          {cat.name} ({cat.code})
+                        </option>
+                      ))}
+                      {categoryTypes
+                        .filter(catType => !categories.some(cat => cat.code === catType.code))
+                        .map((catType) => (
+                          <option key={catType.code} value={catType.code}>
+                            {catType.name} ({catType.code})
+                          </option>
+                        ))}
+                    </select>
+                  </div>
+
+                  {/* Location Selection */}
+                  <div className="mb-4">
+                    <label className="block text-sm font-medium text-home-text-dark mb-2">
+                      Storage Location
+                    </label>
+                    <select
+                      value={selectedLocationId !== null && selectedLocationId !== -1 ? selectedLocationId : ''}
+                      onChange={(e) => {
+                        const value = e.target.value
+                        setSelectedLocationId(value ? parseInt(value) : -1)
+                      }}
+                      className="input"
+                    >
+                      <option value="">-- No Location --</option>
+                      {locations.map((loc) => (
+                        <option key={loc.id} value={loc.id}>
+                          {loc.name}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                </>
+              ) : (
+                <>
+                  {(document.current_location_id != null && document.current_location_id > 0) ? (
+                    <div className="flex items-center gap-2 text-home-text-light">
+                      <MapPin size={18} />
+                      <span>
+                        Storage Location: {storageLocation ? (
+                          <>
+                            {storageLocation.name}
+                            {storageLocation.description && ` (${storageLocation.description})`}
+                          </>
+                        ) : (
+                          `#${document.current_location_id}`
+                        )}
+                      </span>
+                    </div>
+                  ) : (
+                    <div className="flex items-center gap-2 text-home-text-light">
+                      <MapPin size={18} />
+                      <span>Storage Location: No Location</span>
+                    </div>
+                  )}
+                  {(document.category_id != null && document.category_id > 0) ? (
+                    <div className="flex items-center gap-2 text-home-text-light">
+                      <Tag size={18} />
+                      <span>
+                        Category: {category ? (
+                          <>
+                            {category.name} ({category.code})
+                            {category.description && ` - ${category.description}`}
+                          </>
+                        ) : (
+                          `#${document.category_id}`
+                        )}
+                      </span>
+                    </div>
+                  ) : (
+                    <div className="flex items-center gap-2 text-home-text-light">
+                      <Tag size={18} />
+                      <span>Category: No Category</span>
+                    </div>
+                  )}
+                </>
+              )}
             </div>
             {document.metadata && Object.keys(document.metadata).length > 0 && (
               <div className="mt-6 pt-6 border-t border-home-primary-100">
