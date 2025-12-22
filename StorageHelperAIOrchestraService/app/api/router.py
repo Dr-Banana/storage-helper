@@ -7,9 +7,12 @@ import os
 from app.api.schemas import (
     IngestResponse, 
     FeedbackRequest, FeedbackResponse,
-    IngestConfirmRequest, IngestConfirmResponse
+    IngestConfirmRequest, IngestConfirmResponse,
+    SearchRequest, SearchResponse
 )
 from app.pipelines import ingestion, feedback
+from app.modules.embedding import EmbeddingGenerator
+from app.storage.pipeline_storage import PipelineStorage
 
 logger = logging.getLogger(__name__)
 api_router = APIRouter()
@@ -355,3 +358,55 @@ async def submit_feedback(request: FeedbackRequest):
     except Exception as e:
         logger.error(f"Error handling feedback: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Feedback failed: {str(e)}")
+
+
+@api_router.post("/search", response_model=SearchResponse)
+async def search_documents(request: SearchRequest):
+    """
+    [Search Pipeline]
+    Search for documents using natural language queries.
+    
+    Process:
+    1. Generate embedding for the query text using Gemini
+    2. Call DataStorageService /api/documents/search with the embedding
+    3. Return the list of matching document IDs
+    """
+    try:
+        logger.info(f"Processing search query: '{request.query}' for owner_id={request.owner_id}")
+        
+        # 1. Generate embedding for the query
+        # Use task_type="RETRIEVAL_QUERY" for search queries to match 
+        # the "RETRIEVAL_DOCUMENT" used during ingestion.
+        generator = EmbeddingGenerator(task_type="RETRIEVAL_QUERY")
+        
+        # Basic cleaning to match ingestion normalization
+        clean_query = request.query.strip()
+        
+        embedding_result = await generator.generate(clean_query)
+        
+        if not embedding_result.is_successful:
+            logger.error(f"Failed to generate embedding for query: {embedding_result.error}")
+            raise HTTPException(
+                status_code=500, 
+                detail=f"Failed to generate embedding: {embedding_result.error}"
+            )
+        
+        # 2. Call DataStorageService search API
+        storage = PipelineStorage()
+        document_ids = await storage.search_documents(
+            query_embedding=embedding_result.vector,
+            owner_id=request.owner_id,
+            top_k=request.top_k
+        )
+        
+        return SearchResponse(
+            query=request.query,
+            document_ids=document_ids,
+            count=len(document_ids)
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in search pipeline: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Search failed: {str(e)}")

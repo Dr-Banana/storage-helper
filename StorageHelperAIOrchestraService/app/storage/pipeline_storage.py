@@ -628,7 +628,44 @@ class PipelineStorage:
             error_msg = f"Unexpected error: {str(e)}"
             logger.error(f"Error saving document embedding via API: {error_msg}", exc_info=True)
             return False
-    
+
+    async def search_documents(
+        self,
+        query_embedding: List[float],
+        owner_id: int,
+        top_k: int = 5
+    ) -> List[int]:
+        """
+        Search for documents by embedding via DataStorageService API.
+        
+        [API: POST /api/documents/search]
+        Service: DataStorageService
+        
+        :param query_embedding: 768-dimensional query vector
+        :param owner_id: User ID to search documents for
+        :param top_k: Number of results to return
+        :return: List of document IDs
+        """
+        url = "/api/documents/search"
+        payload = {
+            "embedding": query_embedding,
+            "user_id": owner_id,
+            "top_k": top_k
+        }
+        
+        # Extract base URL from STORAGE_SERVICE_URL
+        base_url = settings.STORAGE_SERVICE_URL.replace("/internal", "").rstrip("/")
+        
+        try:
+            logger.debug(f"Searching documents at: {base_url}{url}")
+            async with httpx.AsyncClient(base_url=base_url, timeout=30.0) as client:
+                response = await client.post(url, json=payload)
+                response.raise_for_status()
+                return response.json()
+        except Exception as e:
+            logger.error(f"Failed to search documents via API: {e}")
+            return []
+
     async def update_document_metadata(
         self,
         document_id: int,

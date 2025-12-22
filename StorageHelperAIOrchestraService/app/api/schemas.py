@@ -142,3 +142,25 @@ class FeedbackRequest(BaseModel):
 
 class FeedbackResponse(BaseModel):
     msg: str = "Feedback received"
+
+
+# ==========================================
+# 3. Search Pipeline (Semantic Search)
+# ==========================================
+
+class SearchRequest(BaseModel):
+    """
+    Request for semantic search.
+    """
+    query: str = Field(..., description="Natural language search query")
+    owner_id: int = Field(..., description="User ID to search documents for")
+    top_k: int = Field(5, description="Number of results to return")
+
+
+class SearchResponse(BaseModel):
+    """
+    Response for semantic search.
+    """
+    query: str = Field(..., description="The original search query")
+    document_ids: List[int] = Field(..., description="List of matching document IDs")
+    count: int = Field(..., description="Number of results found")
