@@ -1,14 +1,18 @@
 import { useState } from 'react'
 import { Link } from 'react-router-dom'
 import { Search, FileText, Loader } from 'lucide-react'
-import { documentService, Document } from '../api/services'
+import { documentService, Document, DocumentFile } from '../api/services'
 import { useAuth } from '../contexts/AuthContext'
 import { ingestionService } from '../api/services'
+
+interface DocumentWithFiles extends Document {
+  previewFiles?: DocumentFile[]
+}
 
 const SearchPage = () => {
   const { userId } = useAuth()
   const [searchQuery, setSearchQuery] = useState('')
-  const [results, setResults] = useState<Document[]>([])
+  const [results, setResults] = useState<DocumentWithFiles[]>([])
   const [searching, setSearching] = useState(false)
   const [searched, setSearched] = useState(false)
 
@@ -32,8 +36,23 @@ const SearchPage = () => {
       // Get document details for each document ID
       const documentPromises = searchResult.document_ids.map(async (docId) => {
         try {
-          const doc = await documentService.getById(docId)
-          return doc
+          // Get document with pages and files
+          const pagesData = await documentService.getPages(docId)
+          const doc = pagesData.document || {
+            id: docId,
+            title: `Document #${docId}`,
+            owner_id: userId,
+            created_at: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
+          }
+          
+          // Add files list as preview files
+          const docWithFiles: DocumentWithFiles = {
+            ...doc,
+            previewFiles: pagesData.files || []
+          }
+          
+          return docWithFiles
         } catch (error) {
           console.error(`Failed to load document ${docId}:`, error)
           return null
@@ -41,7 +60,7 @@ const SearchPage = () => {
       })
 
       const documents = (await Promise.all(documentPromises)).filter(
-        (doc): doc is Document => doc !== null
+        (doc): doc is DocumentWithFiles => doc !== null
       )
 
       setResults(documents)
@@ -124,24 +143,51 @@ const SearchPage = () => {
                   <Link
                     key={doc.id}
                     to={`/documents/${doc.id}`}
-                    className="card hover:shadow-home-lg transition-all duration-200 block"
+                    className="card hover:shadow-home-lg transition-all duration-200 group relative block"
                   >
-                    <div className="flex gap-4">
-                      {doc.image_url && (
-                        <img
-                          src={doc.image_url}
-                          alt={doc.title || 'Document'}
-                          className="w-24 h-24 object-cover rounded-home"
-                        />
-                      )}
-                      <div className="flex-1">
-                        <h3 className="text-lg font-semibold text-home-text-dark mb-2">
-                          {doc.title || `Document #${doc.id}`}
-                        </h3>
-                        <p className="text-sm text-home-text-light">
-                          Created on {new Date(doc.created_at).toLocaleDateString('en-US')}
-                        </p>
+                    {/* Show preview files if available */}
+                    {doc.previewFiles && doc.previewFiles.length > 0 ? (
+                      <div className="mb-4 space-y-2">
+                        {doc.previewFiles.slice(0, 1).map((file, idx) => {
+                          return (
+                            <div key={`${file.url}-${idx}`} className="rounded-home overflow-hidden bg-home-background-dark">
+                              {file.file_type === 'pdf' ? (
+                                <div className="w-full h-40 rounded-home overflow-hidden bg-home-background-dark relative border border-home-primary-100">
+                                  <iframe
+                                    src={`${file.url}#toolbar=0&navpanes=0&scrollbar=0&page=1&zoom=page-fit`}
+                                    className="w-full h-full border-0"
+                                    title={`PDF Preview ${idx + 1}`}
+                                    style={{ 
+                                      pointerEvents: 'none',
+                                      width: '100%',
+                                      height: '100%'
+                                    }}
+                                  />
+                                </div>
+                              ) : (
+                                <img
+                                  src={file.url}
+                                  alt={`File ${idx + 1}`}
+                                  className="w-full h-40 object-cover group-hover:scale-105 transition-transform duration-200"
+                                />
+                              )}
+                            </div>
+                          )
+                        })}
                       </div>
+                    ) : (
+                      <div className="mb-4 rounded-home overflow-hidden bg-home-background-dark h-40 flex items-center justify-center">
+                        <FileText className="text-home-primary-300" size={48} />
+                      </div>
+                    )}
+                    
+                    <div className="flex-1">
+                      <h3 className="text-lg font-semibold text-home-text-dark mb-2">
+                        {doc.title || `Document #${doc.id}`}
+                      </h3>
+                      <p className="text-sm text-home-text-light">
+                        Created on {new Date(doc.created_at).toLocaleDateString('en-US')}
+                      </p>
                     </div>
                   </Link>
                 ))}

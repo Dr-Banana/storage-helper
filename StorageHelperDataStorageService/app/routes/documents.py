@@ -173,13 +173,14 @@ def get_document_pages(document_id: int, db: Session = Depends(get_db)):
         unique_files = {}
         for page in pages:
             if page.image_url and page.image_url not in unique_files:
-                # Determine file type based on URL
-                image_url_lower = page.image_url.lower()
-                is_pdf = (
-                    image_url_lower.endswith('.pdf') or 
-                    '.pdf' in image_url_lower or
-                    'application/pdf' in image_url_lower
-                )
+                # Determine file type based on file extension (more reliable)
+                # Extract the actual filename/extension from the path
+                file_path = page.image_url
+                file_ext = Path(file_path).suffix.lower()
+                
+                # Check file extension to determine type
+                # Only consider .pdf files as PDF type, everything else is image
+                is_pdf = file_ext == '.pdf'
                 
                 # Convert local file path to accessible URL
                 accessible_url = _convert_to_accessible_url(page.image_url)
