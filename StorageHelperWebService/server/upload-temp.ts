@@ -5,8 +5,8 @@
  * returning the absolute file path for use with the ingestion API.
  */
 
-import express from 'express'
-import multer from 'multer'
+import express, { Request, Response } from 'express'
+import multer, { FileFilterCallback } from 'multer'
 import cors from 'cors'
 import path from 'path'
 import fs from 'fs'

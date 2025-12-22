@@ -164,3 +164,26 @@ class SearchResponse(BaseModel):
     query: str = Field(..., description="The original search query")
     document_ids: List[int] = Field(..., description="List of matching document IDs")
     count: int = Field(..., description="Number of results found")
+
+
+# ==========================================
+# 4. Category Configuration
+# ==========================================
+
+class CategoryTypeInfo(BaseModel):
+    """Information about a category type"""
+    code: str = Field(..., description="Category code (e.g., 'TAX', 'MED')")
+    name: str = Field(..., description="Category display name")
+    description: str = Field(..., description="Category description")
+    keywords: List[str] = Field(default_factory=list, description="Location keywords for this category")
+    is_secure: bool = Field(False, description="Whether this category requires secure storage")
+    is_frequent_access: bool = Field(False, description="Whether this category is frequently accessed")
+
+
+class CategoryConfigResponse(BaseModel):
+    """
+    Response containing all available category types and their configuration.
+    This allows frontend to display all possible categories without hardcoding.
+    """
+    allowed_category_types: List[str] = Field(..., description="List of all allowed category codes")
+    category_types: List[CategoryTypeInfo] = Field(..., description="Detailed information about each category type")

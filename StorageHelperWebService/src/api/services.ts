@@ -133,6 +133,20 @@ export interface IngestionConfirmResponse {
   embedding_save_error?: string | null
 }
 
+export interface CategoryTypeInfo {
+  code: string
+  name: string
+  description: string
+  keywords: string[]
+  is_secure: boolean
+  is_frequent_access: boolean
+}
+
+export interface CategoryConfigResponse {
+  allowed_category_types: string[]
+  category_types: CategoryTypeInfo[]
+}
+
 // ============================================================================
 // User APIs
 // ============================================================================
@@ -456,6 +470,20 @@ export const ingestionService = {
    */
   confirm: async (request: IngestionConfirmRequest): Promise<IngestionConfirmResponse> => {
     const response = await aiOrchestraClient.post('/ingestion/confirm', request)
+    return response.data
+  },
+
+  /**
+   * Get category configuration
+   * GET /api/v1/category-config (AIOrchestraService)
+   * 
+   * This endpoint returns all available category types and their configuration.
+   * This allows frontend to display all possible categories without hardcoding.
+   * 
+   * @returns Category configuration with all allowed category types and their details
+   */
+  getCategoryConfig: async (): Promise<CategoryConfigResponse> => {
+    const response = await aiOrchestraClient.get('/category-config')
     return response.data
   },
 }

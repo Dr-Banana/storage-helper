@@ -8,7 +8,8 @@ from app.api.schemas import (
     IngestResponse, 
     FeedbackRequest, FeedbackResponse,
     IngestConfirmRequest, IngestConfirmResponse,
-    SearchRequest, SearchResponse
+    SearchRequest, SearchResponse,
+    CategoryConfigResponse, CategoryTypeInfo
 )
 from app.pipelines import ingestion, feedback
 from app.modules.embedding import EmbeddingGenerator
@@ -410,3 +411,59 @@ async def search_documents(request: SearchRequest):
     except Exception as e:
         logger.error(f"Error in search pipeline: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Search failed: {str(e)}")
+
+
+@api_router.get("/category-config", response_model=CategoryConfigResponse)
+async def get_category_config():
+    """
+    [Category Configuration]
+    Get all available category types and their configuration.
+    
+    This endpoint exposes category configuration from category_config.py,
+    allowing frontend to display all possible categories without hardcoding.
+    
+    Returns:
+    - List of all allowed category codes
+    - Detailed information about each category type (code, name, description, keywords, etc.)
+    """
+    from app.core.category_config import (
+        ALLOWED_CATEGORY_TYPES,
+        CATEGORY_LOCATION_KEYWORDS,
+        SECURE_CATEGORIES,
+        FREQUENT_ACCESS_CATEGORIES,
+        COMMON_CATEGORY_SUGGESTIONS
+    )
+    
+    try:
+        category_types = []
+        
+        for category_code in ALLOWED_CATEGORY_TYPES:
+            # Get suggestion info (name and description)
+            suggestion = COMMON_CATEGORY_SUGGESTIONS.get(category_code, {})
+            name = suggestion.get("name", category_code)
+            description = suggestion.get("description", f"Category: {category_code}")
+            
+            # Get keywords
+            keywords = CATEGORY_LOCATION_KEYWORDS.get(category_code, [])
+            
+            # Check if secure or frequent access
+            is_secure = category_code in SECURE_CATEGORIES
+            is_frequent_access = category_code in FREQUENT_ACCESS_CATEGORIES
+            
+            category_types.append(CategoryTypeInfo(
+                code=category_code,
+                name=name,
+                description=description,
+                keywords=keywords,
+                is_secure=is_secure,
+                is_frequent_access=is_frequent_access
+            ))
+        
+        return CategoryConfigResponse(
+            allowed_category_types=ALLOWED_CATEGORY_TYPES,
+            category_types=category_types
+        )
+        
+    except Exception as e:
+        logger.error(f"Error getting category config: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to get category config: {str(e)}")

@@ -1,7 +1,8 @@
 import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Upload, FileText, Image, X, CheckCircle, AlertCircle, Eye, Edit2 } from 'lucide-react'
-import { ingestionService, categoryService, locationService, DocumentCategory, StorageLocation } from '../api/services'
+import { ingestionService, categoryService, locationService, DocumentCategory, StorageLocation, CategoryTypeInfo } from '../api/services'
+import apiClient from '../api/client'
 
 const UploadPage = () => {
   const navigate = useNavigate()
@@ -20,6 +21,7 @@ const UploadPage = () => {
   const [selectedLocationId, setSelectedLocationId] = useState<number | null>(null)
   const [categories, setCategories] = useState<DocumentCategory[]>([])
   const [locations, setLocations] = useState<StorageLocation[]>([])
+  const [categoryTypes, setCategoryTypes] = useState<CategoryTypeInfo[]>([])
   const [expandedPageIndex, setExpandedPageIndex] = useState<number | null>(null)
 
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -32,6 +34,20 @@ const UploadPage = () => {
   const removeFile = (index: number) => {
     setFiles((prev) => prev.filter((_, i) => i !== index))
   }
+
+  // Load category config (all available category types) on mount
+  useEffect(() => {
+    const loadCategoryConfig = async () => {
+      try {
+        const config = await ingestionService.getCategoryConfig()
+        setCategoryTypes(config.category_types || [])
+      } catch (error) {
+        console.error('Failed to load category config:', error)
+      }
+    }
+
+    loadCategoryConfig()
+  }, [])
 
   // Load categories and locations when ownerId changes
   useEffect(() => {
@@ -97,6 +113,7 @@ const UploadPage = () => {
         
         // Initialize category and location from recommendation
         const rec = result.recommendation || {}
+        // Ensure category_id is set from recommendation (default selection)
         setSelectedCategoryId(rec.category_id || null)
         // location_id can be -1 (no location) or a number, or null/undefined
         const recommendedLocationId = rec.location_id
@@ -104,6 +121,17 @@ const UploadPage = () => {
           setSelectedLocationId(-1) // -1 means no location
         } else {
           setSelectedLocationId(recommendedLocationId)
+        }
+        
+        // Reload categories to ensure we have the latest (including any newly created by recommendation)
+        try {
+          const ownerIdNum = parseInt(ownerId)
+          if (!isNaN(ownerIdNum)) {
+            const categoriesRes = await categoryService.getByUserId(ownerIdNum)
+            setCategories(categoriesRes.categories || [])
+          }
+        } catch (error) {
+          console.error('Failed to reload categories:', error)
         }
         
         // Show confirmation step
@@ -359,15 +387,80 @@ const UploadPage = () => {
             </label>
             <select
               value={selectedCategoryId || ''}
-              onChange={(e) => setSelectedCategoryId(e.target.value ? parseInt(e.target.value) : null)}
+              onChange={async (e) => {
+                const value = e.target.value
+                if (!value) {
+                  setSelectedCategoryId(null)
+                  return
+                }
+                
+                // Check if it's a category_id (number) or category_code (string)
+                const categoryId = parseInt(value)
+                if (!isNaN(categoryId)) {
+                  // It's a category_id from database
+                  setSelectedCategoryId(categoryId)
+                } else {
+                  // It's a category_code - need to create or find the category
+                  const categoryType = categoryTypes.find(ct => ct.code === value)
+                  if (categoryType) {
+                    // Check if category already exists
+                    let existingCategory = categories.find(cat => cat.code === categoryType.code)
+                    
+                    if (!existingCategory) {
+                      // Create the category
+                      try {
+                        const ownerIdNum = parseInt(ownerId)
+                        if (!isNaN(ownerIdNum)) {
+                          await apiClient.post(`/users/${ownerIdNum}/categories`, {
+                            code: categoryType.code,
+                            name: categoryType.name,
+                            description: categoryType.description
+                          })
+                          // Reload categories
+                          const categoriesRes = await categoryService.getByUserId(ownerIdNum)
+                          setCategories(categoriesRes.categories || [])
+                          existingCategory = categoriesRes.categories.find(cat => cat.code === categoryType.code)
+                        }
+                      } catch (error: any) {
+                        console.error('Failed to create category:', error)
+                        // If category already exists, try to reload and find it
+                        if (error.response?.status === 400) {
+                          const ownerIdNum = parseInt(ownerId)
+                          if (!isNaN(ownerIdNum)) {
+                            const categoriesRes = await categoryService.getByUserId(ownerIdNum)
+                            setCategories(categoriesRes.categories || [])
+                            existingCategory = categoriesRes.categories.find(cat => cat.code === categoryType.code)
+                          }
+                        } else {
+                          alert(`Failed to create category: ${error.response?.data?.detail || error.message}`)
+                          return
+                        }
+                      }
+                    }
+                    
+                    if (existingCategory) {
+                      setSelectedCategoryId(existingCategory.id)
+                    }
+                  }
+                }
+              }}
               className="input"
             >
               <option value="">-- Select Category --</option>
+              {/* Show categories from database */}
               {categories.map((cat) => (
                 <option key={cat.id} value={cat.id}>
                   {cat.name} ({cat.code})
                 </option>
               ))}
+              {/* Show all available category types that are not in database yet */}
+              {categoryTypes
+                .filter(catType => !categories.some(cat => cat.code === catType.code))
+                .map((catType) => (
+                  <option key={catType.code} value={catType.code}>
+                    {catType.name} ({catType.code})
+                  </option>
+                ))}
             </select>
           </div>
 
