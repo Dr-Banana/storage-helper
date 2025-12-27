@@ -1,7 +1,42 @@
+import { useState, useEffect } from 'react'
 import { Link } from 'react-router-dom'
 import { FileText, Upload, Search, TrendingUp, Clock, Folder } from 'lucide-react'
+import { userService, locationService } from '../api/services'
+import { useAuth } from '../contexts/AuthContext'
 
 const HomePage = () => {
+  const { userId } = useAuth()
+  const [totalDocuments, setTotalDocuments] = useState(0)
+  const [totalLocations, setTotalLocations] = useState(0)
+  const [loading, setLoading] = useState(true)
+
+  useEffect(() => {
+    const loadStats = async () => {
+      if (!userId) {
+        setLoading(false)
+        return
+      }
+
+      try {
+        setLoading(true)
+        const [documentsRes, locationsRes] = await Promise.all([
+          userService.getDocuments(userId),
+          locationService.getByUserId(userId)
+        ])
+        setTotalDocuments(documentsRes.total)
+        setTotalLocations(locationsRes.total)
+      } catch (error) {
+        console.error('Failed to load stats:', error)
+        setTotalDocuments(0)
+        setTotalLocations(0)
+      } finally {
+        setLoading(false)
+      }
+    }
+
+    loadStats()
+  }, [userId])
+
   const quickActions = [
     {
       title: 'Upload Document',
@@ -27,10 +62,10 @@ const HomePage = () => {
   ]
 
   const stats = [
-    { label: 'Total Documents', value: '0', icon: FileText, color: 'text-home-primary-600' },
+    { label: 'Total Documents', value: loading ? '...' : totalDocuments.toString(), icon: FileText, color: 'text-home-primary-600' },
     { label: 'This Month', value: '0', icon: TrendingUp, color: 'text-home-secondary-600' },
     { label: 'Recent Activity', value: 'Today', icon: Clock, color: 'text-home-success-600' },
-    { label: 'Storage Locations', value: '0', icon: Folder, color: 'text-home-warning-600' },
+    { label: 'Storage Locations', value: loading ? '...' : totalLocations.toString(), icon: Folder, color: 'text-home-warning-600' },
   ]
 
   return (
