@@ -1,5 +1,10 @@
-# PowerShell script to start all services in separate windows
+﻿# PowerShell script to start all services in separate windows
 # For Windows users
+
+# Set UTF-8 encoding for proper Chinese character display
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+$OutputEncoding = [System.Text.Encoding]::UTF8
+chcp 65001 | Out-Null
 
 # Colors
 $RED = "Red"
@@ -59,7 +64,7 @@ if (-not (Test-Path 'venv')) {
 & .\venv\Scripts\Activate.ps1
 pip install -q -r requirements.txt
 Write-Host '✓ Data Storage Service 虚拟环境已激活' -ForegroundColor Green
-& .\scripts\start_local.sh
+& .\scripts\start_local.ps1
 Read-Host "按 Enter 键保持此窗口开放"
 "@
 
@@ -74,7 +79,7 @@ Write-Host "[3/3] 在新 PowerShell 窗口启动 Web Service..." -ForegroundColo
 $webCommand = @"
 cd '$WEB_SERVICE_DIR'
 Write-Host '✓ Web Service 目录已进入' -ForegroundColor Green
-& .\scripts\start_local.sh
+& .\scripts\start_local.ps1
 Read-Host "按 Enter 键保持此窗口开放"
 "@
 

@@ -92,7 +92,7 @@ flowchart TD
     
     Upload --> Parallel["STEP 3: PARALLEL EXECUTION<br/>asyncio.gather - concurrent"]
     
-    Parallel --> Recommendation["STEP 3A: RECOMMENDATION<br/>app/modules/recommendation.py<br/>─────────────────<br/>• Gemini 2.5 Flash LLM<br/>• Category classification<br/>• Location suggestion<br/>• Tags extraction<br/>• Structured JSON output<br/>• For batch: uses combined<br/>  text from all pages<br/>• Fetches user data via API:<br/>  - GET /api/users/{user_id}/categories<br/>  - GET /api/users/{user_id}/locations<br/>• Creates new categories via API:<br/>  - POST /api/users/{user_id}/categories<br/>─────────────────<br/>OUTPUT: recommendation_result<br/>  - category_id: int<br/>  - location_id: int<br/>  - recommendation_reason<br/>  - suggested_tags: array<br/>  - Note: category_code removed<br/>    use category_id only"]
+    Parallel --> Recommendation["STEP 3A: RECOMMENDATION<br/>app/modules/recommendation.py<br/>─────────────────<br/>• Gemini 2.5 Flash LLM<br/>• Category classification from canonical<br/>  categories (category_config.py)<br/>• Location suggestion<br/>• Tags extraction<br/>• Structured JSON output<br/>• For batch: uses combined<br/>  text from all pages<br/>• Category selection:<br/>  - Selects from ALLOWED_CATEGORY_TYPES<br/>  - Creates user category if needed via API:<br/>    POST /api/users/{user_id}/categories<br/>• Fetches locations via API:<br/>  - GET /api/users/{user_id}/locations<br/>─────────────────<br/>OUTPUT: recommendation_result<br/>  - category_id: int<br/>  - location_id: int<br/>  - recommendation_reason<br/>  - suggested_tags: array"]
     
     Parallel --> Embedding["STEP 3B: EMBEDDING<br/>app/modules/embedding.py<br/>─────────────────<br/>• Text → Vector conversion<br/>• Gemini API embedContent<br/>  text-embedding-004<br/>• Task type: RETRIEVAL_DOCUMENT<br/>• Retry mechanism: max 3 attempts<br/>• Exponential backoff<br/>• Returns EmbeddingResult object<br/>• For semantic search<br/>─────────────────<br/>OUTPUT: EmbeddingResult<br/>  - vector: List[float]<br/>  - dimension: int<br/>  - status: str<br/>  - model_name, task_type<br/>  - error (if failed)"]
     
@@ -234,7 +234,7 @@ flowchart TD
 | **PDF Processor** | `app/modules/pdf_processor.py` | PDF loading, text extraction, PDF-to-image conversion, multi-page handling |
 | **Vision Module** | `app/modules/vision.py` | 🆕 Multimodal understanding using Gemini Vision API - sees photos, logos, charts beyond OCR |
 | **Cleaning Module** | `app/modules/cleaning.py` | Text normalization, noise removal, quality filtering |
-| **Recommendation Module** | `app/modules/recommendation.py` | LLM-based category and location suggestion using Gemini API. Fetches user categories and locations via API (`GET /api/users/{user_id}/categories`, `GET /api/users/{user_id}/locations`). Creates new categories via API (`POST /api/users/{user_id}/categories`) when needed. |
+| **Recommendation Module** | `app/modules/recommendation.py` | LLM-based category and location suggestion using Gemini API. Selects category from canonical categories defined in `category_config.py` (ALLOWED_CATEGORY_TYPES). Automatically creates user-specific category via API (`POST /api/users/{user_id}/categories`) if it doesn't exist. Fetches locations via API (`GET /api/users/{user_id}/locations`). |
 | **Embedding Module** | `app/modules/embedding.py` | Vector generation using Gemini API embedContent (text-embedding-004) with retry mechanism |
 | **Pipeline Storage** | `app/storage/pipeline_storage.py` | Unified storage handler for all pipeline output results (API-based, no local files). Handles file uploads to DataStorageService via HTTP API. |
 | **Output Schema** | `app/storage/output_schema.py` | Unified management of pipeline output structure and fields |
@@ -822,7 +822,8 @@ StorageHelperAIOrchestraService/
 *   **Recommendation System**: Upgraded from rule-based to LLM-powered recommendations
     - Integrated Gemini 2.5 Flash API for intelligent document categorization
     - Structured output schema ensures consistent recommendation format
-    - Support for dynamic category creation when existing categories don't match
+    - Selects categories directly from canonical categories (ALLOWED_CATEGORY_TYPES) defined in category_config.py
+    - Automatically creates user-specific category instances when needed
 *   **Embedding System**: Vector generation using Gemini API for semantic search
     - Integrated Gemini API text-embedding-004 model (production-grade)
     - Configurable task types: RETRIEVAL_DOCUMENT for ingestion, RETRIEVAL_QUERY for search
@@ -1057,25 +1058,29 @@ StorageHelperAIOrchestraService/
 *   **Category and Location API Migration** (December 2025):
     - **Architecture Change**: Migrated from local JSON file storage to API-based management
     - **Categories**: 
-      - **Fetch**: `GET /api/users/{user_id}/categories` - Retrieves all categories for a user
-      - **Create**: `POST /api/users/{user_id}/categories` - Creates new category for a user
+      - **Selection Logic**: LLM selects category from canonical categories defined in `category_config.py` (ALLOWED_CATEGORY_TYPES)
+      - **Create**: `POST /api/users/{user_id}/categories` - Creates user-specific category if it doesn't exist (via `ensure_category_exists()`)
       - **User isolation**: Each user has independent categories (unique constraint: `user_id + code`)
+      - **Removed**: Pre-loading user categories in recommendation generation (no longer needed)
       - **Removed**: `tmp/Storage/document_categories.json` file and all local file operations
+      - **Simplified**: No longer fetches user categories before recommendation; directly selects from canonical categories and ensures they exist
     - **Locations**: 
       - **Fetch**: `GET /api/users/{user_id}/locations` - Retrieves all locations for a user
       - **User isolation**: Each user has independent locations stored in database
       - **Removed**: `tmp/Storage/locations.json` file and all local file operations
     - **Implementation Details**:
-      - Updated `RecommendationGenerator.load_document_categories()` to fetch from API with `user_id` parameter
+      - `RecommendationGenerator.generate()` now selects categories directly from `ALLOWED_CATEGORY_TYPES` in `category_config.py`
+      - LLM prompt only includes canonical categories, not user-specific categories
+      - After LLM returns a category_code, `ensure_category_exists()` creates the user-specific category if needed
       - Updated `RecommendationGenerator.load_locations()` to fetch from API with `user_id` parameter
-      - Updated `RecommendationGenerator.add_new_category()` to save via API POST
       - Updated `RecommendationGenerator.ensure_category_exists()` to use API-based operations
-      - Optimized API calls: Reduced redundant calls by caching categories during recommendation generation
-      - All methods now require `user_id` parameter for proper user isolation
+      - Removed pre-loading of user categories in `generate()` method (simplified logic)
     - **Benefits**:
-      - **User isolation**: Each user's categories and locations are properly isolated in database
+      - **Simplified Logic**: No longer needs to fetch and compare user categories before recommendation
+      - **Consistency**: All recommendations use canonical categories from configuration
+      - **User isolation**: Each user's category instances are properly isolated in database
       - **No file dependencies**: Removed dependency on local JSON files
-      - **Real-time updates**: Categories and locations immediately available after creation
+      - **Real-time updates**: Categories immediately created when needed
       - **Database consistency**: All data stored in centralized database with proper foreign keys
       - **Scalability**: Supports multiple users without file conflicts
 *   **Preview Mode and Confirmation Workflow** (December 21, 2025):

@@ -15,11 +15,9 @@ logger = logging.getLogger(__name__)
 
 # Import category configuration from centralized module
 from app.core.category_config import (
-    get_all_category_codes,
     is_allowed_category_type,
     get_category_suggestion,
     get_category_keywords,
-    COMMON_CATEGORY_SUGGESTIONS,
     ALLOWED_CATEGORY_TYPES,
     CATEGORY_LOCATION_KEYWORDS,
 )
@@ -39,7 +37,7 @@ class RecommendationGenerator:
         "properties": {
             "category_code": {
                 "type": "STRING",
-                "description": "The code of the document category that best matches this document. MUST be one of the existing category codes provided, or 'NEW_CATEGORY' if none match."
+                "description": "The code of the document category that best matches this document. MUST be one of the canonical category codes provided."
             },
             "suggested_location_id": {
                 "type": "INTEGER",
@@ -57,18 +55,6 @@ class RecommendationGenerator:
             "recommendation_reason": {
                 "type": "STRING",
                 "description": "A brief, one-sentence explanation for the recommendation."
-            },
-            "new_category_name": {
-                "type": "STRING",
-                "description": "Required only if category_code is 'NEW_CATEGORY'. The name for the new category (e.g., 'Legal Documents', 'Work Contracts')."
-            },
-            "new_category_code": {
-                "type": "STRING",
-                "description": "Required only if category_code is 'NEW_CATEGORY'. A short code for the new category (e.g., 'LEG', 'WORK', 'REC'). Should be 2-4 uppercase letters."
-            },
-            "new_category_description": {
-                "type": "STRING",
-                "description": "Required only if category_code is 'NEW_CATEGORY'. A description of what documents belong to this category."
             }
         },
         "required": ["category_code", "suggested_location_id", "suggested_location_name", "suggested_tags", "recommendation_reason"]
@@ -77,15 +63,13 @@ class RecommendationGenerator:
     # Define the System Instruction to guide the LLM's persona
     SYSTEM_PROMPT = (
         "You are a world-class smart home storage assistant. Your task is to analyze the "
-        "provided document text and classify it into one of the existing document categories, "
+        "provided document text and classify it into one of the canonical document categories, "
         "and recommend the best storage location from the provided locations list.\n\n"
         "IMPORTANT RULES:\n"
-        "1. You MUST select a category_code from the provided list of existing categories.\n"
-        "2. Only use 'NEW_CATEGORY' as category_code if the document truly does not fit any existing category.\n"
-        "3. If using 'NEW_CATEGORY', you MUST provide new_category_name, new_category_code, and new_category_description.\n"
-        "4. You MUST select a suggested_location_id from the provided locations list. The ID must match exactly one of the location IDs provided.\n"
-        "5. The suggested_location_name should match the name of the location with the selected ID.\n"
-        "6. Consider the document category and location descriptions to make the best match.\n"
+        "1. You MUST select a category_code from the provided list of canonical category codes.\n"
+        "2. You MUST select a suggested_location_id from the provided locations list. The ID must match exactly one of the location IDs provided.\n"
+        "3. The suggested_location_name should match the name of the location with the selected ID.\n"
+        "4. Consider the document category and location descriptions to make the best match.\n"
         "Respond only with a JSON object that strictly adheres to the provided schema."
     )
 
@@ -438,7 +422,7 @@ class RecommendationGenerator:
     ) -> Dict[str, Any]:
         """
         Uses the Gemini API to generate structured storage recommendations based on document text,
-        classifying the document into an existing category or creating a new one if needed.
+        classifying the document into a canonical category from category_config.py.
 
         :param document_text: The cleaned or raw text extracted from the document.
         :param owner_id: The ID of the owner.
@@ -446,40 +430,28 @@ class RecommendationGenerator:
         :return: Dictionary containing the structured recommendation with category_id and category_code, or error info.
         """
 
-        # Load existing document categories (cache for reuse later)
-        categories = self.load_document_categories(owner_id)
-        if not categories:
-            logger.warning(f"No document categories found for user {owner_id}. The system will create new categories as needed.")
+        # Format canonical categories for LLM context (from category_config.py)
+        allowed_codes = ALLOWED_CATEGORY_TYPES
+        if not allowed_codes:
+            logger.error("No allowed category types found in configuration. Cannot generate recommendation.")
+            return {"status": "llm_error", "error": "No allowed category types configured."}
 
-        # Build existing_codes lookup for reuse
-        existing_codes = {cat.get("code", "").upper(): cat for cat in categories}
-
-        # Format categories for LLM context
-        categories_context = "\n--- EXISTING DOCUMENT CATEGORIES (现有文档分类) ---\n"
+        categories_context = "\n--- CANONICAL DOCUMENT CATEGORIES ---\n"
         categories_context += "You MUST select one of these EXACT category codes (case-sensitive):\n"
-        for cat in categories:
-            cat_id = cat.get("id")
-            code = cat.get("code", "")
-            name = cat.get("name", "")
-            description = cat.get("description", "")
-            categories_context += f"  '{code}' - {name}: {description}\n"
+        for code in allowed_codes:
+            suggestion = get_category_suggestion(code)
+            if suggestion:
+                name = suggestion.get('name', code)
+                description = suggestion.get('description', f"Category: {code}")
+                categories_context += f"  '{code}' - {name}: {description}\n"
+            else:
+                categories_context += f"  '{code}' - Category: {code}\n"
         categories_context += "---------------------------------\n"
 
-        # Add allowed category types context for NEW_CATEGORY
-        allowed_codes = get_all_category_codes()
-        if allowed_codes:
-            categories_context += f"\n--- CANONICAL CATEGORY CODES (规范分类代码) ---\n"
-            categories_context += "If you need to create a NEW_CATEGORY, you MUST use one of these EXACT codes:\n"
-            for code in allowed_codes:
-                suggestion = get_category_suggestion(code)
-                if suggestion:
-                    categories_context += f"  '{code}' - {suggestion.get('name', '')}: {suggestion.get('description', '')}\n"
-            categories_context += "---------------------------------\n"
-
         categories_context += "\nCRITICAL RULES:\n"
-        categories_context += "1. You MUST use one of the EXACT category codes listed in the EXISTING or CANONICAL lists (e.g., 'TAX', 'MED', 'REC').\n"
+        categories_context += "1. You MUST use one of the EXACT category codes listed above (e.g., 'TAX', 'MED', 'REC').\n"
         categories_context += "2. DO NOT use descriptive names like 'RECIPE' or 'MEDICAL' - use the short codes like 'REC' or 'MED' instead.\n"
-        categories_context += "3. Only use 'NEW_CATEGORY' if the document truly does not fit ANY existing category, and use a code from the CANONICAL list for new_category_code.\n\n"
+        categories_context += "3. Select the category code that best matches the document content.\n\n"
 
         # Load locations from file if not provided
         locations = []
@@ -520,7 +492,7 @@ class RecommendationGenerator:
         # Format locations for LLM context
         location_context = ""
         if locations:
-            location_context = "\n\n--- EXISTING STORAGE LOCATIONS (现有存储位置) ---\n"
+            location_context = "\n\n--- EXISTING STORAGE LOCATIONS ---\n"
             location_context += "You MUST select one of these location IDs for suggested_location_id:\n"
             for loc in locations:
                 loc_id = loc.get("id")
@@ -534,19 +506,15 @@ class RecommendationGenerator:
         # Construct the complete user query
         user_query = (
             f"Analyze the following document text and:\n"
-            f"1. Classify it into one of the existing document categories or 'NEW_CATEGORY'.\n"
+            f"1. Classify it into one of the canonical document categories.\n"
             f"2. Recommend the best storage location from the provided locations list.\n\n"
             f"{categories_context}\n"
             f"{location_context}"
-            f"DOCUMENT TEXT (文档内容):\n{document_text}\n---\n"
+            f"DOCUMENT TEXT:\n{document_text}\n---\n"
             f"IMPORTANT INSTRUCTIONS:\n"
-            f"- category_code: MUST be one of the EXACT codes listed in the EXISTING or CANONICAL lists. If none match, use 'NEW_CATEGORY'.\n"
+            f"- category_code: MUST be one of the EXACT codes listed in the canonical categories above.\n"
             f"- suggested_location_id: The exact ID number from the locations list above\n"
             f"- suggested_location_name: The name of the location matching the selected ID\n"
-            f"If using 'NEW_CATEGORY', you MUST provide:\n"
-            f"  - new_category_code: Must be from the CANONICAL CATEGORY CODES list\n"
-            f"  - new_category_name: Full name for the category\n"
-            f"  - new_category_description: Description of what this category contains"
         )
 
         payload = {
@@ -582,66 +550,31 @@ class RecommendationGenerator:
 
                     parsed_json = json.loads(json_string)
 
-                    # Reuse cached categories and existing_codes (no need to reload)
-                    # If a new category was created, we'll reload categories later if needed
-                    # existing_codes was already built above from the initial categories load
-
-                    final_category_id = None
+                    # Extract and validate category code from LLM response
                     final_category_code = parsed_json.get("category_code", "").upper().strip()
-                    is_new_category = False
 
-                    if final_category_code == "NEW_CATEGORY":
-                        new_name = parsed_json.get("new_category_name", "")
-                        new_code = parsed_json.get("new_category_code", "").upper().strip()
-                        new_description = parsed_json.get("new_category_description", "")
+                    # Validate that the category code is allowed
+                    if not final_category_code or not is_allowed_category_type(final_category_code):
+                        logger.error(f"AI returned invalid category_code '{final_category_code}'. Must be one of: {ALLOWED_CATEGORY_TYPES}")
+                        raise ValueError(f"Invalid category code: {final_category_code}")
 
-                        if not new_code or not is_allowed_category_type(new_code):
-                            logger.warning(
-                                f"AI returned invalid new_category_code '{new_code}'. Using first available canonical code.")
-                            new_code = ALLOWED_CATEGORY_TYPES[0] if ALLOWED_CATEGORY_TYPES else "TAX"
+                    # Get category suggestion from config
+                    suggestion = get_category_suggestion(final_category_code)
+                    category_name = suggestion.get("name", final_category_code)
+                    category_description = suggestion.get("description", f"Category for documents classified as {final_category_code}")
 
-                        if not new_name or not new_description:
-                            logger.error(
-                                "NEW_CATEGORY specified but missing name or description. Using canonical suggestion.")
-                            suggestion = get_category_suggestion(new_code)
-                            new_name = suggestion.get("name", new_code)
-                            new_description = suggestion.get("description",
-                                                             f"Category for documents classified as {new_code}")
+                    # Ensure the category exists for this user (create if needed)
+                    category = self.ensure_category_exists(
+                        user_id=owner_id,
+                        code=final_category_code,
+                        name=category_name,
+                        description=category_description
+                    )
 
-                        new_category = self.ensure_category_exists(user_id=owner_id, code=new_code, name=new_name,
-                                                                   description=new_description, existing_categories=categories)
-                        # Reload categories after creating new one to update cache
-                        categories = self.load_document_categories(owner_id)
-                        existing_codes = {cat.get("code", "").upper(): cat for cat in categories}
-                        final_category_code = new_category["code"]
-                        final_category_id = new_category["id"]
-                        logger.info(
-                            f"Ensured category exists: {final_category_code} ({new_name}) with ID {final_category_id}")
-                        is_new_category = True
-
-                    elif final_category_code in existing_codes:
-                        final_category_id = existing_codes[final_category_code]["id"]
-
-                    elif is_allowed_category_type(final_category_code):
-                        logger.info(
-                            f"Canonical code '{final_category_code}' does not exist. Creating new category using suggestion.")
-                        suggestion = get_category_suggestion(final_category_code)
-                        new_name = suggestion.get("name", final_category_code)
-                        new_description = suggestion.get("description",
-                                                         f"Category for documents classified as {final_category_code}")
-                        new_category = self.ensure_category_exists(user_id=owner_id, code=final_category_code, name=new_name,
-                                                                   description=new_description, existing_categories=categories)
-                        # Reload categories after creating new one to update cache
-                        categories = self.load_document_categories(owner_id)
-                        existing_codes = {cat.get("code", "").upper(): cat for cat in categories}
-                        final_category_code = new_category["code"]
-                        final_category_id = new_category["id"]
-                        is_new_category = True
-
-                    else:
-                        logger.error(
-                            f"Final category code '{final_category_code}' is neither NEW_CATEGORY nor an existing/canonical code.")
-                        raise ValueError(f"Failed to resolve category code: {final_category_code}")
+                    final_category_id = category.get("id")
+                    if not final_category_id:
+                        logger.error(f"Failed to get category_id for code '{final_category_code}'")
+                        raise ValueError(f"Category '{final_category_code}' does not have an ID")
 
                     parsed_json["category_id"] = final_category_id
                     parsed_json["category_code"] = final_category_code
@@ -677,8 +610,7 @@ class RecommendationGenerator:
                         parsed_json["location_id"] = assigned_location_id
                         parsed_json["location_name"] = assigned_location_name
 
-                        if final_category_id and assigned_location_id and (
-                                is_new_category or not preferred_location_id):
+                        if final_category_id and assigned_location_id and not preferred_location_id:
                             self.ensure_location_mapping(final_category_id, assigned_location_id)
                     else:
                         # If no locations available, set to None explicitly
