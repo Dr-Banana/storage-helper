@@ -11,7 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.config import settings
 from app.core.database import engine, Base
-from app.routes import users, public_api, documents
+from app.routes import users, public_api, documents, location_images
 # Import all models to register them with SQLAlchemy
 from app.models import (
     User, DocumentCategory, StorageLocation, Event, 
@@ -44,6 +44,7 @@ app.add_middleware(
 # Include routers
 app.include_router(users.router, prefix="/api", tags=["users"])
 app.include_router(documents.router, prefix="/api", tags=["documents"])
+app.include_router(location_images.router, tags=["location-images"])
 app.include_router(public_api.router, tags=["public-api"])
 
 
