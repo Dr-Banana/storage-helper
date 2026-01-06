@@ -520,7 +520,7 @@ const LocationsPage = () => {
               type="button"
               onClick={handleDeleteConfirm}
               className="btn-primary bg-red-600 hover:bg-red-700"
-              disabled={submitting || (deletingLocation && locationDocuments[deletingLocation.id] > 0)}
+              disabled={submitting || (!!deletingLocation && locationDocuments[deletingLocation.id] > 0)}
             >
               {submitting ? 'Deleting...' : 'Delete'}
             </button>

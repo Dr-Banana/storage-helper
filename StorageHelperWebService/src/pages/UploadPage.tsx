@@ -80,7 +80,6 @@ const UploadPage = () => {
     setUploading(true)
     setUploadError(null)
     setIngestionResult(null)
-    const newUploadedFiles = new Set<string>()
 
     try {
       // Initialize progress for all files
