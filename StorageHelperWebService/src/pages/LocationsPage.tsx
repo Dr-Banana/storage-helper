@@ -49,6 +49,8 @@ const LocationsPage = () => {
     description: '',
     photo_url: ''
   })
+  const [selectedFile, setSelectedFile] = useState<File | null>(null)
+  const [uploadingImage, setUploadingImage] = useState(false)
   const [formError, setFormError] = useState<string | null>(null)
   const [submitting, setSubmitting] = useState(false)
 
@@ -86,6 +88,7 @@ const LocationsPage = () => {
 
   const handleCreate = () => {
     setFormData({ name: '', description: '', photo_url: '' })
+    setSelectedFile(null)
     setFormError(null)
     setShowCreateModal(true)
   }
@@ -97,6 +100,7 @@ const LocationsPage = () => {
       description: location.description || '',
       photo_url: location.photo_url || ''
     })
+    setSelectedFile(null)
     setFormError(null)
     setShowEditModal(true)
   }
@@ -105,6 +109,17 @@ const LocationsPage = () => {
     setDeletingLocation(location)
     setDeleteError(null)
     setShowDeleteModal(true)
+  }
+
+  const handleImageSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    if (file) {
+      if (!file.type.startsWith('image/')) {
+        setFormError('Please select an image file')
+        return
+      }
+      setSelectedFile(file)
+    }
   }
 
   const handleCreateSubmit = async (e: React.FormEvent) => {
@@ -119,12 +134,31 @@ const LocationsPage = () => {
     try {
       setSubmitting(true)
       setFormError(null)
+      
+      let photoUrl: string | undefined = undefined
+      
+      if (selectedFile) {
+        try {
+          setUploadingImage(true)
+          const uploadResult = await locationService.uploadImage(userId, selectedFile)
+          photoUrl = uploadResult.image_url
+          setUploadingImage(false)
+        } catch (imageError: any) {
+          console.error('Failed to upload image:', imageError)
+          setFormError(imageError.response?.data?.detail || 'Failed to upload image')
+          setUploadingImage(false)
+          setSubmitting(false)
+          return
+        }
+      }
+      
       await locationService.create(userId, {
         name: formData.name.trim(),
         description: formData.description.trim() || undefined,
-        photo_url: formData.photo_url.trim() || undefined
+        photo_url: photoUrl
       })
       setShowCreateModal(false)
+      setSelectedFile(null)
       await loadLocations(userId)
     } catch (error: any) {
       console.error('Failed to create location:', error)
@@ -146,13 +180,32 @@ const LocationsPage = () => {
     try {
       setSubmitting(true)
       setFormError(null)
+      
+      let photoUrl: string | undefined = formData.photo_url
+      
+      if (selectedFile) {
+        try {
+          setUploadingImage(true)
+          const uploadResult = await locationService.uploadImage(userId, selectedFile)
+          photoUrl = uploadResult.image_url
+          setUploadingImage(false)
+        } catch (imageError: any) {
+          console.error('Failed to upload image:', imageError)
+          setFormError(imageError.response?.data?.detail || 'Failed to upload image')
+          setUploadingImage(false)
+          setSubmitting(false)
+          return
+        }
+      }
+      
       await locationService.update(userId, editingLocation.id, {
         name: formData.name.trim(),
         description: formData.description.trim() || undefined,
-        photo_url: formData.photo_url.trim() || undefined
+        photo_url: photoUrl
       })
       setShowEditModal(false)
       setEditingLocation(null)
+      setSelectedFile(null)
       await loadLocations(userId)
     } catch (error: any) {
       console.error('Failed to update location:', error)
@@ -169,10 +222,6 @@ const LocationsPage = () => {
 
   const handleDescriptionChange = useCallback((e: React.ChangeEvent<HTMLTextAreaElement>) => {
     setFormData(prev => ({ ...prev, description: e.target.value }))
-  }, [])
-
-  const handlePhotoUrlChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
-    setFormData(prev => ({ ...prev, photo_url: e.target.value }))
   }, [])
 
   const handleDeleteConfirm = async () => {
@@ -320,15 +369,20 @@ const LocationsPage = () => {
             </div>
             <div>
               <label className="block text-sm font-medium text-home-text-dark mb-1">
-                Photo URL
+                Location Photo (Optional)
               </label>
               <input
-                type="url"
-                value={formData.photo_url}
-                onChange={handlePhotoUrlChange}
-                className="input w-full"
-                placeholder="Optional photo URL"
+                type="file"
+                accept="image/*"
+                onChange={handleImageSelect}
+                className="w-full px-3 py-2 border border-home-border rounded-lg text-sm"
+                disabled={uploadingImage || submitting}
               />
+              {selectedFile && (
+                <p className="text-sm text-green-600 mt-1">
+                  ✓ {selectedFile.name}
+                </p>
+              )}
             </div>
             {formError && (
               <div className="p-3 bg-red-50 border border-red-200 rounded-home text-red-700 text-sm">
@@ -387,15 +441,20 @@ const LocationsPage = () => {
             </div>
             <div>
               <label className="block text-sm font-medium text-home-text-dark mb-1">
-                Photo URL
+                Location Photo (Optional)
               </label>
               <input
-                type="url"
-                value={formData.photo_url}
-                onChange={handlePhotoUrlChange}
-                className="input w-full"
-                placeholder="Optional photo URL"
+                type="file"
+                accept="image/*"
+                onChange={handleImageSelect}
+                className="w-full px-3 py-2 border border-home-border rounded-lg text-sm"
+                disabled={uploadingImage || submitting}
               />
+              {selectedFile && (
+                <p className="text-sm text-green-600 mt-1">
+                  ✓ {selectedFile.name}
+                </p>
+              )}
             </div>
             {formError && (
               <div className="p-3 bg-red-50 border border-red-200 rounded-home text-red-700 text-sm">

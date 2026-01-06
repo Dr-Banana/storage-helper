@@ -4,14 +4,17 @@ Location Image Management API
 This module provides endpoints for managing location images.
 Allows associating image URLs with storage locations.
 """
-from fastapi import APIRouter, Depends, HTTPException, status, Query
+from fastapi import APIRouter, Depends, HTTPException, status, Query, UploadFile, File, Form
 from sqlalchemy.orm import Session
 from typing import Optional
 from pydantic import BaseModel, Field, HttpUrl
+from io import BytesIO
+import urllib.parse
 
 from app.core.database import get_db
 from app.models.storage_location import StorageLocation
 from app.schemas.location import LocationResponse
+from app.integrations import StorageClient
 
 router = APIRouter(prefix="/api/locations", tags=["location-images"])
 
@@ -38,6 +41,67 @@ class LocationImageAssignResponse(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class LocationImageUploadResponse(BaseModel):
+    """Schema for location image upload response"""
+    image_url: str = Field(..., description="Path where the image was stored")
+    filename: str = Field(..., description="Original filename")
+
+
+# ============================================================
+# Location Image Upload Endpoints
+# ============================================================
+
+@router.post(
+    "/upload-image",
+    response_model=LocationImageUploadResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Upload location image to storage",
+    description="""
+    Upload a location photo image to storage backend.
+    Returns image_url for use when creating/updating a location.
+    
+    No database operations - purely file storage.
+    """
+)
+def upload_location_image(
+    file: UploadFile = File(..., description="Location photo image file"),
+    owner_id: int = Form(..., description="Location owner user ID"),
+):
+    """
+    Upload location image to storage.
+    
+    - **file**: Location photo image file (JPG, PNG, etc.)
+    - **owner_id**: Location owner user ID
+    
+    Returns:
+    - image_url: API endpoint URL to serve the image
+    - filename: Original filename
+    """
+    try:
+        # Read file content
+        file_content = BytesIO(file.file.read())
+        
+        # Upload to storage in locations folder
+        file_path = StorageClient.upload_image(
+            file_content=file_content,
+            filename=file.filename,
+            folder=f"locations/{owner_id}"
+        )
+        
+        # Return the file path directly (without conversion to API URL)
+        # The caller can decide whether to store it as-is or convert it
+        return LocationImageUploadResponse(
+            image_url=file_path,
+            filename=file.filename
+        )
+        
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to upload location image: {str(e)}"
+        )
 
 
 # ============================================================

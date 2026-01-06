@@ -533,6 +533,23 @@ export const categoryService = {
 
 export const locationService = {
   /**
+   * Upload location image to storage
+   * POST /api/locations/upload-image
+   */
+  uploadImage: async (userId: number, file: File): Promise<{ image_url: string; filename: string }> => {
+    const formData = new FormData()
+    formData.append('file', file)
+    formData.append('owner_id', userId.toString())
+    
+    const response = await apiClient.post('/locations/upload-image', formData, {
+      headers: {
+        'Content-Type': 'multipart/form-data',
+      },
+    })
+    return response.data
+  },
+
+  /**
    * Get all storage locations for a user
    * GET /api/users/{user_id}/locations
    */

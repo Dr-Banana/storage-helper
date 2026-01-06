@@ -4,6 +4,7 @@ User management routes
 from sqlalchemy.orm import Session
 from fastapi import APIRouter, Depends, HTTPException, status
 from typing import List
+import urllib.parse
 
 from app.core.database import get_db
 from app.services.user_service import UserService
@@ -18,6 +19,24 @@ router = APIRouter(prefix="/users", tags=["users"])
 class EmptyResponse(BaseModel):
     """Empty response model"""
     pass
+
+
+def _convert_to_accessible_url(file_path: str) -> str:
+    """
+    Convert local file path to accessible HTTP URL.
+    If already a URL (http/https), return as is.
+    If local file path, convert to API endpoint URL.
+    """
+    # If already a URL, return as is
+    if file_path and file_path.startswith(('http://', 'https://')):
+        return file_path
+    
+    # If local file path, convert to API endpoint URL
+    if file_path:
+        encoded_path = urllib.parse.quote(file_path, safe='')
+        return f"/api/documents/files?path={encoded_path}"
+    
+    return None
 
 
 @router.post(
@@ -291,7 +310,12 @@ def get_user_locations(user_id: int, db: Session = Depends(get_db)):
             "user_id": user_id,
             "total": len(locations),
             "locations": [
-                {"id": loc.id, "name": loc.name, "description": loc.description, "photo_url": loc.photo_url}
+                {
+                    "id": loc.id,
+                    "name": loc.name,
+                    "description": loc.description,
+                    "photo_url": _convert_to_accessible_url(loc.photo_url) if loc.photo_url else None
+                }
                 for loc in locations
             ]
         }

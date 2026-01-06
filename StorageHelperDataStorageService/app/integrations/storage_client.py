@@ -42,8 +42,8 @@ class StorageClient:
             with open(local_file_path, 'wb') as f:
                 f.write(file_content.getvalue())
             
-            # Return file path without file:// prefix
-            return local_file_path
+            # Return absolute file path for reliable access from different working directories
+            return os.path.abspath(local_file_path)
             
         except Exception as e:
             raise StorageException(f"Failed to upload image: {str(e)}")
