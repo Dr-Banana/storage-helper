@@ -56,7 +56,17 @@ The Data Storage service should provide **stable APIs** and handle **schema migr
 
 ## Quick Start
 
-### 1. Start the Database
+### Environment Modes
+
+The service supports three environment modes:
+
+- **`local`** (default): Uses local database and local file storage
+- **`preprod`**: Runs locally but uses Supabase storage (same as production)
+- **`prod`**: Production mode, uses Supabase storage (deployed on Render)
+
+### Local Mode (Default)
+
+#### 1. Start the Database
 
 From the `StorageHelperDataStorageService` directory:
 
@@ -71,27 +81,70 @@ chmod +x scripts/*.sh
 .\scripts\init-db.ps1
 ```
 
-### 2. Install Dependencies
+#### 2. Install Dependencies
 
 ```bash
 pip install -r requirements.txt
 ```
 
-Or copy from example:
+#### 3. Run the API Server
+
+**Linux/Mac:**
 ```bash
-cp .env.example .env
+./scripts/start_local.sh
 ```
 
-### 3. Run the API Server
+**Windows (PowerShell):**
+```powershell
+.\scripts\start_local.ps1
+```
 
+Or manually:
 ```bash
 python main.py
 ```
 
-Or using uvicorn directly:
+### Preprod Mode (Local + Supabase Storage)
+
+Preprod mode allows you to run the service locally while using Supabase storage (same as production). This is useful for testing storage operations without deploying to production.
+
+#### 1. Create Configuration File
+
+Copy the example configuration:
 ```bash
-uvicorn main:app --reload --host 0.0.0.0 --port 8000
+cp .env.preprod.example .env.preprod
 ```
+
+Edit `.env.preprod` and update with your Supabase credentials:
+```env
+APP_ENV=preprod
+DATABASE_URL=postgresql://postgres:root@localhost:5432/storage_helper
+SUPABASE_URL=https://your-project.supabase.co
+SUPABASE_KEY=your-supabase-service-role-key
+SUPABASE_BUCKET=documents
+```
+
+#### 2. Run in Preprod Mode
+
+**Linux/Mac:**
+```bash
+./scripts/start_preprod.sh
+```
+
+**Windows (PowerShell):**
+```powershell
+.\scripts\start_preprod.ps1
+```
+
+Or manually:
+```bash
+export APP_ENV=preprod  # Linux/Mac
+# or
+$env:APP_ENV="preprod"  # Windows PowerShell
+python main.py
+```
+
+**Note**: In preprod mode, files are uploaded to Supabase storage (same as production), but you can still use a local database for testing.
 
 ### 4. Access the API
 
@@ -101,11 +154,16 @@ uvicorn main:app --reload --host 0.0.0.0 --port 8000
 
 ### 5. Database Connection Details
 
+**Local Mode:**
 - **Host**: localhost
-- **Port**: 3306
-- **User**: root
+- **Port**: 5432 (PostgreSQL)
+- **User**: postgres
 - **Password**: root
 - **Database**: storage_helper
+
+**Preprod Mode:**
+- Can use local database (same as above) or Supabase database
+- Storage uses Supabase (same as production)
 
 ### 6. Common Commands
 
@@ -129,7 +187,10 @@ docker-compose logs mysql
 docker-compose exec mysql mysql -uroot -proot storage_helper
 ```
 
-For more details, see `db_local_setup_guide.md` and `STORAGE_PROTOCOL_USAGE.md`.
+For more details, see:
+- `db_local_setup_guide.md` - Database setup guide
+- `STORAGE_PROTOCOL_USAGE.md` - Storage protocol documentation
+- `PREPROD_SETUP.md` - Preprod mode setup guide
 
 ---
 

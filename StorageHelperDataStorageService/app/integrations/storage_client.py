@@ -28,14 +28,14 @@ class StorageClient:
             if not settings.SUPABASE_URL or not settings.SUPABASE_KEY:
                 raise StorageException("Supabase URL and Key must be configured for cloud storage")
             
-            # Temporarily remove all proxy-related environment variables to avoid 
-            # Client.__init__() proxy argument error
-            # The supabase library's underlying httpx client may read these env vars
-            # and try to pass them as proxy parameter, which causes the error
+            # CRITICAL FIX: Aggressively remove all proxy environment variables.
+            # Newer versions of httpx (0.28+) can cause Client.__init__ proxy argument errors
+            # with certain supabase-py components if these variables are present.
             proxy_vars = {}
             proxy_keys = [
                 'HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy',
-                'ALL_PROXY', 'all_proxy', 'NO_PROXY', 'no_proxy'
+                'ALL_PROXY', 'all_proxy', 'NO_PROXY', 'no_proxy',
+                'REQUESTS_CA_BUNDLE', 'CURL_CA_BUNDLE', 'SSL_CERT_FILE'
             ]
             
             for key in proxy_keys:
@@ -43,16 +43,27 @@ class StorageClient:
                     proxy_vars[key] = os.environ.pop(key)
             
             try:
-                cls._supabase_client = create_client(settings.SUPABASE_URL, settings.SUPABASE_KEY)
+                # Import here to ensure environment variables are gone before library initialization
+                from supabase import create_client
+                cls._supabase_client = create_client(
+                    settings.SUPABASE_URL, 
+                    settings.SUPABASE_KEY
+                )
+                logger.info("Successfully initialized Supabase client (with proxy bypass)")
+            except Exception as e:
+                logger.error(f"Failed to initialize Supabase client: {str(e)}")
+                raise StorageException(f"Supabase client initialization failed: {str(e)}")
             finally:
-                # Restore proxy env vars after client creation
-                os.environ.update(proxy_vars)
+                # Restore environment variables
+                for key, value in proxy_vars.items():
+                    os.environ[key] = value
+                    
         return cls._supabase_client
 
     @classmethod
     def upload_image(cls, file_content: BytesIO, filename: str, folder: str) -> str:
         """
-        Upload image to storage (Supabase in prod, local in dev)
+        Upload image to storage (Supabase in prod/preprod, local in dev)
         
         Args:
             file_content: File content (BytesIO)
@@ -68,7 +79,8 @@ class StorageClient:
             unique_filename = f"{uuid.uuid4()}{file_ext}"
             full_path = f"{folder}/{unique_filename}"
 
-            if settings.APP_ENV == "prod":
+            # Use Supabase for both prod and preprod environments
+            if settings.APP_ENV in ("prod", "preprod"):
                 return cls._upload_to_supabase(file_content, full_path)
             else:
                 return cls._upload_to_local(file_content, full_path)
@@ -125,7 +137,8 @@ class StorageClient:
             True if deleted, False otherwise
         """
         try:
-            if settings.APP_ENV == "prod":
+            # Use Supabase for both prod and preprod environments
+            if settings.APP_ENV in ("prod", "preprod"):
                 return cls._delete_from_supabase(image_url)
             else:
                 return cls._delete_from_local(image_url)

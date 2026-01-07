@@ -11,10 +11,11 @@ def get_env_file() -> Optional[str]:
     """
     Determine which .env file to use based on APP_ENV environment variable.
     
-    APP_ENV must be explicitly set to either 'local' or 'prod'.
+    APP_ENV must be explicitly set to 'local', 'preprod', or 'prod'.
     Available environments:
     - local: Development/testing environment (.env.local)
-    - prod: Production environment (.env.prod)
+    - preprod: Local testing with production-like configuration (.env.preprod)
+    - prod: Production environment (.env.prod or /etc/secrets/.env.prod)
     
     :return: Path to the .env file to load, or None if no file should be loaded
     :raises SystemExit: If APP_ENV is not set or invalid
@@ -22,7 +23,7 @@ def get_env_file() -> Optional[str]:
     app_env = os.getenv("APP_ENV", "").lower().strip()
     
     # List of valid environments
-    valid_envs = ["local", "prod"]
+    valid_envs = ["local", "preprod", "prod"]
     
     if not app_env:
         error_msg = (
@@ -30,10 +31,11 @@ def get_env_file() -> Optional[str]:
             "ERROR: APP_ENV environment variable is not set!\n\n"
             "You must explicitly specify the environment:\n"
             "  - For local testing: APP_ENV=local\n"
+            "  - For preprod (local with prod config): APP_ENV=preprod\n"
             "  - For production: APP_ENV=prod\n\n"
             "Quick start:\n"
-            "  Windows: .\\script\\start_local.ps1  or  .\\script\\start_prod.ps1\n"
-            "  Linux/Mac: ./script/start_local.sh  or  ./script/start_prod.sh\n"
+            "  Windows: .\\script\\start_local.ps1  or  .\\script\\start_preprod.ps1  or  .\\script\\start_prod.ps1\n"
+            "  Linux/Mac: ./script/start_local.sh  or  ./script/start_preprod.sh  or  ./script/start_prod.sh\n"
             "="*70
         )
         logger.error(error_msg)
@@ -46,6 +48,7 @@ def get_env_file() -> Optional[str]:
             f"Valid environments: {', '.join(valid_envs)}\n\n"
             "Please set APP_ENV to one of the valid values:\n"
             "  - APP_ENV=local (for development/testing)\n"
+            "  - APP_ENV=preprod (for local testing with production-like config)\n"
             "  - APP_ENV=prod (for production)\n"
             "="*70
         )
@@ -55,35 +58,40 @@ def get_env_file() -> Optional[str]:
     env_file = f".env.{app_env}"
     render_secret_path = f"/etc/secrets/{env_file}"
     
-    # Check if the specified env file exists (check both current dir and Render secrets dir)
-    actual_path = None
-    if os.path.exists(env_file):
-        actual_path = env_file
-    elif os.path.exists(render_secret_path):
-        actual_path = render_secret_path
-        logger.info(f"✓ Found configuration in Render secrets: {render_secret_path}")
-
-    if not actual_path:
-        # If in prod, we can fall back to system environment variables
-        if app_env == "prod":
+    # For prod mode, prioritize /etc/secrets/ directory
+    if app_env == "prod":
+        if os.path.exists(render_secret_path):
+            logger.info(f"✓ Loading prod configuration from {render_secret_path}")
+            return render_secret_path
+        elif os.path.exists(env_file):
+            logger.info(f"✓ Loading prod configuration from local file {env_file}")
+            return env_file
+        else:
             logger.info(f"Note: {env_file} not found in root or /etc/secrets/. Relying on system environment variables.")
             return None
-        
-        # In local, we still require the file
-        error_msg = (
-            "\n" + "="*70 + "\n"
-            f"ERROR: Configuration file not found: {env_file}\n\n"
-            f"APP_ENV is set to '{app_env}' but {env_file} does not exist.\n\n"
-            "Please create the configuration file:\n"
-            f"  1. Copy .env.example to {env_file}\n"
-            f"  2. Fill in your API keys and configuration\n"
-            "="*70
-        )
-        logger.error(error_msg)
-        sys.exit(1)
     
-    logger.info(f"✓ Loading configuration from {actual_path} (APP_ENV={app_env})")
-    return actual_path
+    # For other modes (local, preprod), check local file first
+    if os.path.exists(env_file):
+        logger.info(f"✓ Loading {app_env} configuration from {env_file}")
+        return env_file
+    
+    # Fallback to /etc/secrets/ for other environments
+    if os.path.exists(render_secret_path):
+        logger.info(f"✓ Loading {app_env} configuration from {render_secret_path}")
+        return render_secret_path
+    
+    # In local/preprod, we still require the file
+    error_msg = (
+        "\n" + "="*70 + "\n"
+        f"ERROR: Configuration file not found: {env_file}\n\n"
+        f"APP_ENV is set to '{app_env}' but {env_file} does not exist.\n\n"
+        "Please create the configuration file:\n"
+        f"  1. Copy .env.example to {env_file}\n"
+        f"  2. Fill in your API keys and configuration\n"
+        "="*70
+    )
+    logger.error(error_msg)
+    sys.exit(1)
 
 
 def mask_sensitive_value(value: str, show_chars: int = 4) -> str:
