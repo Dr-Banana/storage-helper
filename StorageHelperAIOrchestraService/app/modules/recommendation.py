@@ -7,7 +7,7 @@ from pathlib import Path
 from datetime import datetime
 
 # Import location data handler from pipeline_storage
-from app.storage.pipeline_storage import LocationDataHandler, LLM_LOCATION_FORMAT, DB_LOCATION_FORMAT
+from app.storage.pipeline_storage import LocationDataHandler, LLM_LOCATION_FORMAT, DB_LOCATION_FORMAT, _get_storage_base_url
 # Import settings for API configuration
 from app.core.config import settings
 
@@ -88,12 +88,8 @@ class RecommendationGenerator:
         """Load document categories from API for a specific user."""
         try:
             # Extract base URL from STORAGE_SERVICE_URL
-            # e.g., "http://localhost:8000" from "http://localhost:8000/internal"
-            base_url = settings.STORAGE_SERVICE_URL.replace("/internal", "").rstrip("/")
-            
-            # Validate base URL
-            if not base_url or not base_url.startswith(("http://", "https://")):
-                logger.error(f"Invalid STORAGE_SERVICE_URL configuration: {settings.STORAGE_SERVICE_URL}")
+            base_url = _get_storage_base_url()
+            if not base_url:
                 return []
             
             # Call API to get categories
@@ -127,12 +123,8 @@ class RecommendationGenerator:
         """Load storage locations from API for a specific user."""
         try:
             # Extract base URL from STORAGE_SERVICE_URL
-            # e.g., "http://localhost:8000" from "http://localhost:8000/internal"
-            base_url = settings.STORAGE_SERVICE_URL.replace("/internal", "").rstrip("/")
-            
-            # Validate base URL
-            if not base_url or not base_url.startswith(("http://", "https://")):
-                logger.error(f"Invalid STORAGE_SERVICE_URL configuration: {settings.STORAGE_SERVICE_URL}")
+            base_url = _get_storage_base_url()
+            if not base_url:
                 return []
             
             # Call API to get locations
@@ -264,11 +256,8 @@ class RecommendationGenerator:
         """Save a new category to API for a specific user."""
         try:
             # Extract base URL from STORAGE_SERVICE_URL
-            base_url = settings.STORAGE_SERVICE_URL.replace("/internal", "").rstrip("/")
-            
-            # Validate base URL
-            if not base_url or not base_url.startswith(("http://", "https://")):
-                logger.error(f"Invalid STORAGE_SERVICE_URL configuration: {settings.STORAGE_SERVICE_URL}")
+            base_url = _get_storage_base_url()
+            if not base_url:
                 return None
             
             # Call API to create category

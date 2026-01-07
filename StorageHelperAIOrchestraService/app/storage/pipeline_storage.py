@@ -30,6 +30,36 @@ logger = logging.getLogger(__name__)
 # Initialize HTTPX client for Storage Service API
 _storage_client = httpx.AsyncClient(base_url=settings.STORAGE_SERVICE_URL)
 
+
+def _get_storage_base_url() -> Optional[str]:
+    """
+    Extract base URL from STORAGE_SERVICE_URL configuration.
+    Handles various URL formats:
+    - http://localhost:8000/internal -> http://localhost:8000
+    - https://xxx.onrender.com -> https://xxx.onrender.com
+    - https://xxx.onrender.com/internal -> https://xxx.onrender.com
+    
+    Returns:
+        Base URL string (without trailing slash) or None if invalid
+    """
+    storage_url = settings.STORAGE_SERVICE_URL.rstrip("/")
+    
+    # Remove /internal suffix if present
+    if storage_url.endswith("/internal"):
+        base_url = storage_url[:-9]  # Remove "/internal"
+    else:
+        base_url = storage_url
+    
+    # Remove any trailing slashes
+    base_url = base_url.rstrip("/")
+    
+    # Validate base URL
+    if not base_url or not base_url.startswith(("http://", "https://")):
+        logger.error(f"Invalid STORAGE_SERVICE_URL configuration: {settings.STORAGE_SERVICE_URL} -> {base_url}")
+        return None
+    
+    return base_url
+
 # Type aliases for location data formats
 DB_LOCATION_FORMAT = Dict[int, List[Any]]  # Input format: {location_id: [name, description, ...]}
 LLM_LOCATION_FORMAT = Dict[int, Dict[str, Any]]  # Output format: {location_id: {"name": str, "description": str}}
@@ -238,16 +268,21 @@ class PipelineStorage:
         :param owner_id: Document owner user ID
         :return: image_url string if successful, None if failed
         """
-        # Extract base URL from STORAGE_SERVICE_URL (e.g., "http://localhost:8000" from "http://localhost:8000/internal")
-        base_url = settings.STORAGE_SERVICE_URL.replace("/internal", "").rstrip("/")
-        
-        # Validate base URL
-        if not base_url or not base_url.startswith(("http://", "https://")):
-            logger.error(f"Invalid STORAGE_SERVICE_URL configuration: {settings.STORAGE_SERVICE_URL}")
+        # Extract base URL from STORAGE_SERVICE_URL
+        base_url = _get_storage_base_url()
+        if not base_url:
             return None
         
+        # Build the full endpoint URL
+        endpoint_path = "/api/v1/documents/upload"
+        full_url = f"{base_url}{endpoint_path}"
+        
         try:
-            logger.debug(f"Uploading file to DataStorageService at: {base_url}/api/v1/documents/upload")
+            logger.info(f"Uploading file to DataStorageService")
+            logger.info(f"  Base URL: {base_url}")
+            logger.info(f"  Endpoint: {endpoint_path}")
+            logger.info(f"  Full URL: {full_url}")
+            logger.info(f"  Owner ID: {owner_id}")
             
             # Read file content
             file_content = await self._read_file_content(file_path)
@@ -257,27 +292,34 @@ class PipelineStorage:
             
             # Determine filename from path
             filename = Path(file_path).name if file_path else "document"
+            logger.info(f"  Filename: {filename}")
             
             # Prepare multipart form data for upload
             files = {
                 "file": (filename, file_content, self._get_content_type(file_path))
             }
+            # FastAPI Form fields expect string values, which are then converted to the declared type
             upload_data = {
-                "owner_id": str(owner_id)  # Convert to string for form data
+                "owner_id": str(owner_id)
             }
             
             async with httpx.AsyncClient(base_url=base_url, timeout=30.0) as client:
                 upload_response = await client.post(
-                    "/api/v1/documents/upload",
+                    endpoint_path,
                     files=files,
                     data=upload_data
                 )
+                
+                # Log response details for debugging
+                logger.debug(f"Upload response status: {upload_response.status_code}")
+                logger.debug(f"Upload response headers: {dict(upload_response.headers)}")
+                
                 upload_response.raise_for_status()
                 upload_result = upload_response.json()
                 image_url = upload_result.get("image_url")
                 
                 if not image_url:
-                    logger.error("Upload API did not return image_url")
+                    logger.error(f"Upload API did not return image_url. Response: {upload_result}")
                     return None
                 
                 logger.info(f"File uploaded successfully. Image URL: {image_url}")
@@ -286,11 +328,18 @@ class PipelineStorage:
         except httpx.ConnectError as e:
             error_msg = f"Cannot connect to DataStorageService at {base_url}. Service may be down or URL incorrect."
             logger.error(f"Connection error uploading file: {error_msg}")
+            logger.error(f"  Full URL attempted: {full_url}")
             logger.debug(f"Full error: {e}")
             return None
         except httpx.HTTPStatusError as e:
-            error_msg = f"HTTP {e.response.status_code}: {e.response.text[:200]}"
+            # Enhanced error logging for 404 and other status errors
+            error_detail = e.response.text[:500] if e.response.text else "No error details"
+            error_msg = f"HTTP {e.response.status_code}: {error_detail}"
             logger.error(f"Failed to upload file via API: {error_msg}")
+            logger.error(f"  Request URL: {full_url}")
+            logger.error(f"  Response status: {e.response.status_code}")
+            logger.error(f"  Response headers: {dict(e.response.headers)}")
+            logger.error(f"  Response body: {error_detail}")
             return None
         except httpx.TimeoutException as e:
             error_msg = f"Timeout connecting to DataStorageService at {base_url}"
@@ -339,16 +388,21 @@ class PipelineStorage:
         :param location_id: Optional storage location ID (use -1 for no location)
         :return: Response dictionary with document_id, page_id, image_url, status, or None if failed
         """
-        # Extract base URL from STORAGE_SERVICE_URL (e.g., "http://localhost:8000" from "http://localhost:8000/internal")
-        base_url = settings.STORAGE_SERVICE_URL.replace("/internal", "").rstrip("/")
-        
-        # Validate base URL
-        if not base_url or not base_url.startswith(("http://", "https://")):
-            logger.error(f"Invalid STORAGE_SERVICE_URL configuration: {settings.STORAGE_SERVICE_URL}")
+        # Extract base URL from STORAGE_SERVICE_URL
+        base_url = _get_storage_base_url()
+        if not base_url:
             return None
         
+        # Build the full endpoint URL
+        endpoint_path = "/api/v1/documents/process"
+        full_url = f"{base_url}{endpoint_path}"
+        
         try:
-            logger.debug(f"Processing document page at: {base_url}/api/v1/documents/process")
+            logger.info(f"Processing document page via DataStorageService")
+            logger.info(f"  Base URL: {base_url}")
+            logger.info(f"  Endpoint: {endpoint_path}")
+            logger.info(f"  Full URL: {full_url}")
+            logger.info(f"  Owner ID: {owner_id}, Page: {page_number}")
             
             process_data = {
                 "image_url": image_url,
@@ -374,9 +428,14 @@ class PipelineStorage:
             
             async with httpx.AsyncClient(base_url=base_url, timeout=30.0) as client:
                 process_response = await client.post(
-                    "/api/v1/documents/process",
+                    endpoint_path,
                     data=process_data
                 )
+                
+                # Log response details for debugging
+                logger.debug(f"Process response status: {process_response.status_code}")
+                logger.debug(f"Process response headers: {dict(process_response.headers)}")
+                
                 process_response.raise_for_status()
                 process_result = process_response.json()
                 
@@ -399,15 +458,23 @@ class PipelineStorage:
         except httpx.ConnectError as e:
             error_msg = f"Cannot connect to DataStorageService at {base_url}. Service may be down or URL incorrect."
             logger.error(f"Connection error processing document page: {error_msg}")
+            logger.error(f"  Full URL attempted: {full_url}")
             logger.debug(f"Full error: {e}")
             return None
         except httpx.HTTPStatusError as e:
-            error_msg = f"HTTP {e.response.status_code}: {e.response.text[:200]}"
+            # Enhanced error logging for 404 and other status errors
+            error_detail = e.response.text[:500] if e.response.text else "No error details"
+            error_msg = f"HTTP {e.response.status_code}: {error_detail}"
             logger.error(f"Failed to process document page via API: {error_msg}")
+            logger.error(f"  Request URL: {full_url}")
+            logger.error(f"  Response status: {e.response.status_code}")
+            logger.error(f"  Response headers: {dict(e.response.headers)}")
+            logger.error(f"  Response body: {error_detail}")
             return None
         except httpx.TimeoutException as e:
             error_msg = f"Timeout connecting to DataStorageService at {base_url}"
             logger.error(f"Timeout processing document page: {error_msg}")
+            logger.error(f"  Full URL attempted: {full_url}")
             return None
         except Exception as e:
             error_msg = f"Unexpected error: {str(e)}"
@@ -592,15 +659,12 @@ class PipelineStorage:
         
         try:
             # Extract base URL from STORAGE_SERVICE_URL
-            # e.g., "http://localhost:8000" from "http://localhost:8000/internal"
-            base_url = settings.STORAGE_SERVICE_URL.replace("/internal", "").rstrip("/")
-            
-            # Validate base URL
-            if not base_url or not base_url.startswith(("http://", "https://")):
-                logger.error(f"Invalid STORAGE_SERVICE_URL configuration: {settings.STORAGE_SERVICE_URL}")
+            base_url = _get_storage_base_url()
+            if not base_url:
                 return False
             
-            logger.debug(f"Saving embedding to DataStorageService at: {base_url}{url}")
+            full_url = f"{base_url}{url}"
+            logger.debug(f"Saving embedding to DataStorageService at: {full_url}")
             
             async with httpx.AsyncClient(base_url=base_url, timeout=30.0) as client:
                 response = await client.post(url, json=payload)
@@ -654,16 +718,33 @@ class PipelineStorage:
         }
         
         # Extract base URL from STORAGE_SERVICE_URL
-        base_url = settings.STORAGE_SERVICE_URL.replace("/internal", "").rstrip("/")
+        base_url = _get_storage_base_url()
+        if not base_url:
+            logger.error("Invalid STORAGE_SERVICE_URL configuration")
+            return []
+        
+        full_url = f"{base_url}{url}"
         
         try:
-            logger.debug(f"Searching documents at: {base_url}{url}")
+            logger.info(f"Searching documents via DataStorageService")
+            logger.info(f"  Base URL: {base_url}")
+            logger.info(f"  Endpoint: {url}")
+            logger.info(f"  Full URL: {full_url}")
+            logger.info(f"  Owner ID: {owner_id}, Top K: {top_k}")
+            
             async with httpx.AsyncClient(base_url=base_url, timeout=30.0) as client:
                 response = await client.post(url, json=payload)
                 response.raise_for_status()
-                return response.json()
+                result = response.json()
+                logger.info(f"Search completed. Found {len(result)} documents")
+                return result
+        except httpx.HTTPStatusError as e:
+            error_detail = e.response.text[:500] if e.response.text else "No error details"
+            logger.error(f"Failed to search documents via API: HTTP {e.response.status_code}: {error_detail}")
+            logger.error(f"  Request URL: {full_url}")
+            return []
         except Exception as e:
-            logger.error(f"Failed to search documents via API: {e}")
+            logger.error(f"Failed to search documents via API: {e}", exc_info=True)
             return []
 
     async def update_document_metadata(

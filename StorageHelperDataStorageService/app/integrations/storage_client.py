@@ -27,7 +27,26 @@ class StorageClient:
         if not cls._supabase_client:
             if not settings.SUPABASE_URL or not settings.SUPABASE_KEY:
                 raise StorageException("Supabase URL and Key must be configured for cloud storage")
-            cls._supabase_client = create_client(settings.SUPABASE_URL, settings.SUPABASE_KEY)
+            
+            # Temporarily remove all proxy-related environment variables to avoid 
+            # Client.__init__() proxy argument error
+            # The supabase library's underlying httpx client may read these env vars
+            # and try to pass them as proxy parameter, which causes the error
+            proxy_vars = {}
+            proxy_keys = [
+                'HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy',
+                'ALL_PROXY', 'all_proxy', 'NO_PROXY', 'no_proxy'
+            ]
+            
+            for key in proxy_keys:
+                if key in os.environ:
+                    proxy_vars[key] = os.environ.pop(key)
+            
+            try:
+                cls._supabase_client = create_client(settings.SUPABASE_URL, settings.SUPABASE_KEY)
+            finally:
+                # Restore proxy env vars after client creation
+                os.environ.update(proxy_vars)
         return cls._supabase_client
 
     @classmethod
