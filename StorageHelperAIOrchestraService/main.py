@@ -1,4 +1,5 @@
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from app.api.router import api_router
 import uvicorn
 
@@ -6,6 +7,15 @@ app = FastAPI(
     title="家用 AI 文件管家 (Orchestra Service)",
     description="处理 OCR、文件分类、搜索和位置推荐的核心服务",
     version="v1"
+)
+
+# 添加 CORS 中间件
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 # 挂载 API 路由到 /api/v1 前缀下
