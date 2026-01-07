@@ -7,7 +7,7 @@ import sys
 logger = logging.getLogger(__name__)
 
 
-def get_env_file() -> str:
+def get_env_file() -> Optional[str]:
     """
     Determine which .env file to use based on APP_ENV environment variable.
     
@@ -16,7 +16,7 @@ def get_env_file() -> str:
     - local: Development/testing environment (.env.local)
     - prod: Production environment (.env.prod)
     
-    :return: Path to the .env file to load
+    :return: Path to the .env file to load, or None if no file should be loaded
     :raises SystemExit: If APP_ENV is not set or invalid
     """
     app_env = os.getenv("APP_ENV", "").lower().strip()
@@ -53,9 +53,23 @@ def get_env_file() -> str:
         sys.exit(1)
     
     env_file = f".env.{app_env}"
+    render_secret_path = f"/etc/secrets/{env_file}"
     
-    # Check if the specified env file exists
-    if not os.path.exists(env_file):
+    # Check if the specified env file exists (check both current dir and Render secrets dir)
+    actual_path = None
+    if os.path.exists(env_file):
+        actual_path = env_file
+    elif os.path.exists(render_secret_path):
+        actual_path = render_secret_path
+        logger.info(f"✓ Found configuration in Render secrets: {render_secret_path}")
+
+    if not actual_path:
+        # If in prod, we can fall back to system environment variables
+        if app_env == "prod":
+            logger.info(f"Note: {env_file} not found in root or /etc/secrets/. Relying on system environment variables.")
+            return None
+        
+        # In local, we still require the file
         error_msg = (
             "\n" + "="*70 + "\n"
             f"ERROR: Configuration file not found: {env_file}\n\n"
@@ -68,8 +82,8 @@ def get_env_file() -> str:
         logger.error(error_msg)
         sys.exit(1)
     
-    logger.info(f"✓ Loading configuration from {env_file} (APP_ENV={app_env})")
-    return env_file
+    logger.info(f"✓ Loading configuration from {actual_path} (APP_ENV={app_env})")
+    return actual_path
 
 
 def mask_sensitive_value(value: str, show_chars: int = 4) -> str:
