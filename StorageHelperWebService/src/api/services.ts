@@ -374,8 +374,8 @@ export const documentService = {
   }> => {
     const formData = new FormData()
     formData.append('embedding', JSON.stringify(embedding))
-    formData.append('limit', limit.toString())
-    if (ownerId) {
+    formData.append('limit', (limit ?? 10).toString())
+    if (ownerId !== undefined && ownerId !== null) {
       formData.append('owner_id', ownerId.toString())
     }
     
@@ -438,10 +438,12 @@ export const ingestionService = {
     }
     
     // Append required parameters
-    formData.append('owner_id', request.owner_id.toString())
+    if (request.owner_id !== undefined && request.owner_id !== null) {
+      formData.append('owner_id', request.owner_id.toString())
+    }
     
     // Append optional parameters
-    if (request.document_id !== undefined) {
+    if (request.document_id !== undefined && request.document_id !== null) {
       formData.append('document_id', request.document_id.toString())
     }
     
@@ -539,7 +541,9 @@ export const locationService = {
   uploadImage: async (userId: number, file: File): Promise<{ image_url: string; filename: string }> => {
     const formData = new FormData()
     formData.append('file', file)
-    formData.append('owner_id', userId.toString())
+    if (userId !== undefined && userId !== null) {
+      formData.append('owner_id', userId.toString())
+    }
     
     const response = await apiClient.post('/locations/upload-image', formData, {
       headers: {

@@ -13,12 +13,14 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
   const [userId, setUserId] = useState<number | null>(() => {
     // 从 localStorage 读取保存的用户 ID
     const savedUserId = localStorage.getItem('userId')
-    return savedUserId ? parseInt(savedUserId, 10) : null
+    if (!savedUserId) return null
+    const parsed = parseInt(savedUserId, 10)
+    return isNaN(parsed) ? null : parsed
   })
 
   useEffect(() => {
     // 保存用户 ID 到 localStorage
-    if (userId) {
+    if (userId !== null && userId !== undefined) {
       localStorage.setItem('userId', userId.toString())
     } else {
       localStorage.removeItem('userId')

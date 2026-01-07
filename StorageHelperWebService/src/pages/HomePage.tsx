@@ -62,10 +62,10 @@ const HomePage = () => {
   ]
 
   const stats = [
-    { label: 'Total Documents', value: loading ? '...' : totalDocuments.toString(), icon: FileText, color: 'text-home-primary-600' },
+    { label: 'Total Documents', value: loading ? '...' : (totalDocuments ?? 0).toString(), icon: FileText, color: 'text-home-primary-600' },
     { label: 'This Month', value: '0', icon: TrendingUp, color: 'text-home-secondary-600' },
     { label: 'Recent Activity', value: 'Today', icon: Clock, color: 'text-home-success-600' },
-    { label: 'Storage Locations', value: loading ? '...' : totalLocations.toString(), icon: Folder, color: 'text-home-warning-600' },
+    { label: 'Storage Locations', value: loading ? '...' : (totalLocations ?? 0).toString(), icon: Folder, color: 'text-home-warning-600' },
   ]
 
   return (
