@@ -8,8 +8,8 @@ psycopg2-binary==2.9.9
 pgvector==0.2.4
 
 # Data Validation
-pydantic==2.5.0
-pydantic-settings==2.1.0
+pydantic>=2.10.0
+pydantic-settings>=2.7.0
 
 # Security & Utils
 cryptography>=41.0.0
