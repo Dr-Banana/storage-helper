@@ -3,15 +3,45 @@ Application configuration
 """
 import os
 from typing import Optional
+from pydantic_settings import BaseSettings, SettingsConfigDict
+import logging
 
-class Settings:
-    """Application settings"""
+logger = logging.getLogger(__name__)
+
+def get_env_file() -> Optional[str]:
+    """Determine which .env file to use based on APP_ENV."""
+    app_env = os.getenv("APP_ENV", "").lower().strip()
+    
+    if not app_env:
+        return None
+    
+    env_file = f".env.{app_env}"
+    if os.path.exists(env_file):
+        return env_file
+    
+    # If in Render, secrets might be in /etc/secrets/
+    render_secret_path = f"/etc/secrets/{env_file}"
+    if os.path.exists(render_secret_path):
+        return render_secret_path
+        
+    return None
+
+class Settings(BaseSettings):
+    """Application settings using Pydantic Settings"""
+    
+    # Environment
+    APP_ENV: str = "local"
     
     # Database
-    DATABASE_URL: str = os.getenv(
-        "DATABASE_URL",
-        "postgresql://postgres:root@localhost:5432/storage_helper"
-    )
+    DATABASE_URL: str = "postgresql://postgres:root@localhost:5432/storage_helper"
+    
+    # Supabase (for storage)
+    SUPABASE_URL: Optional[str] = None
+    SUPABASE_KEY: Optional[str] = None
+    SUPABASE_BUCKET: str = "documents"
+    
+    # Local Storage
+    STORAGE_LOCAL_PATH: str = "./tmp"
     
     # API
     API_TITLE: str = "Storage Helper Data Storage Service"
@@ -19,10 +49,12 @@ class Settings:
     API_DESCRIPTION: str = "Database backend for Home AI Paper Organizer"
     
     # Logging
-    LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
+    LOG_LEVEL: str = "INFO"
     
-    class Config:
-        env_file = ".env.local"
-
+    # Pydantic Configuration
+    model_config = SettingsConfigDict(
+        env_file=get_env_file(), 
+        extra='ignore'
+    )
 
 settings = Settings()
