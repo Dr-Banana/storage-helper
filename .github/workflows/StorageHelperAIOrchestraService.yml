@@ -1,0 +1,45 @@
+name: AI Orchestra Service Tests
+
+on:
+  push:
+    branches: [ main, master ]
+    paths:
+      - 'StorageHelperAIOrchestraService/**'
+      - '.github/workflows/ai-orchestra-service.yml'
+  pull_request:
+    branches: [ main, master ]
+    paths:
+      - 'StorageHelperAIOrchestraService/**'
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.12'
+        cache: 'pip'
+
+    - name: Install System Dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y tesseract-ocr libtesseract-dev
+
+    - name: Install Python Dependencies
+      run: |
+        cd StorageHelperAIOrchestraService
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+
+    - name: Run Unit Tests
+      env:
+        APP_ENV: prod
+      run: |
+        cd StorageHelperAIOrchestraService
+        python -m pytest tests/
+
