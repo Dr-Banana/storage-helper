@@ -38,7 +38,27 @@ Start-Sleep -Seconds 2
 # Step 2: Start AI Orchestration Service (PREPROD)
 Write-Host "[2/3] Starting AI Orchestration Service (PREPROD)..." -ForegroundColor Cyan
 
-$aiCmd = "cd '$AI_SERVICE_DIR'; if (-not (Test-Path 'env')) { python -m venv env }; & .\env\Scripts\Activate.ps1; pip install -q -r requirements.txt; Write-Host 'Starting PREPROD mode...' -ForegroundColor Cyan; & .\script\start_preprod.ps1; Read-Host 'Press Enter to close this window'"
+$aiCmd = @"
+cd '$AI_SERVICE_DIR'
+if (-not (Test-Path 'env')) {
+    python -m venv env
+}
+& .\env\Scripts\Activate.ps1
+pip install -q -r requirements.txt
+
+Write-Host 'Running all unit tests and environment checks...' -ForegroundColor Yellow
+python -m pytest tests/
+if (`$LASTEXITCODE -ne 0) {
+    Write-Host 'Tests failed! Please fix the issues before starting services.' -ForegroundColor Red
+    Read-Host 'Press Enter to exit'
+    exit 1
+}
+
+Write-Host 'All tests passed' -ForegroundColor Green
+Write-Host 'Starting PREPROD mode...' -ForegroundColor Cyan
+& .\script\start_preprod.ps1
+Read-Host 'Press Enter to close this window'
+"@
 
 Start-Process powershell -ArgumentList "-NoExit", "-Command", $aiCmd -WindowStyle Normal
 Start-Sleep -Seconds 2

@@ -13,58 +13,41 @@ def clean_ocr_text(text: str, min_confidence: float = 0.0) -> str:
     """
     Clean and normalize OCR-extracted text.
     
-    Common OCR errors to fix:
-    - Extra whitespace and line breaks
-    - Common character recognition errors
-    - Garbage characters
-    - Broken words
-    
     :param text: Raw OCR text
-    :param min_confidence: Minimum confidence threshold (0-100), not used here but for API compatibility
+    :param min_confidence: Minimum confidence threshold (0-100)
     :return: Cleaned text
     """
     if not text:
         return ""
     
-    # 1. Remove excessive whitespace (keep single spaces)
-    text = re.sub(r'\s+', ' ', text)
+    # 1. Split into lines first to preserve structure during cleaning
+    lines = text.splitlines()
     
-    # 2. Remove leading/trailing whitespace from each line
-    lines = [line.strip() for line in text.split('\n')]
-    
-    # 3. Remove empty lines
-    lines = [line for line in lines if line]
-    
-    # 4. Join lines back with single newline
-    text = '\n'.join(lines)
-    
-    # 5. Common OCR character fixes (adjust based on common errors)
-    # Fix common character recognition errors
+    # 2. Fix common character recognition errors
     common_fixes = {
-        '0': 'O',  # Only in context where O makes more sense (requires context)
-        '1': 'I',  # Only in context where I makes more sense
         'rn': 'm',  # Common OCR error: rn -> m
         'vv': 'w',  # Common OCR error: vv -> w
     }
     
-    # 6. Remove lines with too many special characters (likely garbage)
-    # Do this before removing single chars to preserve meaningful lines
-    lines = text.split('\n')
     cleaned_lines = []
     for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+            
+        # Apply character fixes
+        for old, new in common_fixes.items():
+            line = line.replace(old, new)
+            
+        # 3. Remove lines with too many special characters (likely garbage)
         # If line has more than 70% non-alphanumeric characters, it might be garbage
-        if len(line.strip()) > 0:
-            alpha_ratio = sum(1 for c in line if c.isalnum() or c.isspace()) / len(line) if len(line) > 0 else 0
-            if alpha_ratio > 0.3:  # Keep if at least 30% alphanumeric
-                cleaned_lines.append(line.strip())
+        alpha_ratio = sum(1 for c in line if c.isalnum() or c.isspace()) / len(line) if len(line) > 0 else 0
+        if alpha_ratio > 0.3:  # Keep if at least 30% alphanumeric
+            cleaned_lines.append(line)
     
-    text = '\n'.join(cleaned_lines)
-    
-    # 7. Remove isolated single characters that are clearly noise (optional, be careful)
-    # This is commented out as it might remove valid single characters
-    # text = re.sub(r'\b\w\b(?![.])', '', text)
-    
-    # 8. Normalize whitespace again after cleaning
+    # 4. Join lines back with single space or newline as needed
+    # For OCR text, we often want to normalize all whitespace to single spaces
+    text = ' '.join(cleaned_lines)
     text = re.sub(r'\s+', ' ', text).strip()
     
     return text

@@ -38,6 +38,16 @@ if (-not (Test-Path 'env')) {
 & .\env\Scripts\Activate.ps1
 pip install -q -r requirements.txt
 Write-Host '✓ AI Orchestration Service 虚拟环境已激活' -ForegroundColor Green
+
+Write-Host '🔍 Running all unit tests and environment checks...' -ForegroundColor Yellow
+python -m pytest tests/
+if ($LASTEXITCODE -ne 0) {
+    Write-Host '❌ Tests failed! Please fix the issues before starting services.' -ForegroundColor Red
+    Read-Host 'Press Enter to exit'
+    exit 1
+}
+Write-Host '✅ All tests passed' -ForegroundColor Green
+
 docker-compose down
 docker-compose build --no-cache
 docker-compose up -d

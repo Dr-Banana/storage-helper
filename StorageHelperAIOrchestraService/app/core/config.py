@@ -22,6 +22,10 @@ def get_env_file() -> Optional[str]:
     """
     app_env = os.getenv("APP_ENV", "").lower().strip()
     
+    # 自动检测是否处于测试环境
+    if not app_env and ("pytest" in sys.modules or "pytest" in sys.argv[0]):
+        app_env = "prod"  # 测试环境下默认使用 prod 模式（不强制依赖 .env 文件）
+    
     # List of valid environments
     valid_envs = ["local", "preprod", "prod"]
     
