@@ -6,9 +6,10 @@
 
 **Core Responsibilities:**
 1.  **Orchestration**: Managing the lifecycle of a document processing request through modular, testable pipelines.
-2.  **Ingestion Pipeline**: Image/PDF $\to$ OCR/Text Extraction $\to$ Text Cleaning $\to$ [Parallel: LLM Recommendation + Vector Embedding] $\to$ Persistence.
+2.  **Ingestion Pipeline**: Image/PDF $\to$ OCR/Text Extraction $\to$ Text Cleaning $\to$ [Parallel: LLM Recommendation + Structured Metadata Extraction + Vector Embedding] $\to$ Persistence.
 3.  **Recommendation Engine**: LLM-powered (Gemini 2.5 Flash) intelligent document categorization and storage location suggestion with structured output.
-4.  **Multi-Format Support**: Handles both image files (JPG, PNG, etc.) and PDF documents with intelligent processing.
+4.  **Metadata Extractor**: Category-aware structured data extraction (e.g., tax year, issuer, amount) using Instructor and Gemini.
+5.  **Multi-Format Support**: Handles both image files (JPG, PNG, etc.) and PDF documents with intelligent processing.
 
 **Note:** Search functionality has been moved to StorageHelperDataStorageService backend for centralized processing.
 
@@ -92,7 +93,7 @@ flowchart TD
     
     Upload --> Parallel["STEP 3: PARALLEL EXECUTION<br/>asyncio.gather - concurrent"]
     
-    Parallel --> Recommendation["STEP 3A: RECOMMENDATION<br/>app/modules/recommendation.py<br/>─────────────────<br/>• Gemini 2.5 Flash LLM<br/>• Category classification from canonical<br/>  categories (category_config.py)<br/>• Location suggestion<br/>• Tags extraction<br/>• Structured JSON output<br/>• For batch: uses combined<br/>  text from all pages<br/>• Category selection:<br/>  - Selects from ALLOWED_CATEGORY_TYPES<br/>  - Creates user category if needed via API:<br/>    POST /api/users/{user_id}/categories<br/>• Fetches locations via API:<br/>  - GET /api/users/{user_id}/locations<br/>─────────────────<br/>OUTPUT: recommendation_result<br/>  - category_id: int<br/>  - location_id: int<br/>  - recommendation_reason<br/>  - suggested_tags: array"]
+    Parallel --> Recommendation["STEP 3A: RECOMMENDATION & METADATA<br/>app/modules/recommendation.py<br/>app/modules/metadata_extractor.py<br/>─────────────────<br/>• Gemini 2.5 Flash LLM<br/>• Category classification from canonical<br/>  categories (category_config.py)<br/>• Location suggestion<br/>• 🆕 Metadata Extraction (Instructor):<br/>  - Dynamic schema per category<br/>  - Extract dates, names, amounts<br/>• Tags extraction<br/>• Structured JSON output<br/>─────────────────<br/>OUTPUT: recommendation_result<br/>  - category_id: int<br/>  - location_id: int<br/>  - metadata: Dict (extracted fields)<br/>  - recommendation_reason<br/>  - suggested_tags: array"]
     
     Parallel --> Embedding["STEP 3B: EMBEDDING<br/>app/modules/embedding.py<br/>─────────────────<br/>• Text → Vector conversion<br/>• Gemini API embedContent<br/>  text-embedding-004<br/>• Task type: RETRIEVAL_DOCUMENT<br/>• Retry mechanism: max 3 attempts<br/>• Exponential backoff<br/>• Returns EmbeddingResult object<br/>• For semantic search<br/>─────────────────<br/>OUTPUT: EmbeddingResult<br/>  - vector: List[float]<br/>  - dimension: int<br/>  - status: str<br/>  - model_name, task_type<br/>  - error (if failed)"]
     
@@ -235,6 +236,7 @@ flowchart TD
 | **Vision Module** | `app/modules/vision.py` | 🆕 Multimodal understanding using Gemini Vision API - sees photos, logos, charts beyond OCR |
 | **Cleaning Module** | `app/modules/cleaning.py` | Text normalization, noise removal, quality filtering |
 | **Recommendation Module** | `app/modules/recommendation.py` | LLM-based category and location suggestion using Gemini API. Selects category from canonical categories defined in `category_config.py` (ALLOWED_CATEGORY_TYPES). Automatically creates user-specific category via API (`POST /api/users/{user_id}/categories`) if it doesn't exist. Fetches locations via API (`GET /api/users/{user_id}/locations`). |
+| **Metadata Extractor** | `app/modules/metadata_extractor.py` | 🆕 Structured data extraction using Instructor and Gemini. Dynamically generates Pydantic schemas based on category configuration. |
 | **Embedding Module** | `app/modules/embedding.py` | Vector generation using Gemini API embedContent (text-embedding-004) with retry mechanism |
 | **Pipeline Storage** | `app/storage/pipeline_storage.py` | Unified storage handler for all pipeline output results (API-based, no local files). Handles file uploads to DataStorageService via HTTP API. |
 | **Output Schema** | `app/storage/output_schema.py` | Unified management of pipeline output structure and fields |
@@ -291,6 +293,27 @@ VISION_MODEL = "gemini-2.0-flash-exp"
 - **Insurance Document with Logo**: OCR extracts policy text, Vision recognizes "Blue Cross Blue Shield logo"
 - **Receipt with Faded Text**: OCR struggles (low confidence), Vision auto-triggers and recovers full content
 - **Chart-Heavy Report**: OCR extracts titles, Vision describes "bar chart showing quarterly revenue growth"
+
+#### Metadata Extractor Implementation Details
+
+**🆕 NEW: Structured Metadata Extraction**
+
+The `MetadataExtractor` class (`app/modules/metadata_extractor.py`) provides specialized, category-aware data extraction using the **Instructor** library and **Gemini JSON mode**.
+
+**Key Features:**
+1. **Instructor Integration**: Uses the `instructor` library for robust, type-safe data extraction into Pydantic models.
+2. **Dynamic Schemas**: Instead of static models, schemas are generated on-the-fly based on the document's category using `_get_schema_for_fields()`.
+3. **Single Source of Truth**: Field definitions (e.g., `issuer_name`, `total_amount`, `tax_year`) are mapped from `app/core/category_config.py`.
+4. **Native Gemini Support**: Uses `instructor.from_gemini` with `Mode.GEMINI_JSON` for optimal performance with Google's multimodal models.
+5. **Categorization-Metadata Loop**: 
+   - Step A: Recommendation module identifies the category (e.g., "TAX").
+   - Step B: Metadata Extractor fetches required fields for "TAX" (e.g., `tax_year`, `issuer_name`).
+   - Step C: Gemini extracts only those specific fields from the text.
+
+**Field mapping example:**
+- `TAX`: `issuer_name`, `tax_year`
+- `BILL`: `issuer_name`, `total_amount`, `due_date`
+- `MED`: `issuer_name`, `service_date`
 
 #### Embedding Module Implementation Details
 
@@ -511,8 +534,9 @@ Response: {
   - ✅ Whitespace normalization, garbage character removal
   - ✅ Low-confidence text filtering support
 - [x] **AI-04**: Implement `Metadata Extractor`: Simple rules for Title, Date, Keywords
-  - ✅ Integrated within recommendation module
-  - ✅ Gemini LLM-based extraction of tags and category
+  - ✅ **Enhanced**: Dedicated `app/modules/metadata_extractor.py` using Instructor
+  - ✅ Dynamic schema generation based on category (Tax, Bill, etc.)
+  - ✅ Gemini LLM-based extraction of tags, category, and structured fields
 - [x] **AI-05**: **Pipeline Integration**: Connect DB $\to$ OCR $\to$ Clean $\to$ Update DB
   - ✅ Complete pipeline orchestration in `app/pipelines/ingestion.py`
   - ✅ Modular step-by-step processing with state management

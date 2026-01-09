@@ -18,7 +18,11 @@ async def test_ingestion_endpoint():
     mock_result = {
         "status": "success",
         "document_id": 1,
-        "recommendation": {"category_id": 1},
+        "recommendation": {
+            "category_code": "REC",
+            "category_id": 1,
+            "recommendation_reason": "Test reason"
+        },
         "total_pages": 1,
         "successful_pages": 1,
         "failed_pages": 0,
@@ -50,7 +54,10 @@ async def test_confirm_endpoint():
             "document_id": 1,
             "category_id": 1,
             "location_id": 1,
-            "recommendation": {"category_code": "REC"}, # Added missing field
+            "recommendation": {
+                "category_code": "REC",
+                "recommendation_reason": "Test reason"
+            },
             "page_results": [
                 {
                     "page_number": 1,

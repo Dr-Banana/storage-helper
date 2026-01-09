@@ -423,6 +423,7 @@ class DocumentService:
                 # Create new document
                 # Use None as title - will be displayed as "Document #ID" in frontend
                 # This is better than "Document page X" which is confusing
+                
                 document = Document(
                     title=None,
                     owner_id=owner_id,

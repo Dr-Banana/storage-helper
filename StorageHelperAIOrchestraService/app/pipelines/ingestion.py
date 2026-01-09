@@ -405,6 +405,7 @@ class IngestionPipeline:
             # Extract category_id and location_id from recommendation_result if available
             category_id = None
             location_id = None
+            metadata = None
             if state.recommendation_result and state.recommendation_result.get("status") == "llm_success":
                 rec_data = state.recommendation_result.get("recommendation", {})
                 category_id = rec_data.get("category_id")
@@ -413,8 +414,13 @@ class IngestionPipeline:
                 # Normalize: None or -1 means no location
                 if location_id is None:
                     location_id = -1
+                
+                # Get extracted metadata
+                metadata = rec_data.get("metadata")
+                logger.info(f"Metadata extracted for page processing: {metadata}")
             
             # Process document page with image_url and structured results
+            logger.info(f"Sending JSON data to DataStorageService for processing: document_id={state.document_id}, page_number={page_number}")
             process_result = await self.pipeline_storage.process_document_page(
                 image_url=state.file_url,
                 owner_id=state.owner_id,
@@ -429,6 +435,9 @@ class IngestionPipeline:
                 # API returns document_id, not id
                 returned_document_id = process_result.get("document_id")
                 returned_page_id = process_result.get("page_id")
+                
+                logger.info(f"Process result received: document_id={returned_document_id}, page_id={returned_page_id}")
+                
                 state.page_id = returned_page_id  # Store page_id from API response
 
                 # Update file_url and processed_page_number from API response
@@ -846,6 +855,7 @@ async def run_unified_ingestion_pipeline(
     from PIL import Image
     
     logger.info(f"Starting unified ingestion for {len(file_urls)} files, owner_id={owner_id}, document_id={document_id}")
+    logger.info(f"File URLs: {file_urls}")
     
     pipeline = _default_pipeline
     # page_tasks: List of tuples
@@ -867,6 +877,7 @@ async def run_unified_ingestion_pipeline(
                 detected_type = detect_file_type(file_url)
                 logger.info(f"Processing file: {file_url} (type: {detected_type} - auto-detected)")
             
+            logger.info(f"Final detected type for file {idx}: {detected_type}")
             file_type_for_task = detected_type
 
             # Upload original file once, all pages share the same image_url
@@ -988,7 +999,8 @@ async def run_unified_ingestion_pipeline(
             
             if error_msg:
                 return ({
-                    "page_number": page_number_within_file,
+                    "page_number": global_page_index,
+                    "file_page_number": page_number_within_file,
                     "global_page_index": global_page_index,
                     "status": "failed",
                     "error": error_msg,
@@ -999,7 +1011,8 @@ async def run_unified_ingestion_pipeline(
             
             if not file_path:
                 return ({
-                    "page_number": page_number_within_file,
+                    "page_number": global_page_index,
+                    "file_page_number": page_number_within_file,
                     "global_page_index": global_page_index,
                     "status": "failed",
                     "error": "File path is None",
@@ -1022,7 +1035,8 @@ async def run_unified_ingestion_pipeline(
                 # Step 1: OCR
                 if not await pipeline.step_ocr(state):
                     return ({
-                        "page_number": page_number_within_file,
+                        "page_number": global_page_index,
+                        "file_page_number": page_number_within_file,
                         "global_page_index": global_page_index,
                         "status": "failed",
                         "error": state.error or "OCR failed",
@@ -1041,13 +1055,14 @@ async def run_unified_ingestion_pipeline(
                 # Collect cleaned text for recommendation/embedding
                 cleaned_text = state.cleaned_text or (state.ocr_result.text if state.ocr_result else "")
                 if cleaned_text:
-                    # Use file-internal page number as marker, text will be sorted by page number when combined
-                    all_cleaned_texts.append((page_number_within_file, cleaned_text))
+                    # Use global page index so ordering is stable across multiple files
+                    all_cleaned_texts.append((global_page_index, cleaned_text))
 
                 # In unified upload mode, no need to upload again here; if file-level upload failed, mark as failed
                 if not file_image_url:
                     return ({
-                        "page_number": page_number_within_file,
+                        "page_number": global_page_index,
+                        "file_page_number": page_number_within_file,
                         "global_page_index": global_page_index,
                         "status": "failed",
                         "error": error_msg or "File upload to DataStorageService failed",
@@ -1058,8 +1073,11 @@ async def run_unified_ingestion_pipeline(
                     }, state)
 
                 return ({
-                    "page_number": page_number_within_file,  # 文件内页码（用于显示）
-                    "global_page_number": global_page_index,  # 全局页码（用于数据库，确保唯一性）
+                    # IMPORTANT: Use global page number as page_number so it is unique within the document.
+                    # This prevents collisions when multiple files are uploaded (each file's first page would otherwise be 1).
+                    "page_number": global_page_index,
+                    # Keep file-internal page number for debugging / potential UI display (not part of public schema).
+                    "file_page_number": page_number_within_file,
                     "global_page_index": global_page_index,
                     "status": "success",
                     "error": None,
@@ -1072,7 +1090,8 @@ async def run_unified_ingestion_pipeline(
             except Exception as e:
                 logger.error(f"Error processing page (file_page={page_number_within_file}, global_index={global_page_index}): {e}", exc_info=True)
                 return ({
-                    "page_number": page_number_within_file,
+                    "page_number": global_page_index,
+                    "file_page_number": page_number_within_file,
                     "global_page_index": global_page_index,
                     "status": "failed",
                     "error": str(e),
@@ -1088,6 +1107,7 @@ async def run_unified_ingestion_pipeline(
         # For multi-page documents, we process first page immediately to establish document_id
         total_pages = len(page_tasks)
         is_single_page = total_pages == 1
+        logger.info(f"Total pages identified: {total_pages}, is_single_page={is_single_page}, page_tasks_len={len(page_tasks)}")
         
         if page_tasks:
             first_page_info = page_tasks[0]
@@ -1431,9 +1451,13 @@ async def run_unified_ingestion_pipeline(
                         # Process document page with structured results (use global page number for database)
                         await pipeline.step_process_document(page_state, page_number=global_page_num)
 
+                        if page_state.document_id is not None:
+                            final_document_id = page_state.document_id
+
                         # Update page_result with values returned from /documents/process
                         if page_state.page_id is not None:
                             page_result["page_id"] = page_state.page_id
+                            page_result["document_id"] = page_state.document_id # 同时也更新页面级的 ID
                             logger.info(f"Page processed successfully: page_id={page_state.page_id}, document_id={page_state.document_id}, page_number={global_page_num}")
                         else:
                             # If page_id is None, document processing may have failed
@@ -1524,24 +1548,16 @@ async def run_unified_ingestion_pipeline(
             # Normalize location fields: use location_id instead of location_name
             # Prefer location_id over suggested_location_id
             # If no location is provided, set location_id to -1
-            location_id = rec_data.get("location_id") or rec_data.get("suggested_location_id")
-            rec_data["location_id"] = location_id if location_id else -1
+            location_id = rec_data.get("location_id")
+            rec_data["location_id"] = location_id if location_id is not None else -1
             
-            # Always remove location_name fields (use ID only)
+            # Remove redundant location_name fields
             rec_data.pop("location_name", None)
-            rec_data.pop("suggested_location_name", None)
-            
-            # Remove suggested_location_id if location_id is set (avoid duplication)
-            if "location_id" in rec_data and "suggested_location_id" in rec_data:
-                rec_data.pop("suggested_location_id", None)
-            
-            # Remove category_code (use category_id only to save space)
-            rec_data.pop("category_code", None)
             
             response["recommendation"] = rec_data
         else:
-            # Ensure recommendation field exists even if recommendation failed
-            response["recommendation"] = {}
+            # Ensure recommendation field is None if recommendation failed
+            response["recommendation"] = None
         
         # Add embedding info if available
         if embedding_result and isinstance(embedding_result, EmbeddingResult) and embedding_result.is_successful:

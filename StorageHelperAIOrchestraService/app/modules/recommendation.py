@@ -18,9 +18,13 @@ from app.core.category_config import (
     is_allowed_category_type,
     get_category_suggestion,
     get_category_keywords,
+    get_category_metadata_fields,
     ALLOWED_CATEGORY_TYPES,
     CATEGORY_LOCATION_KEYWORDS,
 )
+
+# Import metadata extractor
+from app.modules.metadata_extractor import extract_metadata
 
 
 class RecommendationGenerator:
@@ -39,11 +43,11 @@ class RecommendationGenerator:
                 "type": "STRING",
                 "description": "The code of the document category that best matches this document. MUST be one of the canonical category codes provided."
             },
-            "suggested_location_id": {
+            "location_id": {
                 "type": "INTEGER",
                 "description": "The ID of the best suggested storage location from the provided locations list. MUST be one of the location IDs provided."
             },
-            "suggested_location_name": {
+            "location_name": {
                 "type": "STRING",
                 "description": "The name of the suggested location (for reference, should match one of the provided locations)."
             },
@@ -57,19 +61,16 @@ class RecommendationGenerator:
                 "description": "A brief, one-sentence explanation for the recommendation."
             }
         },
-        "required": ["category_code", "suggested_location_id", "suggested_location_name", "suggested_tags", "recommendation_reason"]
+        "required": ["category_code", "location_id", "location_name", "suggested_tags", "recommendation_reason"]
     }
 
     # Define the System Instruction to guide the LLM's persona
     SYSTEM_PROMPT = (
         "You are a world-class smart home storage assistant. Your task is to analyze the "
         "provided document text and classify it into one of the canonical document categories, "
-        "and recommend the best storage location from the provided locations list.\n\n"
+        "and recommend the best storage location.\n\n"
         "IMPORTANT RULES:\n"
-        "1. You MUST select a category_code from the provided list of canonical category codes.\n"
-        "2. You MUST select a suggested_location_id from the provided locations list. The ID must match exactly one of the location IDs provided.\n"
-        "3. The suggested_location_name should match the name of the location with the selected ID.\n"
-        "4. Consider the document category and location descriptions to make the best match.\n"
+        "1. You MUST select a category_code from the provided list.\n"
         "Respond only with a JSON object that strictly adheres to the provided schema."
     )
 
@@ -502,8 +503,6 @@ class RecommendationGenerator:
             f"DOCUMENT TEXT:\n{document_text}\n---\n"
             f"IMPORTANT INSTRUCTIONS:\n"
             f"- category_code: MUST be one of the EXACT codes listed in the canonical categories above.\n"
-            f"- suggested_location_id: The exact ID number from the locations list above\n"
-            f"- suggested_location_name: The name of the location matching the selected ID\n"
         )
 
         payload = {
@@ -568,6 +567,23 @@ class RecommendationGenerator:
                     parsed_json["category_id"] = final_category_id
                     parsed_json["category_code"] = final_category_code
 
+                    # 🎯 Hardcoded assembly: Get fields from config and call MetadataExtractor
+                    # 1. Get the list of fields we want to extract for this category
+                    target_fields = get_category_metadata_fields(final_category_code)
+                    logger.info(f"Targeting metadata fields for {final_category_code}: {target_fields}")
+
+                    # 2. Call specialized extractor with explicit field list to restrict AI
+                    extracted_metadata = extract_metadata(
+                        text=document_text,
+                        category_code=final_category_code,
+                        fields=target_fields,
+                        llm_metadata={}
+                    )
+                    print(f"DEBUG: Extracted metadata for {final_category_code}: {extracted_metadata}")
+                    
+                    # 3. Assemble results
+                    parsed_json["metadata"] = extracted_metadata
+
                     assigned_location_id = None
                     assigned_location_name = None
                     if locations:
@@ -593,9 +609,6 @@ class RecommendationGenerator:
                             assigned_location_id = locations[0].get("id")
                             assigned_location_name = locations[0].get("name", f"Location {assigned_location_id}")
 
-                        parsed_json["suggested_location_id"] = assigned_location_id
-                        parsed_json["suggested_location_name"] = assigned_location_name
-                        # Also set location_id and location_name for compatibility with router.py and ingestion.py
                         parsed_json["location_id"] = assigned_location_id
                         parsed_json["location_name"] = assigned_location_name
 
@@ -603,8 +616,6 @@ class RecommendationGenerator:
                             self.ensure_location_mapping(final_category_id, assigned_location_id)
                     else:
                         # If no locations available, set to None explicitly
-                        parsed_json["suggested_location_id"] = None
-                        parsed_json["suggested_location_name"] = None
                         parsed_json["location_id"] = None
                         parsed_json["location_name"] = None
                         logger.warning("No locations available. Location recommendation set to None.")

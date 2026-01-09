@@ -43,8 +43,8 @@ async def test_generate_recommendation_success(generator):
                 'parts': [{
                     'text': json.dumps({
                         "category_code": "REC",
-                        "suggested_location_id": 1,
-                        "suggested_location_name": "Kitchen",
+                        "location_id": 1,
+                        "location_name": "Kitchen",
                         "suggested_tags": ["grocery", "receipt"],
                         "recommendation_reason": "It is a receipt for food."
                     })
@@ -59,6 +59,8 @@ async def test_generate_recommendation_success(generator):
     with patch('httpx.AsyncClient.post', new_callable=AsyncMock) as mock_post, \
          patch('app.modules.recommendation.is_allowed_category_type', return_value=True), \
          patch('app.modules.recommendation.get_category_suggestion', return_value={'name': 'Receipt'}), \
+         patch('app.modules.recommendation.get_category_metadata_fields', return_value=["issuer_name", "issue_date"]), \
+         patch('app.modules.recommendation.extract_metadata', return_value={"issuer_name": "Test Store", "issue_date": "2025-01-01"}), \
          patch.object(RecommendationGenerator, 'ensure_category_exists', return_value=mock_category), \
          patch.object(RecommendationGenerator, 'load_locations', return_value=mock_locations), \
          patch.object(RecommendationGenerator, 'get_preferred_location_for_category', return_value=None), \
@@ -71,7 +73,13 @@ async def test_generate_recommendation_success(generator):
         assert result["status"] == "llm_success"
         assert result["recommendation"]["category_code"] == "REC"
         assert result["recommendation"]["category_id"] == 10
-        assert result["recommendation"]["suggested_location_id"] == 1
+        assert result["recommendation"]["location_id"] == 1
+        # Metadata should be present but we don't care about its content here
+        assert "metadata" in result["recommendation"]
+        # Core fields should NO LONGER be at the top level
+        assert "issuer_name" not in result["recommendation"]
+        assert "issue_date" not in result["recommendation"]
+        assert "suggested_location_id" not in result["recommendation"]
 
 @pytest.mark.asyncio
 async def test_generate_recommendation_api_error(generator):

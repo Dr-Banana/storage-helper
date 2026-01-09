@@ -1,4 +1,5 @@
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import field_validator
 from typing import Optional
 import os
 import logging
@@ -123,8 +124,10 @@ class Settings(BaseSettings):
     # Gemini API Configuration
     GEMINI_EMBEDDING_API_KEY: str = ""  # Gemini API key for embedding generation
     GEMINI_LLM_API_KEY: str = ""  # Gemini API key for LLM (recommendation)
+    GEMINI_METADATA_API_KEY: str = ""  # Gemini API key for metadata extraction (can reuse GEMINI_LLM_API_KEY if not set separately)
     GEMINI_EMBEDDING_MODEL: str = "text-embedding-004"  # Embedding model name
     GEMINI_LLM_MODEL: str = "gemini-2.5-flash-preview-09-2025"  # LLM model name
+    GEMINI_METADATA_MODEL: str = "gemini-2.5-flash-preview-09-2025"  # Model for metadata extraction
     
     # OCR Configuration
     TESSERACT_CMD: Optional[str] = None  # Tesseract 可执行文件路径，如果为 None 则使用系统 PATH
@@ -157,6 +160,8 @@ class Settings(BaseSettings):
         logger.info(f"LLM API Key: {mask_sensitive_value(self.GEMINI_LLM_API_KEY)}")
         logger.info(f"Embedding Model: {self.GEMINI_EMBEDDING_MODEL}")
         logger.info(f"LLM Model: {self.GEMINI_LLM_MODEL}")
+        logger.info(f"Metadata Model: {self.GEMINI_METADATA_MODEL}")
+        logger.info(f"Metadata API Key: {mask_sensitive_value(self.GEMINI_METADATA_API_KEY or self.GEMINI_LLM_API_KEY)}")
         logger.info(f"Tesseract Language: {self.TESSERACT_LANG}")
         logger.info(f"OCR Preprocessing: {'Enabled' if self.OCR_ENABLE_PREPROCESSING else 'Disabled'}")
         logger.info(f"Vision Enhancement: {'Enabled' if self.VISION_ENABLE else 'Disabled'}")

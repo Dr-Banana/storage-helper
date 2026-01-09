@@ -48,8 +48,10 @@ pip install -q -r requirements.txt
 
 Write-Host 'Running all unit tests and environment checks...' -ForegroundColor Yellow
 python -m pytest tests/
-if (`$LASTEXITCODE -ne 0) {
+`$testResult = `$LASTEXITCODE
+if (`$testResult -ne 0) {
     Write-Host 'Tests failed! Please fix the issues before starting services.' -ForegroundColor Red
+    Write-Host "Exit code: `$testResult" -ForegroundColor Red
     Read-Host 'Press Enter to exit'
     exit 1
 }

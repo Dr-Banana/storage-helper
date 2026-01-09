@@ -370,7 +370,7 @@ class PipelineStorage:
         [API: POST /api/v1/documents/process]
         Service: DataStorageService (separate microservice)
         
-        API format:
+        API format (JSON body):
         - image_url * (string): Image URL from /documents/upload endpoint
         - owner_id * (integer): Document owner user ID
         - page_number * (integer): Page number within document (1-indexed)
@@ -404,32 +404,31 @@ class PipelineStorage:
             logger.info(f"  Full URL: {full_url}")
             logger.info(f"  Owner ID: {owner_id}, Page: {page_number}")
             
-            process_data = {
+            # Prepare JSON payload
+            process_payload: Dict[str, Any] = {
                 "image_url": image_url,
-                "owner_id": str(owner_id),
-                "page_number": str(page_number)
+                "owner_id": owner_id,
+                "page_number": page_number,
             }
             
-            # Add ocr_text if provided
+            # Add Optional Fields only if they have values
             if ocr_text:
-                process_data["ocr_text"] = ocr_text
+                process_payload["ocr_text"] = ocr_text
             
-            # Add document_id only if provided (not None)
             if document_id is not None:
-                process_data["document_id"] = str(document_id)
+                # Can be str or int from pipeline state
+                process_payload["document_id"] = int(document_id) if isinstance(document_id, str) else document_id
             
-            # Add category_id if provided
             if category_id is not None:
-                process_data["category_id"] = str(category_id)
+                process_payload["category_id"] = category_id
             
-            # Add location_id if provided (including -1 for no location)
             if location_id is not None:
-                process_data["location_id"] = str(location_id)
+                process_payload["location_id"] = location_id
             
             async with httpx.AsyncClient(base_url=base_url, timeout=30.0) as client:
                 process_response = await client.post(
                     endpoint_path,
-                    data=process_data
+                    json=process_payload
                 )
                 
                 # Log response details for debugging

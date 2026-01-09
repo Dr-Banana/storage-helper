@@ -6,8 +6,9 @@ Internal schema details are completely hidden.
 """
 from fastapi import APIRouter, UploadFile, File, Form, Depends, HTTPException, status
 from sqlalchemy.orm import Session
-from typing import Optional, List
+from typing import Optional, List, Dict, Any
 from io import BytesIO
+from pydantic import BaseModel, Field
 
 from app.core.database import get_db
 from app.services.document_service import DocumentService
@@ -87,42 +88,51 @@ def upload_document_image(
     Returns document_id, page_id and status code
     """
 )
+class DocumentProcessRequest(BaseModel):
+    """Schema for processing a document page (structured JSON request)"""
+
+    image_url: str = Field(..., description="Image URL from /documents/upload endpoint")
+    owner_id: int = Field(..., description="Document owner user ID")
+    page_number: int = Field(..., description="Page number within document (1-indexed)")
+
+    ocr_text: Optional[str] = Field(None, description="Optional: OCR extracted text for this page")
+    document_id: Optional[int] = Field(
+        None,
+        description="Optional existing document ID. If not provided, creates new document",
+    )
+    category_id: Optional[int] = Field(None, description="Optional: Document category ID")
+    location_id: Optional[int] = Field(None, description="Optional: Storage location ID (use -1 for no location)")
+
+    # Keep as optional field for compatibility, but we intentionally do not persist it.
+    metadata: Optional[Dict[str, Any]] = Field(None, description="Optional: Extracted document metadata")
+
+
 def process_document_page(
-    image_url: str = Form(..., description="Image URL from /documents/upload endpoint"),
-    owner_id: int = Form(..., description="Document owner user ID"),
-    page_number: int = Form(..., description="Page number within document (1-indexed)"),
-    ocr_text: Optional[str] = Form(None, description="Optional: OCR extracted text for this page"),
-    document_id: Optional[int] = Form(None, description="Optional existing document ID. If not provided, creates new document"),
-    category_id: Optional[int] = Form(None, description="Optional: Document category ID"),
-    location_id: Optional[int] = Form(None, description="Optional: Storage location ID (use -1 for no location)"),
-    db: Session = Depends(get_db)
+    payload: DocumentProcessRequest,
+    db: Session = Depends(get_db),
 ):
     """
     Process and persist document page metadata.
-    
-    - **image_url**: Image URL (from /documents/upload)
-    - **owner_id**: Document owner user ID (required)
-    - **page_number**: Page number within document (required, 1-indexed)
-    - **ocr_text**: OCR extracted text for this page (optional)
-    - **document_id**: Optional existing document ID. If not provided, creates new document
-    - **category_id**: Optional document category ID
-    - **location_id**: Optional storage location ID (use -1 for no location)
+
+    Note:
+    - This endpoint expects a JSON body for stability and clear typing.
+    - `metadata` is accepted for compatibility but is NOT persisted to DB.
     """
     try:
         # Process page and save to database
         doc_id, page_id, returned_image_url = DocumentService.process_document_page(
             db=db,
-            image_url=image_url,
-            owner_id=owner_id,
-            page_number=page_number,
-            ocr_text=ocr_text,
-            document_id=document_id,
-            category_id=category_id,
-            location_id=location_id
+            image_url=payload.image_url,
+            owner_id=payload.owner_id,
+            page_number=payload.page_number,
+            ocr_text=payload.ocr_text,
+            document_id=payload.document_id,
+            category_id=payload.category_id,
+            location_id=payload.location_id,
         )
         
         # Determine status
-        if document_id:
+        if payload.document_id:
             status_value = "updated"
         else:
             status_value = "created"
@@ -132,7 +142,7 @@ def process_document_page(
             "page_id": page_id,
             "image_url": returned_image_url,
             "status": status_value,
-            "page_number": page_number
+            "page_number": payload.page_number
         }
         
     except ValueError as e:

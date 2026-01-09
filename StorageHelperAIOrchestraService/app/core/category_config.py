@@ -87,8 +87,36 @@ COMMON_CATEGORY_SUGGESTIONS: Dict[str, Dict[str, str]] = {
 }
 
 # ============================================================================
+# Category Metadata Requirements
+# ============================================================================
+# Defines which metadata fields are expected for each category.
+# Common fields across most categories: issuer_name, issue_date
+CATEGORY_METADATA_FIELDS: Dict[str, List[str]] = {
+    "TAX": ["tax_year", "issuer_name", "issue_date", "total_amount", "currency"],
+    "VISA": ["issuer_name", "issue_date", "expiry_date", "id_number"],
+    "MED": ["issuer_name", "issue_date", "patient_name", "report_type"],
+    "INS": ["issuer_name", "issue_date", "expiry_date", "policy_number"],
+    "EDU": ["issuer_name", "issue_date", "degree_type", "student_name"],
+    "LEG": ["issuer_name", "issue_date", "expiry_date", "parties_involved"],
+    "REC": ["issuer_name", "issue_date", "total_amount", "currency"],
+    "BANK": ["issuer_name", "issue_date", "account_number", "statement_period"],
+    "UTIL": ["issuer_name", "issue_date", "expiry_date", "total_amount", "currency", "account_number"],
+    "WORK": ["issuer_name", "issue_date", "employer_name", "contract_type"],
+    "MISC": ["issuer_name", "issue_date", "description"],
+}
+
+# ============================================================================
 # Helper Functions
 # ============================================================================
+
+def get_category_metadata_fields(category_code: str) -> List[str]:
+    """
+    Get the list of metadata fields relevant for a specific category.
+    
+    :param category_code: Category code
+    :return: List of metadata field names
+    """
+    return CATEGORY_METADATA_FIELDS.get(category_code.upper(), ["issuer_name", "issue_date"])
 
 def get_category_keywords(category_code: str) -> List[str]:
     """
