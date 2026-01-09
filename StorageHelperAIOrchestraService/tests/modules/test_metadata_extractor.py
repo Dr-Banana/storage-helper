@@ -18,7 +18,14 @@ def mock_instructor_native():
     """Mock Instructor and Gemini SDK to avoid actual API calls."""
     with patch('app.modules.metadata_extractor.instructor.from_gemini') as mock_from_gemini, \
          patch('google.generativeai.configure') as mock_configure, \
-         patch('google.generativeai.GenerativeModel') as mock_gen_model:
+         patch('google.generativeai.GenerativeModel') as mock_gen_model, \
+         patch('app.modules.metadata_extractor.settings') as mock_settings:
+        
+        # Mock settings to have a dummy API key to avoid ValueError
+        mock_settings.GEMINI_METADATA_API_KEY = "dummy_key"
+        mock_settings.GEMINI_LLM_API_KEY = "dummy_key"
+        mock_settings.GEMINI_METADATA_MODEL = "gemini-2.5-flash-preview-09-2025"
+        mock_settings.GEMINI_LLM_MODEL = "gemini-2.5-flash-preview-09-2025"
         
         mock_client = Mock()
         mock_completions = Mock()
