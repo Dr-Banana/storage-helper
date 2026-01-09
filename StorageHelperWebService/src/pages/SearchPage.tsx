@@ -147,37 +147,45 @@ const SearchPage = () => {
                   >
                     {/* Show preview files if available */}
                     {doc.previewFiles && doc.previewFiles.length > 0 ? (
-                      <div className="mb-4 space-y-2">
-                        {doc.previewFiles.slice(0, 1).map((file, idx) => {
-                          return (
-                            <div key={`${file.url}-${idx}`} className="rounded-home overflow-hidden bg-home-background-dark">
-                              {file.file_type === 'pdf' ? (
-                                <div className="w-full h-40 rounded-home overflow-hidden bg-home-background-dark relative border border-home-primary-100">
-                                  <iframe
-                                    src={`${file.url}#toolbar=0&navpanes=0&scrollbar=0&page=1&zoom=page-fit`}
-                                    className="w-full h-full border-0"
-                                    title={`PDF Preview ${idx + 1}`}
-                                    style={{ 
-                                      pointerEvents: 'none',
-                                      width: '100%',
-                                      height: '100%'
-                                    }}
-                                  />
-                                </div>
-                              ) : (
-                                <img
-                                  src={file.url}
-                                  alt={`File ${idx + 1}`}
-                                  className="w-full h-40 object-cover group-hover:scale-105 transition-transform duration-200"
-                                />
-                              )}
+                      <div className="mb-4 relative h-48 rounded-home overflow-hidden bg-home-background-dark border border-home-primary-100 group-hover:border-home-primary-300 transition-colors">
+                        {(() => {
+                          const firstFile = doc.previewFiles[0];
+                          return firstFile.file_type === 'pdf' ? (
+                            <div className="w-full h-full relative">
+                              <iframe
+                                src={`${firstFile.url}#toolbar=0&navpanes=0&scrollbar=0&page=1&zoom=page-fit`}
+                                className="w-full h-full border-0"
+                                title={`PDF Preview ${doc.id}`}
+                                style={{ 
+                                  pointerEvents: 'none',
+                                  width: '100%',
+                                  height: '100%'
+                                }}
+                              />
                             </div>
-                          )
-                        })}
+                          ) : (
+                            <img
+                              src={firstFile.url}
+                              alt={doc.title || 'Document'}
+                              className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
+                            />
+                          );
+                        })()}
+
+                        {/* Badge for total files if > 1 */}
+                        {doc.previewFiles.length > 1 && (
+                          <div className="absolute bottom-3 right-3 bg-home-text-dark/70 text-white text-[10px] font-bold px-2 py-1 rounded shadow-sm backdrop-blur-[2px] flex items-center gap-1 z-10">
+                            <FileText size={10} />
+                            <span>{doc.previewFiles.length} PAGES</span>
+                          </div>
+                        )}
+                        
+                        {/* Overlay on hover */}
+                        <div className="absolute inset-0 bg-home-primary-900/0 group-hover:bg-home-primary-900/5 transition-colors duration-300" />
                       </div>
                     ) : (
-                      <div className="mb-4 rounded-home overflow-hidden bg-home-background-dark h-40 flex items-center justify-center">
-                        <FileText className="text-home-primary-300" size={48} />
+                      <div className="mb-4 h-48 rounded-home overflow-hidden bg-home-background-light border border-dashed border-home-primary-200 flex items-center justify-center">
+                        <FileText className="text-home-primary-200" size={48} />
                       </div>
                     )}
                     
