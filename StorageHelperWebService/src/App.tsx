@@ -1,4 +1,5 @@
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
+import { GoogleOAuthProvider } from '@react-oauth/google'
 import { AuthProvider, useAuth } from './contexts/AuthContext'
 import Layout from './components/Layout'
 import ProtectedRoute from './components/ProtectedRoute'
@@ -42,17 +43,26 @@ const AppRoutes = () => {
 }
 
 function App() {
+  // Get Google Client ID from environment variable
+  const googleClientId = import.meta.env.VITE_GOOGLE_CLIENT_ID
+  
+  if (!googleClientId) {
+    console.warn('VITE_GOOGLE_CLIENT_ID environment variable is not set')
+  }
+
   return (
-    <AuthProvider>
-      <BrowserRouter
-        future={{
-          v7_startTransition: true,
-          v7_relativeSplatPath: true,
-        }}
-      >
-        <AppRoutes />
-      </BrowserRouter>
-    </AuthProvider>
+    <GoogleOAuthProvider clientId={googleClientId || ''}>
+      <AuthProvider>
+        <BrowserRouter
+          future={{
+            v7_startTransition: true,
+            v7_relativeSplatPath: true,
+          }}
+        >
+          <AppRoutes />
+        </BrowserRouter>
+      </AuthProvider>
+    </GoogleOAuthProvider>
   )
 }
 

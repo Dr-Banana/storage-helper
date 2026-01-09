@@ -1,48 +1,55 @@
-import { useState, FormEvent } from 'react'
+import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useAuth } from '../contexts/AuthContext'
+import { GoogleLogin, CredentialResponse } from '@react-oauth/google'
+import { LogIn, AlertCircle, Loader } from 'lucide-react'
 import { userService } from '../api/services'
-import { LogIn, AlertCircle } from 'lucide-react'
 
 const LoginPage = () => {
-  const [userId, setUserId] = useState('')
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
   const { login } = useAuth()
   const navigate = useNavigate()
 
-  const handleSubmit = async (e: FormEvent) => {
-    e.preventDefault()
+  const handleGoogleSuccess = async (credentialResponse: CredentialResponse) => {
     setError(null)
     setLoading(true)
 
     try {
-      const userIdNum = parseInt(userId.trim())
-      if (isNaN(userIdNum) || userIdNum <= 0) {
-        setError('Please enter a valid user ID (positive number)')
+      if (!credentialResponse.credential) {
+        setError('Failed to get Google token. Please try again.')
         setLoading(false)
         return
       }
 
-      // 验证用户是否存在
-      try {
-        await userService.getById(userIdNum)
-        // 用户存在，登录成功
-        login(userIdNum)
-        navigate('/')
-      } catch (error: any) {
-        if (error.response?.status === 404) {
-          setError(`User with ID ${userIdNum} does not exist. Please check your user ID.`)
-        } else {
-          setError('Failed to verify user. Please try again.')
-        }
+      // Send token to backend for authentication
+      const response = await userService.googleLogin(credentialResponse.credential)
+      
+      // Login successful
+      login(response.user_id, response.email, response.display_name)
+      
+      // Show message for new users
+      if (response.is_new_user) {
+        console.log(`Welcome! Your user ID is: ${response.user_id}`)
       }
+      
+      navigate('/')
     } catch (error: any) {
-      setError('An error occurred. Please try again.')
-      console.error('Login error:', error)
+      console.error('Google login error:', error)
+      
+      if (error.response?.status === 400) {
+        setError(error.response?.data?.detail || 'Invalid Google token. Please try again.')
+      } else {
+        setError('Authentication failed. Please try again.')
+      }
     } finally {
       setLoading(false)
     }
+  }
+
+  const handleGoogleError = () => {
+    setError('Google login failed. Please try again.')
+    setLoading(false)
   }
 
   return (
@@ -57,35 +64,11 @@ const LoginPage = () => {
               Welcome to Storage Helper
             </h1>
             <p className="text-home-text-light">
-              Please enter your User ID to continue
+              Sign in with your Google account to get started
             </p>
           </div>
 
-          <form onSubmit={handleSubmit} className="space-y-6">
-            <div>
-              <label
-                htmlFor="userId"
-                className="block text-sm font-medium text-home-text-dark mb-2"
-              >
-                User ID
-              </label>
-              <input
-                id="userId"
-                type="number"
-                value={userId}
-                onChange={(e) => setUserId(e.target.value)}
-                placeholder="Enter your user ID"
-                className="input w-full"
-                required
-                min="1"
-                disabled={loading}
-                autoFocus
-              />
-              <p className="text-xs text-home-text-light mt-2">
-                Enter your unique user identification number
-              </p>
-            </div>
-
+          <div className="space-y-6">
             {error && (
               <div className="flex items-center gap-2 p-3 bg-home-error-50 border border-home-error-200 rounded-home">
                 <AlertCircle className="text-home-error-500" size={20} />
@@ -93,14 +76,26 @@ const LoginPage = () => {
               </div>
             )}
 
-            <button
-              type="submit"
-              disabled={loading || !userId.trim()}
-              className="btn-primary w-full disabled:opacity-50 disabled:cursor-not-allowed"
-            >
-              {loading ? 'Logging in...' : 'Login'}
-            </button>
-          </form>
+            <div className="flex justify-center">
+              {loading ? (
+                <div className="flex items-center justify-center p-4">
+                  <Loader className="text-home-primary-600 animate-spin" size={24} />
+                  <span className="ml-2 text-home-text-dark">Signing in...</span>
+                </div>
+              ) : (
+                <GoogleLogin
+                  onSuccess={handleGoogleSuccess}
+                  onError={handleGoogleError}
+                  theme="outline"
+                  size="large"
+                />
+              )}
+            </div>
+
+            <p className="text-xs text-center text-home-text-light mt-6">
+              We use Google authentication to securely manage your account.
+            </p>
+          </div>
         </div>
       </div>
     </div>

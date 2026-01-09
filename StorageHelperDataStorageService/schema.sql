@@ -10,11 +10,15 @@ CREATE EXTENSION IF NOT EXISTS vector;
 
 CREATE TABLE "user" (
     id              SERIAL PRIMARY KEY,
+    google_id       VARCHAR(255) UNIQUE NOT NULL,  -- Google OAuth ID
+    email           VARCHAR(255) UNIQUE NOT NULL,  -- Google account email
     display_name    VARCHAR(100) NOT NULL,
     note            TEXT,
     created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+
+CREATE INDEX idx_user_google_id ON "user"(google_id);
 
 -- ============================================================
 -- 2. document_category: document categories (TAX / VISA / MED / INS / etc.)

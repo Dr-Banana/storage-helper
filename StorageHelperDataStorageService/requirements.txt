@@ -10,9 +10,26 @@ pgvector==0.2.4
 # Data Validation
 pydantic>=2.10.0
 pydantic-settings>=2.7.0
+email-validator>=2.1.0
 
 # Security & Utils
 cryptography>=41.0.0
 python-dotenv==1.0.0
 supabase>=2.11.0
 python-multipart
+
+# Google OAuth
+google-auth>=2.26.0
+google-auth-oauthlib>=1.2.0
+google-auth-httplib2>=0.2.0
+
+# Security & Utils
+cryptography>=41.0.0
+python-dotenv==1.0.0
+supabase>=2.11.0
+python-multipart
+
+# Google OAuth
+google-auth>=2.26.0
+google-auth-oauthlib>=1.2.0
+google-auth-httplib2>=0.2.0

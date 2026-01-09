@@ -7,6 +7,8 @@ import axios from 'axios'
 
 export interface User {
   id: number
+  google_id: string
+  email: string
   display_name: string
   note?: string
   created_at: string
@@ -152,6 +154,22 @@ export interface CategoryConfigResponse {
 // ============================================================================
 
 export const userService = {
+  /**
+   * Google OAuth login
+   * POST /api/auth/google/login
+   */
+  googleLogin: async (token: string): Promise<{
+    user_id: number
+    is_new_user: boolean
+    email: string
+    display_name: string
+  }> => {
+    const response = await apiClient.post('/auth/google/login', {
+      token: token,
+    })
+    return response.data
+  },
+
   /**
    * Get all users
    * GET /api/users

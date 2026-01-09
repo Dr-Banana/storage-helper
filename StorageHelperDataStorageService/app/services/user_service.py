@@ -28,6 +28,8 @@ class UserService:
         """
         try:
             new_user = User(
+                google_id=user_data.google_id,
+                email=user_data.email,
                 display_name=user_data.display_name,
                 note=user_data.note
             )
