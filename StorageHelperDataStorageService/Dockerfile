@@ -21,6 +21,10 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy project files
 COPY . .
 
+# Create tmp directory for storage
+RUN mkdir -p /app/tmp/documents /app/tmp/locations && \
+    chmod -R 755 /app/tmp
+
 # Expose port
 EXPOSE 8000
 

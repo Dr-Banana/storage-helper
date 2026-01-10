@@ -1,4 +1,4 @@
-﻿# PowerShell script to start all services in separate windows
+﻿# PowerShell script to start all services using Docker
 # For Windows users
 
 # Set UTF-8 encoding for proper Chinese character display
@@ -18,7 +18,7 @@ $AI_SERVICE_DIR = Join-Path $BASE_DIR "StorageHelperAIOrchestraService"
 $DATA_STORAGE_DIR = Join-Path $BASE_DIR "StorageHelperDataStorageService"
 $WEB_SERVICE_DIR = Join-Path $BASE_DIR "StorageHelperWebService"
 
-Write-Host "========== 在不同窗口中启动所有服务 ==========" -ForegroundColor $YELLOW
+Write-Host "========== StorageHelper 所有服务启动 ==========" -ForegroundColor $YELLOW
 Write-Host ""
 
 # Check if running on Windows
@@ -27,36 +27,38 @@ if ($PSVersionTable.PSVersion.Major -lt 5) {
     exit 1
 }
 
+# Check if Docker is installed
+Write-Host "检查 Docker 环境..." -ForegroundColor $BLUE
+try {
+    docker --version | Out-Null
+} catch {
+    Write-Host "错误：Docker 未安装。请先安装 Docker Desktop" -ForegroundColor $RED
+    exit 1
+}
+
+Write-Host "✓ Docker 环境检查通过" -ForegroundColor $GREEN
+Write-Host ""
+
+# Initialize database before starting services
+Write-Host "[初始化] 初始化数据库..." -ForegroundColor $BLUE
+$initDbScript = Join-Path $DATA_STORAGE_DIR "scripts" "init-db.sh"
+bash $initDbScript
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "❌ 数据库初始化失败" -ForegroundColor $RED
+    exit 1
+}
+Write-Host ""
+
 # Step 1: Start AI Orchestration Service in a new window
-Write-Host "[1/3] 在新 PowerShell 窗口启动 AI Orchestration Service..." -ForegroundColor $BLUE
+Write-Host "[1/3] 启动 AI Orchestration Service..." -ForegroundColor $BLUE
 
 $aiCommand = @"
 cd '$AI_SERVICE_DIR'
-if (-not (Test-Path 'env')) {
-    python -m venv env
-}
-& .\env\Scripts\Activate.ps1
-pip install -q -r requirements.txt
-Write-Host '✓ AI Orchestration Service 虚拟环境已激活' -ForegroundColor Green
-
-Write-Host '🔍 Running all unit tests and environment checks...' -ForegroundColor Yellow
-python -m pytest tests/
-`$testResult = `$LASTEXITCODE
-if (`$testResult -ne 0) {
-    Write-Host ''
-    Write-Host '❌ Tests failed! Please fix the issues before starting services.' -ForegroundColor Red
-    Write-Host "Exit code: `$testResult" -ForegroundColor Red
-    Read-Host 'Press Enter to exit'
-    exit 1
-}
-Write-Host ''
-Write-Host '✅ All tests passed' -ForegroundColor Green
-
 docker-compose down
-docker-compose build --no-cache
 docker-compose up -d
-Write-Host '✓ AI Orchestration Service 已启动' -ForegroundColor Green
-Read-Host "按 Enter 键保持此窗口开放"
+Write-Host ''
+Write-Host '✓ AI Orchestration Service 已启动（端口 8888）' -ForegroundColor Green
+docker-compose logs -f
 "@
 
 Start-Process powershell -ArgumentList "-NoExit", "-Command", $aiCommand -WindowStyle Normal
@@ -65,21 +67,14 @@ Write-Host "✓ AI Orchestration Service 窗口已打开" -ForegroundColor $GREE
 Write-Host ""
 
 # Step 2: Start Data Storage Service in a new window
-Write-Host "[2/3] 在新 PowerShell 窗口启动 Data Storage Service..." -ForegroundColor $BLUE
+Write-Host "[2/3] 启动 Data Storage Service..." -ForegroundColor $BLUE
 
 $dataStorageCommand = @"
 cd '$DATA_STORAGE_DIR'
-Write-Host '🚀 启动 PostgreSQL 数据库...' -ForegroundColor Cyan
-docker-compose up -d postgres
-Start-Sleep -Seconds 5
-if (-not (Test-Path 'venv')) {
-    python -m venv venv
-}
-& .\venv\Scripts\Activate.ps1
-pip install -q -r requirements.txt
-Write-Host '✓ Data Storage Service 虚拟环境已激活' -ForegroundColor Green
-& .\scripts\start_local.ps1
-Read-Host "按 Enter 键保持此窗口开放"
+docker-compose up -d
+Write-Host ''
+Write-Host '✓ Data Storage Service 已启动（端口 8000）' -ForegroundColor Green
+docker-compose logs -f
 "@
 
 Start-Process powershell -ArgumentList "-NoExit", "-Command", $dataStorageCommand -WindowStyle Normal
@@ -88,7 +83,7 @@ Write-Host "✓ Data Storage Service 窗口已打开" -ForegroundColor $GREEN
 Write-Host ""
 
 # Step 3: Start Web Service in a new window
-Write-Host "[3/3] 在新 PowerShell 窗口启动 Web Service..." -ForegroundColor $BLUE
+Write-Host "[3/3] 启动 Web Service..." -ForegroundColor $BLUE
 
 $webCommand = @"
 cd '$WEB_SERVICE_DIR'
@@ -98,7 +93,6 @@ if (-not (Test-Path 'node_modules')) {
 }
 Write-Host '✓ Web Service 依赖已安装' -ForegroundColor Green
 npm run dev
-Read-Host "按 Enter 键保持此窗口开放"
 "@
 
 Start-Process powershell -ArgumentList "-NoExit", "-Command", $webCommand -WindowStyle Normal
@@ -106,5 +100,14 @@ Start-Sleep -Seconds 1
 Write-Host "✓ Web Service 窗口已打开" -ForegroundColor $GREEN
 Write-Host ""
 
-Write-Host "========== 所有服务已在新窗口中启动 ==========" -ForegroundColor $YELLOW
-Write-Host "请检查各个 PowerShell 窗口以查看服务运行情况" -ForegroundColor $YELLOW
+Write-Host "========== 所有服务已启动 ==========" -ForegroundColor $YELLOW
+Write-Host ""
+Write-Host "服务访问地址：" -ForegroundColor $BLUE
+Write-Host "  📊 AI Orchestration   → http://localhost:8888" -ForegroundColor $BLUE
+Write-Host "  💾 Data Storage API   → http://localhost:8000 (Swagger: /docs)" -ForegroundColor $BLUE
+Write-Host "  🌐 Web Service        → http://localhost:5173" -ForegroundColor $BLUE
+Write-Host ""
+Write-Host "提示：" -ForegroundColor $YELLOW
+Write-Host "  • 查看日志：docker-compose logs -f [service_name]" -ForegroundColor $YELLOW
+Write-Host "  • 停止所有：docker-compose down（在各服务目录中）" -ForegroundColor $YELLOW
+Write-Host "  • 清理资源：docker system prune" -ForegroundColor $YELLOW

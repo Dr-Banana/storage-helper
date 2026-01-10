@@ -18,6 +18,40 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+    networks:
+      - storage-network
+
+  storage-helper-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: storage-helper-api
+    ports:
+      - "8000:8000"
+    environment:
+      DATABASE_URL: postgresql://postgres:root@postgres:5432/storage_helper
+      STORAGE_LOCAL_PATH: ./tmp
+      LOG_LEVEL: INFO
+      API_HOST: 0.0.0.0
+      API_PORT: 8000
+      API_RELOAD: false
+      JWT_SECRET_KEY: your-super-secret-key-change-this-in-production
+      JWT_ALGORITHM: HS256
+      ACCESS_TOKEN_EXPIRE_MINUTES: 1440
+      GOOGLE_CLIENT_ID: 1069161167424-dd8ar7257sjfdir81kfuqr5juade6te3.apps.googleusercontent.com
+    volumes:
+      - ./app:/app/app
+      - ./tmp:/app/tmp
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - storage-network
+    command: uvicorn main:app --host 0.0.0.0 --port 8000
 
 volumes:
   postgres_data:
+
+networks:
+  storage-network:
+    driver: bridge
