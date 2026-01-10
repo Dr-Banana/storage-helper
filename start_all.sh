@@ -48,7 +48,7 @@ echo -e "${BLUE}[3/3] 在新终端窗口启动 Web Service...${NC}"
 osascript <<EOF
 tell application "Terminal"
     activate
-    do script "cd '$WEB_SERVICE_DIR' && echo '✓ Web Service 目录已进入' && bash scripts/start_local.sh"
+    do script "cd '$WEB_SERVICE_DIR' && if [ ! -d 'node_modules' ]; then npm install; fi && echo '✓ Web Service 依赖已安装' && npm run dev"
 end tell
 EOF
 sleep 1

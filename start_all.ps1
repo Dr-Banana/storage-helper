@@ -92,8 +92,12 @@ Write-Host "[3/3] 在新 PowerShell 窗口启动 Web Service..." -ForegroundColo
 
 $webCommand = @"
 cd '$WEB_SERVICE_DIR'
-Write-Host '✓ Web Service 目录已进入' -ForegroundColor Green
-& .\scripts\start_local.ps1
+if (-not (Test-Path 'node_modules')) {
+    Write-Host '📦 安装 Web Service 依赖...' -ForegroundColor Cyan
+    npm install
+}
+Write-Host '✓ Web Service 依赖已安装' -ForegroundColor Green
+npm run dev
 Read-Host "按 Enter 键保持此窗口开放"
 "@
 
