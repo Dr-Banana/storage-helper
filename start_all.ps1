@@ -41,8 +41,8 @@ Write-Host ""
 
 # Initialize database before starting services
 Write-Host "[初始化] 初始化数据库..." -ForegroundColor $BLUE
-$initDbScript = Join-Path $DATA_STORAGE_DIR "scripts" "init-db.sh"
-bash $initDbScript
+$initDbScript = Join-Path $DATA_STORAGE_DIR "scripts\\init-db.ps1"
+& $initDbScript
 if ($LASTEXITCODE -ne 0) {
     Write-Host "❌ 数据库初始化失败" -ForegroundColor $RED
     exit 1
@@ -54,8 +54,10 @@ Write-Host "[1/3] 启动 AI Orchestration Service..." -ForegroundColor $BLUE
 
 $aiCommand = @"
 cd '$AI_SERVICE_DIR'
+Write-Host '停止并清理旧容器...' -ForegroundColor Cyan
 docker-compose down
-docker-compose up -d
+Write-Host '重新构建并启动服务...' -ForegroundColor Cyan
+docker-compose up -d --build
 Write-Host ''
 Write-Host '✓ AI Orchestration Service 已启动（端口 8888）' -ForegroundColor Green
 docker-compose logs -f
@@ -66,12 +68,17 @@ Start-Sleep -Seconds 2
 Write-Host "✓ AI Orchestration Service 窗口已打开" -ForegroundColor $GREEN
 Write-Host ""
 
+# ... (Step 1.5 保持不变)
+
 # Step 2: Start Data Storage Service in a new window
 Write-Host "[2/3] 启动 Data Storage Service..." -ForegroundColor $BLUE
 
 $dataStorageCommand = @"
 cd '$DATA_STORAGE_DIR'
-docker-compose up -d
+Write-Host '停止并清理旧容器...' -ForegroundColor Cyan
+docker-compose down
+Write-Host '重新构建并启动服务...' -ForegroundColor Cyan
+docker-compose up -d --build
 Write-Host ''
 Write-Host '✓ Data Storage Service 已启动（端口 8000）' -ForegroundColor Green
 docker-compose logs -f

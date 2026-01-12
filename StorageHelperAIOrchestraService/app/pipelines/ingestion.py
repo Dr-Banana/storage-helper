@@ -428,7 +428,8 @@ class IngestionPipeline:
                 ocr_text=ocr_text,
                 document_id=state.document_id,  # Pass document_id (can be None)
                 category_id=category_id,
-                location_id=location_id
+                location_id=location_id,
+                metadata=metadata
             )
             
             if process_result:
@@ -1232,7 +1233,9 @@ async def run_unified_ingestion_pipeline(
         # - For multi-page documents: Update first page (already processed in Step 2A) with recommendation
         # Skip in preview mode - user will confirm and upload later
         total_pages = len(page_results)
-        if not preview_mode and final_document_id and recommendation_result and recommendation_result.get("status") == "llm_success":
+        # BUG FIX: Allow single-page documents even if final_document_id is None (as it will be created here)
+        should_process_step_3b = not preview_mode and recommendation_result and recommendation_result.get("status") == "llm_success"
+        if should_process_step_3b and (final_document_id or total_pages == 1):
             rec_data = recommendation_result.get("recommendation", {})
             category_id = rec_data.get("category_id")
             location_id = rec_data.get("location_id") or rec_data.get("suggested_location_id")

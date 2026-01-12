@@ -73,21 +73,6 @@ def upload_document_image(
         )
 
 
-@router.post(
-    "/documents/process",
-    response_model=dict,
-    status_code=status.HTTP_201_CREATED,
-    summary="Process and persist document page metadata",
-    description="""
-    Save document page metadata to database.
-    Requires image_url from /documents/upload endpoint.
-    
-    - If document_id is provided, adds page to existing document
-    - If document_id is not provided, creates new document
-    
-    Returns document_id, page_id and status code
-    """
-)
 class DocumentProcessRequest(BaseModel):
     """Schema for processing a document page (structured JSON request)"""
 
@@ -103,11 +88,26 @@ class DocumentProcessRequest(BaseModel):
     category_id: Optional[int] = Field(None, description="Optional: Document category ID")
     location_id: Optional[int] = Field(None, description="Optional: Storage location ID (use -1 for no location)")
 
-    # Keep as optional field for compatibility, but we intentionally do not persist it.
+    # Optional extracted metadata JSON (will be persisted into Document.doc_metadata JSON)
     metadata: Optional[Dict[str, Any]] = Field(None, description="Optional: Extracted document metadata")
 
 
-def process_document_page(
+@router.post(
+    "/documents/process",
+    response_model=dict,
+    status_code=status.HTTP_201_CREATED,
+    summary="Process and persist document page metadata",
+    description="""
+    Save document page metadata to database.
+    Requires image_url from /documents/upload endpoint.
+    
+    - If document_id is provided, adds page to existing document
+    - If document_id is not provided, creates new document
+    
+    Returns document_id, page_id and status code
+    """
+)
+async def process_document_page(
     payload: DocumentProcessRequest,
     db: Session = Depends(get_db),
 ):
@@ -116,7 +116,7 @@ def process_document_page(
 
     Note:
     - This endpoint expects a JSON body for stability and clear typing.
-    - `metadata` is accepted for compatibility but is NOT persisted to DB.
+    - `metadata` (if provided) will be merged into Document.doc_metadata (JSON) for future retrieval.
     """
     try:
         # Process page and save to database
@@ -129,6 +129,7 @@ def process_document_page(
             document_id=payload.document_id,
             category_id=payload.category_id,
             location_id=payload.location_id,
+            metadata=payload.metadata,
         )
         
         # Determine status

@@ -132,7 +132,6 @@ const UploadPage = () => {
         
         // Show confirmation step
         setShowConfirmation(true)
-        console.log('Preview successful, showing confirmation:', result)
       } else {
         // Mark all files as failed when ingestion status is 'failed'
         files.forEach((file, index) => {
@@ -181,7 +180,6 @@ const UploadPage = () => {
       const result = await ingestionService.confirm(confirmRequest)
 
       if (result.status === 'success' || result.status === 'partial_success') {
-        console.log('Confirmation successful:', result)
         // Navigate to documents page after a short delay
         setTimeout(() => {
           navigate('/documents')
@@ -359,6 +357,21 @@ const UploadPage = () => {
                   </p>
                 </div>
               </div>
+
+              {/* Extracted Metadata Display */}
+              {ingestionResult.recommendation.metadata && Object.keys(ingestionResult.recommendation.metadata).length > 0 && (
+                <div className="mt-4 pt-4 border-t border-home-primary-200">
+                  <p className="text-xs text-home-text-light mb-2 uppercase tracking-wider font-semibold">Extracted Metadata</p>
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                    {Object.entries(ingestionResult.recommendation.metadata).map(([key, value]) => (
+                      <div key={key} className="flex flex-col p-2 bg-white rounded border border-home-primary-100">
+                        <span className="text-[10px] text-home-text-light font-medium uppercase">{key.replace(/_/g, ' ')}</span>
+                        <span className="text-sm text-home-text-dark font-medium">{String(value)}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
           )}
 

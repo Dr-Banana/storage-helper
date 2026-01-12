@@ -253,6 +253,9 @@ async def confirm_and_upload_document(request: IngestConfirmRequest):
                     location_id = -1
                 
                 # Process document page with user-modified data
+                metadata = None
+                if request.recommendation:
+                    metadata = request.recommendation.get("metadata")
                 process_result = await pipeline.pipeline_storage.process_document_page(
                     image_url=page_result.file_url,
                     owner_id=request.owner_id,
@@ -260,7 +263,8 @@ async def confirm_and_upload_document(request: IngestConfirmRequest):
                     ocr_text=page_result.ocr_text or "",
                     document_id=final_document_id,  # Use document_id from request or None (creates new)
                     category_id=category_id,
-                    location_id=location_id
+                    location_id=location_id,
+                    metadata=metadata
                 )
                 
                 if process_result:

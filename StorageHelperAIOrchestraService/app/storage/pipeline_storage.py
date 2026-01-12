@@ -358,7 +358,8 @@ class PipelineStorage:
         ocr_text: str = "",
         document_id: Optional[Union[int, str]] = None,
         category_id: Optional[int] = None,
-        location_id: Optional[int] = None
+        location_id: Optional[int] = None,
+        metadata: Optional[Dict[str, Any]] = None
     ) -> Optional[Dict[str, Any]]:
         """
         Process document page metadata via DataStorageService API.
@@ -424,6 +425,9 @@ class PipelineStorage:
             
             if location_id is not None:
                 process_payload["location_id"] = location_id
+            
+            if metadata is not None:
+                process_payload["metadata"] = metadata
             
             async with httpx.AsyncClient(base_url=base_url, timeout=30.0) as client:
                 process_response = await client.post(
