@@ -10,7 +10,6 @@ const UploadPage = () => {
   const { userId } = useAuth()
   const [files, setFiles] = useState<File[]>([])
   const [uploading, setUploading] = useState(false)
-  const [uploadProgress, setUploadProgress] = useState<Record<string, number>>({})
   const [uploadedFiles, setUploadedFiles] = useState<Set<string>>(new Set())
   const [uploadError, setUploadError] = useState<string | null>(null)
   const [ingestionResult, setIngestionResult] = useState<any>(null)
@@ -208,7 +207,6 @@ const UploadPage = () => {
     setSelectedCategoryId(null)
     setSelectedLocationId(null)
     setFiles([])
-    setUploadProgress({})
     setUploadedFiles(new Set())
     setUploadError(null)
     setCurrentStep('')
@@ -625,7 +623,6 @@ const UploadPage = () => {
           <button
             onClick={() => {
               setFiles([])
-              setUploadProgress({})
               setUploadedFiles(new Set())
               setUploadError(null)
               setIngestionResult(null)
