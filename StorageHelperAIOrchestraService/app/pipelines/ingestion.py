@@ -653,18 +653,19 @@ class IngestionPipeline:
         owner_id: int,
         document_id: Optional[int] = None,
         skip_persist: bool = False,
-        file_type: Optional[str] = None
+        file_type: Optional[str] = None,
+        on_progress: Optional[Callable[[str, float], Any]] = None
     ) -> Dict[str, Any]:
         """
-        Execute the complete ingestion pipeline.
-        
-        :param image_url: URL or path of the file to process (image or PDF).
-        :param owner_id: ID of the user who owns the document.
-        :param document_id: Optional existing document ID.
-        :param skip_persist: If True, skip the persistence step.
-        :param file_type: Type of file ("image" or "pdf"), auto-detected if not provided.
-        :return: Dictionary containing the processed document data.
+        Execute the complete ingestion pipeline with progress reporting.
         """
+        async def report_progress(step_name: str, progress: float):
+            if on_progress:
+                if asyncio.iscoroutinefunction(on_progress):
+                    await on_progress(step_name, progress)
+                else:
+                    on_progress(step_name, progress)
+
         # Auto-detect file type if not provided
         if not file_type:
             from app.modules.ocr import detect_file_type
@@ -679,49 +680,35 @@ class IngestionPipeline:
         )
         
         logger.info(f"Pipeline started for document_id={document_id}, processing {file_type} from: {image_url}")
+        await report_progress("Starting pipeline", 0.05)
         
         # Step 1: OCR
+        await report_progress("Extracting text (OCR)", 0.1)
         if not await self.step_ocr(state):
             return state.to_output_dict()
         
-        # Step 1B: Vision Enhancement (optional, based on configuration)
-        # Enhances understanding with multimodal AI - can see photos, logos, charts beyond OCR
+        # Step 1B: Vision Enhancement
+        await report_progress("AI Visual Analysis", 0.25)
         await self.step_vision_enhancement(state)
         
-        # Step 2: Cleaning (after OCR+Vision, before recommendation/embedding)
+        # Step 2: Cleaning
+        await report_progress("Cleaning extracted text", 0.4)
         await self.step_cleaning(state)
         
-        # Step 2B: Upload file to DataStorageService (after cleaning, so we can use cleaned_text)
+        # Step 2B: Upload file
+        await report_progress("Uploading file to storage", 0.5)
         await self.step_upload_file(state, page_number=1)
         
-        # Step 3: Recommendation and Embedding (run in parallel)
-        logger.info("STEP 3: Running Recommendation and Embedding in parallel...")
-        
-        # Run recommendation and embedding concurrently
+        # Step 3: Recommendation and Embedding
+        await report_progress("AI Recommendation & Embedding", 0.65)
         recommendation_task = asyncio.create_task(self.step_recommendation(state))
         embedding_task = asyncio.create_task(self.step_embedding(state))
         
-        # Wait for both to complete (they can fail independently)
-        recommendation_result, embedding_result = await asyncio.gather(
-            recommendation_task,
-            embedding_task,
-            return_exceptions=True
-        )
+        await asyncio.gather(recommendation_task, embedding_task, return_exceptions=True)
         
-        # Log results
-        if isinstance(recommendation_result, Exception):
-            logger.error(f"Recommendation task failed: {recommendation_result}")
-        if isinstance(embedding_result, Exception):
-            logger.error(f"Embedding task failed: {embedding_result}")
-        
-        logger.info("STEP 3: Recommendation and Embedding completed (parallel execution)")
-        
-        # Step 3C: Save embedding to DataStorageService via API
-        # This should be done after pages are processed (document_id is available)
-        # Only track embedding_save_error when a save operation is actually attempted and fails
-        # Do not set error when save wasn't attempted due to missing preconditions
+        # Step 3C: Save embedding
         if state.document_id and state.embedding_result and state.embedding_result.is_successful:
-            # All preconditions met - attempt to save embedding
+            await report_progress("Saving vector embeddings", 0.8)
             try:
                 # Convert document_id to int if needed
                 doc_id = state.document_id
@@ -729,15 +716,12 @@ class IngestionPipeline:
                     try:
                         doc_id = int(doc_id)
                     except (ValueError, TypeError):
-                        # Precondition check failed - cannot convert document_id
-                        # Don't set embedding_save_error as no save was attempted
                         logger.warning(f"Could not convert document_id '{doc_id}' to int for embedding save - skipping save")
                         doc_id = None
                 
                 if doc_id and isinstance(doc_id, int):
                     embedding_vector = state.embedding_result.vector
                     if embedding_vector and len(embedding_vector) == 768:
-                        # Actually attempt to save - this is where we track failures
                         save_success = await self.pipeline_storage.save_document_embedding(
                             document_id=doc_id,
                             embedding=embedding_vector
@@ -745,57 +729,32 @@ class IngestionPipeline:
                         if save_success:
                             logger.info(f"Document embedding saved successfully via API for document_id={doc_id}")
                         else:
-                            # Save was attempted but failed - track this as an error
                             error_msg = f"Failed to save document embedding via API for document_id={doc_id}"
                             logger.warning(error_msg)
                             state.embedding_save_error = error_msg
                     else:
-                        # Precondition check failed - dimension mismatch
-                        # Don't set embedding_save_error as no save was attempted
                         logger.warning(f"Embedding vector dimension mismatch: expected 768, got {len(embedding_vector) if embedding_vector else 0} - skipping save")
                 else:
-                    # Precondition check failed - invalid document_id
-                    # Don't set embedding_save_error as no save was attempted
                     logger.warning(f"Invalid document_id for embedding save: {state.document_id} - skipping save")
             except Exception as e:
-                # Exception during save attempt - track as error
-                # This exception occurred during the save attempt, so it's a real failure
                 error_msg = f"Error saving document embedding via API: {str(e)}"
                 logger.error(error_msg, exc_info=True)
                 state.embedding_save_error = error_msg
-                # Don't fail the pipeline if embedding save fails, but track the error
         else:
-            # Save wasn't attempted due to missing preconditions - don't set embedding_save_error
-            # These are expected conditions, not errors
             if not state.document_id:
-                logger.info("Skipping embedding save: document_id not available (this is expected for failed page processing)")
+                logger.info("Skipping embedding save: document_id not available")
             elif not state.embedding_result or not state.embedding_result.is_successful:
-                logger.info("Skipping embedding save: embedding generation failed or not successful (this is expected when embedding generation fails)")
-        
-        # Step 4B: Process document page metadata (after all pipeline processing is complete)
-        # This sends structured results and file storage path to /documents/process API
+                logger.info("Skipping embedding save: embedding generation failed")
+
+        # Step 4B: Process document page metadata
+        await report_progress("Finalizing document metadata", 0.9)
         await self.step_process_document(state, page_number=1)
         
         # Step 4: Persistence
+        await report_progress("Completing processing", 1.0)
         if not skip_persist:
-            # Check if pipeline failed at any critical step
-            is_failed = state.status in [
-                "failed",              # OCR failed
-                "ocr_failed",          # OCR failed explicitly
-                "recommendation_failed",  # Recommendation failed
-                "embedding_failed"     # Embedding failed (optional but tracked)
-            ]
-            
-            if is_failed:
-                logger.error(f"Pipeline failed with status: {state.status}")
-                logger.warning("Saving to error directory for debugging and potential retry...")
-                # Save to error directory
-                await self.step_persist(state, is_error=True)
-            else:
-                # Normal persistence
-                await self.step_persist(state, is_error=False)
+            await self.step_persist(state, is_error=(state.status == "failed"))
         
-        logger.info(f"Pipeline completed with status: {state.status}")
         return state.to_output_dict()
 
 
@@ -827,27 +786,25 @@ async def run_unified_ingestion_pipeline(
     owner_id: int,
     document_id: Optional[int] = None,
     file_type: Optional[str] = None,
-    preview_mode: bool = False
+    preview_mode: bool = False,
+    on_progress: Optional[Callable[[str, float], Any]] = None
 ) -> Dict[str, Any]:
     """
-    Unified ingestion pipeline for processing files (single or multiple PDFs, images, or mixed).
-    
-    This function handles both single file and batch processing:
-    1. Processes files (PDFs are split into pages, images are treated as single pages)
-    2. Assigns page numbers sequentially across all files
-    3. Creates a document on the first page, uses the same document_id for subsequent pages
-    4. Processes all pages in parallel (OCR + Cleaning + Upload)
-    5. Runs Recommendation and Embedding on combined text from all pages
-    6. If preview_mode=False, processes document pages to database
-    If preview_mode=True, skips database processing and returns preview results for user confirmation
-    
-    :param file_urls: List of file URLs to process (images or PDFs). Can be single file [url] or multiple files [url1, url2, ...]
-    :param owner_id: ID of the user who owns the document
-    :param document_id: Optional existing document ID
-    :param file_type: Optional file type override ("image" or "pdf"). Only used for single file uploads to override auto-detection.
-    :param preview_mode: If True, skip database processing and return preview results. If False, process to database immediately.
-    :return: Dictionary containing processing results with total_pages, successful_pages, failed_pages, page_results
+    Unified ingestion pipeline with progress reporting.
     """
+    async def report_progress(step_name: str, progress: float):
+        if on_progress:
+            try:
+                if asyncio.iscoroutinefunction(on_progress):
+                    await on_progress(step_name, progress)
+                else:
+                    # Handle both regular functions and async functions that might not be detected by iscoroutinefunction
+                    result = on_progress(step_name, progress)
+                    if asyncio.iscoroutine(result):
+                        await result
+            except Exception as e:
+                logger.error(f"Error in on_progress callback: {e}")
+
     from app.modules.ocr import detect_file_type
     from app.modules.pdf_processor import convert_pdf_to_images
     from pathlib import Path
@@ -856,17 +813,16 @@ async def run_unified_ingestion_pipeline(
     from PIL import Image
     
     logger.info(f"Starting unified ingestion for {len(file_urls)} files, owner_id={owner_id}, document_id={document_id}")
-    logger.info(f"File URLs: {file_urls}")
+    await report_progress("Initializing workflow", 0.02)
     
     pipeline = _default_pipeline
-    # page_tasks: List of tuples
-    # (global_page_index, ocr_source_path, file_type, file_image_url, page_number_within_file)
     page_tasks = []
-    temp_files = []  # Track temporary files for cleanup
-    current_page_global = 1  # Global page index, only for internal sorting/mapping
+    temp_files = []
+    current_page_global = 1
     
     try:
-        # Step 1: Process all files and split PDFs into pages
+        # Step 1: Process all files
+        await report_progress("Preprocessing files", 0.05)
         for idx, file_url in enumerate(file_urls):
             # Use provided file_type for single file uploads, otherwise auto-detect
             if len(file_urls) == 1 and file_type:
@@ -976,7 +932,10 @@ async def run_unified_ingestion_pipeline(
             }
         
         total_pages = len(page_tasks)
-        logger.info(f"Total pages to process: {total_pages}")
+        is_single_page = total_pages == 1
+        logger.info(f"Total pages to process: {total_pages}, is_single_page: {is_single_page}")
+        await report_progress(f"Starting analysis of {total_pages} pages", 0.15)
+
         
         # Step 2: Establish document_id before processing remaining pages
         # Strategy: Process first page synchronously to get document_id, then process remaining pages in parallel
@@ -1103,15 +1062,10 @@ async def run_unified_ingestion_pipeline(
                 }, None)
         
         # Step 2A: Process first page synchronously to establish document_id
-        # This ensures document_id is available before processing remaining pages
-        # IMPORTANT: For single-page documents, we defer processing until after recommendation
-        # For multi-page documents, we process first page immediately to establish document_id
-        total_pages = len(page_tasks)
-        is_single_page = total_pages == 1
-        logger.info(f"Total pages identified: {total_pages}, is_single_page={is_single_page}, page_tasks_len={len(page_tasks)}")
-        
         if page_tasks:
+            await report_progress("OCR & Visual Analysis", 0.3)
             first_page_info = page_tasks[0]
+
             logger.info(f"Processing first page synchronously to establish document_id (current: {final_document_id}, total_pages: {total_pages}, is_single_page: {is_single_page})...")
             first_page_result, first_page_state = await process_single_page(first_page_info, use_document_id=final_document_id)
             page_results.append(first_page_result)
@@ -1159,9 +1113,10 @@ async def run_unified_ingestion_pipeline(
                         logger.info(f"Single-page document detected - deferring first page processing until after recommendation")
         
         # Step 2B: Process remaining pages in parallel (if any)
-        # All pages now use the established document_id from first page
         if len(page_tasks) > 1:
+            await report_progress(f"Processing remaining {len(page_tasks)-1} pages", 0.5)
             remaining_pages = page_tasks[1:]
+
             logger.info(f"Processing remaining {len(remaining_pages)} pages in parallel (using document_id: {final_document_id})...")
             remaining_tasks = [
                 process_single_page(page_info, use_document_id=final_document_id) 
@@ -1201,6 +1156,7 @@ async def run_unified_ingestion_pipeline(
         embedding_result = None
         
         if successful_pages > 0 and all_cleaned_texts:
+            await report_progress("AI Classification & Indexing", 0.75)
             # Combine text from all pages
             combined_text = "\n\n".join([f"[Page {pnum}]\n{text}" for pnum, text in sorted(all_cleaned_texts)])
             
@@ -1228,12 +1184,12 @@ async def run_unified_ingestion_pipeline(
                 embedding_result = None
         
         # Step 3B: Process/Update document with recommendation data (category and location)
-        # IMPORTANT: 
-        # - For single-page documents: Process first page here (deferred from Step 2A) with recommendation
-        # - For multi-page documents: Update first page (already processed in Step 2A) with recommendation
-        # Skip in preview mode - user will confirm and upload later
         total_pages = len(page_results)
+        if not preview_mode:
+            await report_progress("Finalizing storage details", 0.85)
+        
         # BUG FIX: Allow single-page documents even if final_document_id is None (as it will be created here)
+
         should_process_step_3b = not preview_mode and recommendation_result and recommendation_result.get("status") == "llm_success"
         if should_process_step_3b and (final_document_id or total_pages == 1):
             rec_data = recommendation_result.get("recommendation", {})
@@ -1567,6 +1523,7 @@ async def run_unified_ingestion_pipeline(
             response["embedding"] = embedding_result.vector
             response["embedding_dimension"] = embedding_result.dimension
         
+        await report_progress("Ready for review", 1.0)
         logger.info(f"Batch ingestion complete: {successful_pages}/{total_pages} pages successful, document_id={final_document_id if final_document_id else 'None'}")
         return response
         

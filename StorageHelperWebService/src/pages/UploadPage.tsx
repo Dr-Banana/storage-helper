@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Upload, FileText, Image, X, CheckCircle, AlertCircle, Eye, Edit2 } from 'lucide-react'
+import { Upload, FileText, Image, X, CheckCircle, AlertCircle, Eye, Edit2, Loader } from 'lucide-react'
 import { ingestionService, categoryService, locationService, DocumentCategory, StorageLocation, CategoryTypeInfo } from '../api/services'
 import apiClient from '../api/client'
 import { useAuth } from '../contexts/AuthContext'
@@ -14,6 +14,10 @@ const UploadPage = () => {
   const [uploadedFiles, setUploadedFiles] = useState<Set<string>>(new Set())
   const [uploadError, setUploadError] = useState<string | null>(null)
   const [ingestionResult, setIngestionResult] = useState<any>(null)
+  
+  // Workflow progress states
+  const [currentStep, setCurrentStep] = useState<string>('')
+  const [workflowProgress, setWorkflowProgress] = useState<number>(0)
   
   // Confirmation step states
   const [showConfirmation, setShowConfirmation] = useState(false)
@@ -80,77 +84,79 @@ const UploadPage = () => {
     setUploading(true)
     setUploadError(null)
     setIngestionResult(null)
+    setCurrentStep('Initializing...')
+    setWorkflowProgress(5)
 
     try {
-      // Initialize progress for all files
-      const progressUpdates: Record<string, number> = {}
-      files.forEach((file, index) => {
-        const fileKey = `${file.name}-${index}`
-        progressUpdates[fileKey] = 10 // Initial progress
-      })
-      setUploadProgress(progressUpdates)
+      const formData = new FormData()
+      files.forEach((file) => formData.append('files', file))
+      formData.append('owner_id', userId.toString())
 
-      // Call ingestion API with all files
-      const result = await ingestionService.ingest({
-        files: files,
-        owner_id: userId,
-        // document_id and file_type are optional
+      // Use native fetch for streaming SSE
+      const apiUrl = import.meta.env.VITE_API_URL || 'http://localhost:8888'
+      const response = await fetch(`${apiUrl}/api/v1/ingestion/stream`, {
+        method: 'POST',
+        body: formData,
       })
 
-      setIngestionResult(result)
+      if (!response.ok) {
+        throw new Error(`Server error: ${response.status}`)
+      }
 
-      // Check if ingestion was successful
-      if (result.status === 'success' || result.status === 'partial_success') {
-        // Update progress to 100% (preview complete)
-        files.forEach((file, index) => {
-          const fileKey = `${file.name}-${index}`
-          progressUpdates[fileKey] = 100
-        })
-        setUploadProgress(progressUpdates)
-        
-        // Initialize category and location from recommendation
-        const rec = result.recommendation || {}
-        // Ensure category_id is set from recommendation (default selection)
-        setSelectedCategoryId(rec.category_id || null)
-        // location_id can be -1 (no location) or a number, or null/undefined
-        const recommendedLocationId = rec.location_id
-        if (recommendedLocationId === -1 || recommendedLocationId === null || recommendedLocationId === undefined) {
-          setSelectedLocationId(-1) // -1 means no location
-        } else {
-          setSelectedLocationId(recommendedLocationId)
-        }
-        
-        // Reload categories to ensure we have the latest (including any newly created by recommendation)
-        if (userId) {
-          try {
-            const categoriesRes = await categoryService.getByUserId(userId)
-            setCategories(categoriesRes.categories || [])
-          } catch (error) {
-            console.error('Failed to reload categories:', error)
+      const reader = response.body?.getReader()
+      const decoder = new TextDecoder()
+      
+      if (!reader) throw new Error('ReadableStream not supported')
+
+      let buffer = ''
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+
+        buffer += decoder.decode(value, { stream: true })
+        const lines = buffer.split('\n\n')
+        buffer = lines.pop() || ''
+
+        for (const line of lines) {
+          if (line.trim().startsWith('data: ')) {
+            const jsonStr = line.replace('data: ', '').trim()
+            try {
+              const event = JSON.parse(jsonStr)
+              
+              if (event.type === 'progress') {
+                setCurrentStep(event.step)
+                setWorkflowProgress(Math.round(event.progress * 100))
+              } else if (event.type === 'result') {
+                const result = event.data
+                setIngestionResult(result)
+                
+                if (result.status === 'success' || result.status === 'partial_success') {
+                  setWorkflowProgress(100)
+                  setCurrentStep('Complete!')
+                  const rec = result.recommendation || {}
+                  setSelectedCategoryId(rec.category_id || null)
+                  
+                  const recommendedLocationId = rec.location_id
+                  setSelectedLocationId(recommendedLocationId === -1 || !recommendedLocationId ? -1 : recommendedLocationId)
+                  
+                  // Reload categories to ensure we have the latest
+                  categoryService.getByUserId(userId).then(res => setCategories(res.categories || []))
+                  setShowConfirmation(true)
+                } else {
+                  setUploadError(`Ingestion failed: ${result.status}`)
+                }
+              } else if (event.type === 'error') {
+                throw new Error(event.message)
+              }
+            } catch (e) {
+              console.error('Error parsing SSE event:', e)
+            }
           }
         }
-        
-        // Show confirmation step
-        setShowConfirmation(true)
-      } else {
-        // Mark all files as failed when ingestion status is 'failed'
-        files.forEach((file, index) => {
-          const fileKey = `${file.name}-${index}`
-          progressUpdates[fileKey] = 0
-        })
-        setUploadProgress(progressUpdates)
-        setUploadError(`Ingestion failed: ${result.status}`)
-        console.error('Ingestion failed:', result)
       }
     } catch (error: any) {
-      console.error('Failed to process documents:', error)
-      setUploadError(error.response?.data?.detail || error.message || 'Failed to process documents')
-      
-      // Mark all files as failed
-      files.forEach((file, index) => {
-        const fileKey = `${file.name}-${index}`
-        setUploadProgress((prev) => ({ ...prev, [fileKey]: 0 }))
-      })
+      console.error('Workflow failed:', error)
+      setUploadError(error.message || 'Failed to process documents')
     } finally {
       setUploading(false)
     }
@@ -205,6 +211,8 @@ const UploadPage = () => {
     setUploadProgress({})
     setUploadedFiles(new Set())
     setUploadError(null)
+    setCurrentStep('')
+    setWorkflowProgress(0)
   }
 
   const getFileIcon = (file: File) => {
@@ -217,6 +225,44 @@ const UploadPage = () => {
   return (
     <div className="max-w-4xl mx-auto">
       <h1 className="text-3xl font-bold text-home-text-dark mb-6">Upload Document</h1>
+
+      {/* Processing Overlay */}
+      {uploading && (
+        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-home p-8 max-w-md w-full shadow-2xl">
+            <div className="flex flex-col items-center text-center">
+              <div className="w-16 h-16 bg-home-primary-100 rounded-full flex items-center justify-center mb-4">
+                <Loader className="text-home-primary-600 animate-spin" size={32} />
+              </div>
+              <h2 className="text-xl font-bold text-home-text-dark mb-2">AI Workflow in Progress</h2>
+              <p className="text-home-text-light mb-6">{currentStep}</p>
+              
+              <div className="w-full bg-home-primary-100 rounded-full h-3 mb-2">
+                <div 
+                  className="bg-home-primary-500 h-3 rounded-full transition-all duration-500 ease-out"
+                  style={{ width: `${workflowProgress}%` }}
+                />
+              </div>
+              <p className="text-sm font-semibold text-home-primary-600">{workflowProgress}%</p>
+              
+              <div className="mt-8 grid grid-cols-1 gap-2 w-full text-left">
+                <div className={`flex items-center gap-2 text-sm ${workflowProgress > 10 ? 'text-home-success-600 font-medium' : 'text-home-text-light'}`}>
+                  <CheckCircle size={16} className={workflowProgress > 10 ? 'opacity-100' : 'opacity-20'} />
+                  <span>Preprocessing Files</span>
+                </div>
+                <div className={`flex items-center gap-2 text-sm ${workflowProgress > 25 ? 'text-home-success-600 font-medium' : 'text-home-text-light'}`}>
+                  <CheckCircle size={16} className={workflowProgress > 25 ? 'opacity-100' : 'opacity-20'} />
+                  <span>OCR & Visual Analysis</span>
+                </div>
+                <div className={`flex items-center gap-2 text-sm ${workflowProgress > 65 ? 'text-home-success-600 font-medium' : 'text-home-text-light'}`}>
+                  <CheckCircle size={16} className={workflowProgress > 65 ? 'opacity-100' : 'opacity-20'} />
+                  <span>AI Classification & Indexing</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* File upload area */}
       <div className="card mb-6">
@@ -257,7 +303,6 @@ const UploadPage = () => {
             {files.map((file, index) => {
               const fileKey = `${file.name}-${index}`
               const isUploaded = uploadedFiles.has(fileKey)
-              const progress = uploadProgress[fileKey] || 0
 
               return (
                 <div
@@ -272,14 +317,6 @@ const UploadPage = () => {
                     <p className="text-xs text-home-text-light">
                       {(file.size / 1024 / 1024).toFixed(2)} MB
                     </p>
-                    {uploading && !isUploaded && (
-                      <div className="mt-2 w-full bg-home-primary-100 rounded-full h-2">
-                        <div
-                          className="bg-home-primary-500 h-2 rounded-full transition-all duration-300"
-                          style={{ width: `${progress}%` }}
-                        />
-                      </div>
-                    )}
                   </div>
                   {isUploaded ? (
                     <CheckCircle className="text-home-success-500" size={24} />
@@ -389,33 +426,25 @@ const UploadPage = () => {
                   return
                 }
                 
-                // Check if it's a category_id (number) or category_code (string)
                 const categoryId = parseInt(value)
                 if (!isNaN(categoryId)) {
-                  // It's a category_id from database
                   setSelectedCategoryId(categoryId)
                 } else {
-                  // It's a category_code - need to create or find the category
                   const categoryType = categoryTypes.find(ct => ct.code === value)
                   if (categoryType) {
-                    // Check if category already exists
                     let existingCategory = categories.find(cat => cat.code === categoryType.code)
-                    
                     if (!existingCategory && userId) {
-                      // Create the category
                       try {
                         await apiClient.post(`/users/${userId}/categories`, {
                           code: categoryType.code,
                           name: categoryType.name,
                           description: categoryType.description
                         })
-                        // Reload categories
                         const categoriesRes = await categoryService.getByUserId(userId)
                         setCategories(categoriesRes.categories || [])
                         existingCategory = categoriesRes.categories.find(cat => cat.code === categoryType.code)
                       } catch (error: any) {
                         console.error('Failed to create category:', error)
-                        // If category already exists, try to reload and find it
                         if (error.response?.status === 400 && userId) {
                           const categoriesRes = await categoryService.getByUserId(userId)
                           setCategories(categoriesRes.categories || [])
@@ -426,7 +455,6 @@ const UploadPage = () => {
                         }
                       }
                     }
-                    
                     if (existingCategory) {
                       setSelectedCategoryId(existingCategory.id)
                     }
@@ -436,13 +464,11 @@ const UploadPage = () => {
               className="input"
             >
               <option value="">-- Select Category --</option>
-              {/* Show categories from database */}
               {categories.map((cat) => (
                 <option key={cat.id} value={cat.id}>
                   {cat.name} ({cat.code})
                 </option>
               ))}
-              {/* Show all available category types that are not in database yet */}
               {categoryTypes
                 .filter(catType => !categories.some(cat => cat.code === catType.code))
                 .map((catType) => (

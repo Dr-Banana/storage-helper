@@ -1,9 +1,12 @@
-from fastapi import APIRouter, HTTPException, BackgroundTasks, UploadFile, File, Form
-from fastapi.responses import JSONResponse
+from fastapi import APIRouter, HTTPException, BackgroundTasks, UploadFile, File, Form, Request
+from fastapi.responses import JSONResponse, StreamingResponse
 import logging
-from typing import List, Optional
+import json
+import asyncio
+from typing import List, Optional, Dict, Any
 import tempfile
 import os
+import shutil
 from app.api.schemas import (
     IngestResponse, 
     FeedbackRequest, FeedbackResponse,
@@ -17,6 +20,110 @@ from app.storage.pipeline_storage import PipelineStorage
 
 logger = logging.getLogger(__name__)
 api_router = APIRouter()
+
+
+@api_router.post("/ingestion/stream")
+async def process_document_stream(
+    request: Request,
+    files: List[UploadFile] = File(..., description="Document files to process"),
+    owner_id: int = Form(..., description="Document owner user ID"),
+    document_id: str = Form("", description="Optional existing document ID"),
+    file_type: str = Form("", description="Optional file type override")
+):
+    """
+    [Ingestion Pipeline with Stream]
+    Process document(s) and stream real-time progress updates via SSE.
+    """
+    from app.pipelines.ingestion import run_unified_ingestion_pipeline
+    
+    temp_files = []
+    temp_dir = tempfile.mkdtemp(prefix="ingestion_stream_")
+    temp_files.append(temp_dir)
+
+    # Save files locally for pipeline processing
+    file_paths = []
+    for idx, uploaded_file in enumerate(files):
+        filename = uploaded_file.filename or f"file_{idx}"
+        file_ext = os.path.splitext(filename)[1] or ".bin"
+        temp_file_path = os.path.join(temp_dir, f"uploaded_{idx}{file_ext}")
+        file_content = await uploaded_file.read()
+        with open(temp_file_path, "wb") as f:
+            f.write(file_content)
+        file_paths.append(temp_file_path)
+
+    # Normalize IDs
+    normalized_document_id = None
+    if document_id and document_id.strip():
+        try:
+            normalized_document_id = int(document_id.strip())
+        except ValueError:
+            pass
+
+    async def event_generator():
+        queue = asyncio.Queue()
+        
+        # Progress callback that puts messages into the queue
+        async def on_progress(step: str, progress: float):
+            logger.info(f"Stream progress update: {step} ({progress*100}%)")
+            await queue.put({"type": "progress", "step": step, "progress": progress})
+
+        # Run the pipeline in a separate task
+        async def run_pipeline():
+            try:
+                result = await run_unified_ingestion_pipeline(
+                    file_urls=file_paths,
+                    owner_id=owner_id,
+                    document_id=normalized_document_id,
+                    file_type=file_type.strip() if file_type else None,
+                    preview_mode=True,
+                    on_progress=on_progress
+                )
+                await queue.put({"type": "result", "data": result})
+            except Exception as e:
+                logger.error(f"Stream ingestion failed: {e}", exc_info=True)
+                await queue.put({"type": "error", "message": str(e)})
+            finally:
+                # Signal completion
+                await queue.put(None)
+
+        # Start pipeline task
+        pipeline_task = asyncio.create_task(run_pipeline())
+
+        try:
+            while True:
+                msg = await queue.get()
+                if msg is None:
+                    break
+                
+                data = json.dumps(msg)
+                yield f"data: {data}\n\n"
+                # Add a tiny delay to ensure messages are sent separately and UI can update
+                await asyncio.sleep(0.05)
+        finally:
+            # Cleanup task if it's still running
+            if not pipeline_task.done():
+                pipeline_task.cancel()
+                try:
+                    await pipeline_task
+                except asyncio.CancelledError:
+                    pass
+            
+            # Cleanup files
+            for path in temp_files:
+                try:
+                    if os.path.isfile(path): os.remove(path)
+                    elif os.path.isdir(path): shutil.rmtree(path)
+                except: pass
+
+    return StreamingResponse(
+        event_generator(), 
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",  # Disable buffering for Nginx
+        }
+    )
 
 
 @api_router.post("/ingestion", response_model=IngestResponse)
