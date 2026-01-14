@@ -15,6 +15,7 @@ logger = logging.getLogger(__name__)
 
 # Field type and description mapping
 FIELD_SPEC = {
+    # Basic Document Fields
     "issuer_name": (str, "The organization or person who issued the document (e.g., 'Amazon', 'IRS')"),
     "tax_year": (int, "The tax year the document pertains to (e.g., 2023)"),
     "item_count": (int, "Number of items"),
@@ -25,6 +26,16 @@ FIELD_SPEC = {
     "due_date": (str, "Payment due date in ISO 8601 format (YYYY-MM-DD)"),
     "service_date": (str, "Service date in ISO 8601 format (YYYY-MM-DD)"),
     "degree_date": (str, "Degree/graduation date in ISO 8601 format (YYYY-MM-DD)"),
+    
+    # Kitchen Agent Specific Fields
+    "product_name": (str, "Full name of the kitchen item or product"),
+    "manufacturer": (str, "The brand or producer of the item"),
+    "production_date": (str, "Date of manufacture in ISO 8601 format (YYYY-MM-DD)"),
+    "shelf_life": (str, "Original shelf life duration (e.g., '18 months', '60 days')"),
+    "shelf_life_after_opening": (str, "Shelf life after the product is opened (e.g., '3 months')"),
+    "quantity": (str, "Net weight, volume or number of items (e.g., '500ml', '2kg', '6pk')"),
+    "unit": (str, "Measurement unit (e.g., 'ml', 'g', 'pcs')"),
+    "storage_requirement": (str, "Recommended storage conditions (e.g., 'Refrigerated', 'Room Temperature')"),
 }
 
 def _get_schema_for_fields(category_code: str, fields: List[str]) -> Type[BaseModel]:
@@ -82,9 +93,13 @@ class MetadataExtractor:
         :param fields: Explicit list of fields to extract (restricts the AI)
         :param llm_metadata: Initial metadata to merge
         """
+        # Handle Kitchen Receipt special case
+        if category_code.upper() in ["RECEIPT", "REC"]:
+            return self.extract_kitchen_receipt(text)
+
         if not fields:
             from app.core.category_config import CATEGORY_METADATA_FIELDS
-            fields = CATEGORY_METADATA_FIELDS.get(category_code.upper(), ["issuer_name", "issue_date"])
+            fields = CATEGORY_METADATA_FIELDS.get(category_code, ["product_name", "expiry_date"])
 
         schema = _get_schema_for_fields(category_code, fields)
         try:
@@ -95,7 +110,7 @@ class MetadataExtractor:
                     {
                         "role": "system", 
                         "content": (
-                            "You are a strict document metadata extractor. "
+                            "You are a strict kitchen inventory metadata extractor. "
                             f"EXTRACT ONLY the following fields: [{fields_str}]. "
                             "Do not hallucinate or extract other fields. "
                             "Use ISO 8601 for dates. Use null if a field is not found."
@@ -104,11 +119,29 @@ class MetadataExtractor:
                     {"role": "user", "content": f"Extract metadata for {category_code} from this text:\n\n{text[:5000]}"},
                 ],
             )
-            res = extracted.model_dump(exclude_none=True)
+            res = extracted.model_dump()
             return {**(llm_metadata or {}), **res}
         except Exception as e:
             logger.error(f"Extraction failed for {category_code}: {e}")
             return llm_metadata or {}
+
+    def extract_kitchen_receipt(self, text: str) -> Dict[str, Any]:
+        """
+        Specialized extraction for kitchen receipts.
+        """
+        from app.schema.kitchen import ReceiptResult, KITCHEN_RECEIPT_PROMPT
+        try:
+            extracted = self.client.chat.completions.create(
+                response_model=ReceiptResult,
+                messages=[
+                    {"role": "system", "content": KITCHEN_RECEIPT_PROMPT},
+                    {"role": "user", "content": f"Extract kitchen inventory from this receipt text:\n\n{text[:10000]}"},
+                ],
+            )
+            return extracted.model_dump()
+        except Exception as e:
+            logger.error(f"Kitchen receipt extraction failed: {e}")
+            return {}
 
 # Global instance
 _instance = None

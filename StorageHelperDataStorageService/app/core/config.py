@@ -56,7 +56,10 @@ class Settings(BaseSettings):
     APP_ENV: str = "local"
     
     # Database
-    DATABASE_URL: str = "postgresql://postgres:root@localhost:5432/storage_helper"
+    DATABASE_URL: str = os.getenv(
+        "DATABASE_URL", 
+        "postgresql://postgres:root@postgres:5432/storage_helper"
+    )
     
     # Supabase (for storage)
     SUPABASE_URL: Optional[str] = None

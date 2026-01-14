@@ -4,6 +4,7 @@ import { Upload, FileText, Image, X, CheckCircle, AlertCircle, Eye, Edit2, Loade
 import { ingestionService, categoryService, locationService, DocumentCategory, StorageLocation, CategoryTypeInfo } from '../api/services'
 import apiClient from '../api/client'
 import { useAuth } from '../contexts/AuthContext'
+import MetadataViewer from '../components/metadata/MetadataViewer'
 
 const UploadPage = () => {
   const navigate = useNavigate()
@@ -396,15 +397,21 @@ const UploadPage = () => {
               {/* Extracted Metadata Display */}
               {ingestionResult.recommendation.metadata && Object.keys(ingestionResult.recommendation.metadata).length > 0 && (
                 <div className="mt-4 pt-4 border-t border-home-primary-200">
-                  <p className="text-xs text-home-text-light mb-2 uppercase tracking-wider font-semibold">Extracted Metadata</p>
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                    {Object.entries(ingestionResult.recommendation.metadata).map(([key, value]) => (
-                      <div key={key} className="flex flex-col p-2 bg-white rounded border border-home-primary-100">
-                        <span className="text-[10px] text-home-text-light font-medium uppercase">{key.replace(/_/g, ' ')}</span>
-                        <span className="text-sm text-home-text-dark font-medium">{String(value)}</span>
-                      </div>
-                    ))}
-                  </div>
+                  <p className="text-xs text-home-text-light mb-3 uppercase tracking-wider font-semibold">Extracted Metadata</p>
+                  <MetadataViewer 
+                    metadata={ingestionResult.recommendation.metadata} 
+                    categoryCode={ingestionResult.recommendation.category_code}
+                    isEditing={true}
+                    onMetadataChange={(newMetadata) => {
+                      setIngestionResult({
+                        ...ingestionResult,
+                        recommendation: {
+                          ...ingestionResult.recommendation,
+                          metadata: newMetadata
+                        }
+                      });
+                    }}
+                  />
                 </div>
               )}
             </div>

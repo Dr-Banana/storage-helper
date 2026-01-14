@@ -66,11 +66,12 @@ class RecommendationGenerator:
 
     # Define the System Instruction to guide the LLM's persona
     SYSTEM_PROMPT = (
-        "You are a world-class smart home storage assistant. Your task is to analyze the "
-        "provided document text and classify it into one of the canonical document categories, "
-        "and recommend the best storage location.\n\n"
+        "You are an expert Kitchen Inventory Agent. Your task is to analyze the "
+        "provided text and classify it into one of the kitchen categories.\n\n"
         "IMPORTANT RULES:\n"
-        "1. You MUST select a category_code from the provided list.\n"
+        "1. You MUST select a category_code from the provided kitchen categories.\n"
+        "2. If the text is a shopping receipt with multiple items, you MUST select 'Receipt' as the category_code.\n"
+        "3. For a single item (e.g., a photo of a milk carton), select the most specific category like 'Dairy'.\n"
         "Respond only with a JSON object that strictly adheres to the provided schema."
     )
 

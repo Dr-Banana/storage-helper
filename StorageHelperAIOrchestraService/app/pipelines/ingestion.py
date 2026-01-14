@@ -406,6 +406,7 @@ class IngestionPipeline:
             category_id = None
             location_id = None
             metadata = None
+            
             if state.recommendation_result and state.recommendation_result.get("status") == "llm_success":
                 rec_data = state.recommendation_result.get("recommendation", {})
                 category_id = rec_data.get("category_id")
@@ -417,7 +418,8 @@ class IngestionPipeline:
                 
                 # Get extracted metadata
                 metadata = rec_data.get("metadata")
-                logger.info(f"Metadata extracted for page processing: {metadata}")
+                if metadata:
+                    logger.info(f"Metadata extracted for page processing: {metadata}")
             
             # Process document page with image_url and structured results
             logger.info(f"Sending JSON data to DataStorageService for processing: document_id={state.document_id}, page_number={page_number}")

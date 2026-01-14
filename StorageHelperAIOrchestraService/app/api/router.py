@@ -235,7 +235,10 @@ async def process_document(
         )
         
         # Extract data from unified pipeline result
-        recommendation_data = result.get("recommendation", {})
+        recommendation_data = result.get("recommendation")
+        if recommendation_data is None:
+            recommendation_data = {}
+            
         embedding_save_error = result.get("embedding_save_error")
         recommendation_error = result.get("recommendation_error")
         status = result.get("status", "success")

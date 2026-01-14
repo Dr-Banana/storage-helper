@@ -6,6 +6,7 @@ from typing import Optional, List, Dict, Any
 from io import BytesIO
 import logging
 
+
 from app.models.document import Document
 from app.models.document_category import DocumentCategory
 from app.models.event import Event
@@ -371,6 +372,7 @@ class DocumentService:
             document_id: Optional existing document ID. If None, creates new document
             category_id: Optional document category ID
             location_id: Optional storage location ID (use -1 for no location, will be converted to None)
+            metadata: Optional document metadata
             
         Returns:
             Tuple of (document_id, page_id, image_url)

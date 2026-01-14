@@ -14,7 +14,7 @@ class DocumentCreate(BaseModel):
     event_id: Optional[int] = Field(None, description="Associated event ID")
     current_location_id: Optional[int] = Field(None, description="Current storage location ID")
     image_url: Optional[str] = Field(None, description="URL or path to thumbnail/first page")
-    metadata: Optional[Dict[str, Any]] = Field(None, description="Flexible metadata (tax_year, expiry_date, etc.)")
+    metadata: Optional[Dict[str, Any]] = Field(None, description="Flexible metadata")
 
 
 class DocumentUpdate(BaseModel):

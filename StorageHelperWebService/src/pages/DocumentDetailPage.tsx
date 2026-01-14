@@ -4,6 +4,7 @@ import { ArrowLeft, Calendar, User, FileText, MapPin, Tag, Trash2, Edit2, Save, 
 import { documentService, userService, categoryService, locationService, ingestionService, Document, DocumentPage, DocumentFile, DocumentCategory, StorageLocation, CategoryTypeInfo } from '../api/services'
 import { useAuth } from '../contexts/AuthContext'
 import apiClient from '../api/client'
+import MetadataViewer from '../components/metadata/MetadataViewer'
 
 const DocumentDetailPage = () => {
   const { id } = useParams<{ id: string }>()
@@ -178,10 +179,11 @@ const DocumentDetailPage = () => {
         page_id: page.id
       }))
 
-      // Prepare recommendation (can be empty since we're updating existing document)
+      // Prepare recommendation
       const recommendation = {
         category_id: selectedCategoryId || document.category_id,
-        location_id: selectedLocationId !== null ? selectedLocationId : -1
+        location_id: selectedLocationId !== null ? selectedLocationId : -1,
+        metadata: document.metadata // Include updated metadata
       }
 
       // Call ingestion/confirm API to update document
@@ -489,15 +491,18 @@ const DocumentDetailPage = () => {
             </div>
             {document.metadata && Object.keys(document.metadata).length > 0 && (
               <div className="mt-6 pt-6 border-t border-home-primary-100">
-                <h3 className="font-semibold text-home-text-dark mb-3">Metadata</h3>
-                <div className="grid grid-cols-2 gap-3">
-                  {Object.entries(document.metadata).map(([key, value]) => (
-                    <div key={key}>
-                      <span className="text-sm text-home-text-light">{key}:</span>
-                      <span className="ml-2 text-home-text-dark">{String(value)}</span>
-                    </div>
-                  ))}
-                </div>
+                <h3 className="font-semibold text-home-text-dark mb-4">Metadata</h3>
+                <MetadataViewer 
+                  metadata={document.metadata} 
+                  categoryCode={category?.code}
+                  isEditing={editing}
+                  onMetadataChange={(newMetadata) => {
+                    setDocument({
+                      ...document,
+                      metadata: newMetadata
+                    });
+                  }}
+                />
               </div>
             )}
           </div>
