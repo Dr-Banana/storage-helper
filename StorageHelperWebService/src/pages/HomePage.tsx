@@ -2,9 +2,6 @@ import React, { useState } from 'react'
 import { Link } from 'react-router-dom'
 import { 
   Sparkles, 
-  Upload, 
-  TrendingUp, 
-  Clock, 
   Folder, 
   Utensils, 
   Receipt, 
@@ -13,10 +10,8 @@ import {
   Plus,
   Search
 } from 'lucide-react'
-import { useAuth } from '../contexts/AuthContext'
 
 const HomePage = () => {
-  const { userId } = useAuth()
   const [inputValue, setInput] = useState('')
 
   const handleAskAI = (e: React.FormEvent) => {

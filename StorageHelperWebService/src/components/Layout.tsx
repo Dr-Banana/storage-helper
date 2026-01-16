@@ -4,12 +4,10 @@ import ChatInterface from './ChatInterface'
 import {
   Home,
   FileText,
-  Upload,
   User,
   Menu,
   X,
   MapPin,
-  Sparkles,
 } from 'lucide-react'
 
 const Layout = () => {

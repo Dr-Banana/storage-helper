@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, memo } from 'react'
-import { X, Send, Loader2, Minimize2, Maximize2, FileText, Sparkles, User, BrainCircuit } from 'lucide-react'
+import { X, Send, Minimize2, Maximize2, FileText, Sparkles, User, BrainCircuit } from 'lucide-react'
 import { Link } from 'react-router-dom'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
