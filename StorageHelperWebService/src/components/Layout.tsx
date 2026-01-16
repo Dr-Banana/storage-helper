@@ -6,18 +6,14 @@ import {
   Upload,
   Search,
   User,
-  Settings,
   Menu,
   X,
-  Tag,
   MapPin,
 } from 'lucide-react'
-import { useAuth } from '../contexts/AuthContext'
 
 const Layout = () => {
   const location = useLocation()
   const [sidebarOpen, setSidebarOpen] = useState(false)
-  const { userId } = useAuth()
 
   const navigation = [
     { name: 'Home', href: '/', icon: Home },
@@ -25,9 +21,7 @@ const Layout = () => {
     { name: 'Upload', href: '/upload', icon: Upload },
     { name: 'Search', href: '/search', icon: Search },
     { name: 'Profile', href: '/profile', icon: User },
-    { name: 'Categories', href: '/categories', icon: Tag },
     { name: 'Locations', href: '/locations', icon: MapPin },
-    { name: 'Settings', href: '/settings', icon: Settings },
   ]
 
   return (
@@ -48,7 +42,7 @@ const Layout = () => {
         <aside
           className={`
             fixed lg:sticky top-0 left-0 z-40
-            h-screen lg:h-auto
+            h-screen
             w-64 bg-white border-r border-home-primary-100
             transform transition-transform duration-300 ease-in-out
             ${sidebarOpen ? 'translate-x-0' : '-translate-x-full lg:translate-x-0'}
@@ -66,15 +60,10 @@ const Layout = () => {
               <p className="text-sm text-home-text-light mt-1 hidden lg:block">
                 Your home file management assistant
               </p>
-              {userId && (
-                <p className="text-xs text-home-primary-500 mt-2 hidden lg:block">
-                  User ID: {userId}
-                </p>
-              )}
             </div>
 
             {/* Navigation menu */}
-            <nav className="flex-1 px-4 py-6 space-y-2">
+            <nav className="flex-1 px-4 py-6 space-y-2 overflow-y-auto">
               {navigation.map((item) => {
                 const Icon = item.icon
                 const isActive = location.pathname === item.href
@@ -118,10 +107,16 @@ const Layout = () => {
         )}
 
         {/* Main content */}
-        <main className="flex-1 min-h-screen lg:min-h-0">
-          <div className="p-4 lg:p-8">
+        <main className="flex-1 min-h-screen flex flex-col">
+          <div className="p-4 lg:p-8 flex-1">
             <Outlet />
           </div>
+          {/* Footer for mobile */}
+          <footer className="px-6 py-4 border-t border-home-primary-100 lg:hidden bg-white/50 backdrop-blur-sm">
+            <p className="text-xs text-home-text-light text-center">
+              © 2024 Home Storage Helper
+            </p>
+          </footer>
         </main>
       </div>
     </div>

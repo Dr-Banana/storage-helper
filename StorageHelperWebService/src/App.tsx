@@ -10,8 +10,6 @@ import DocumentDetailPage from './pages/DocumentDetailPage'
 import UploadPage from './pages/UploadPage'
 import SearchPage from './pages/SearchPage'
 import ProfilePage from './pages/ProfilePage'
-import SettingsPage from './pages/SettingsPage'
-import CategoriesPage from './pages/CategoriesPage'
 import LocationsPage from './pages/LocationsPage'
 
 const AppRoutes = () => {
@@ -34,9 +32,7 @@ const AppRoutes = () => {
         <Route path="upload" element={<UploadPage />} />
         <Route path="search" element={<SearchPage />} />
         <Route path="profile" element={<ProfilePage />} />
-        <Route path="categories" element={<CategoriesPage />} />
         <Route path="locations" element={<LocationsPage />} />
-        <Route path="settings" element={<SettingsPage />} />
       </Route>
     </Routes>
   )
