@@ -43,7 +43,7 @@ osascript - "$AI_SERVICE_DIR" <<'SCRIPT'
 on run argv
     tell application "Terminal"
         activate
-        do script "cd " & quoted form of item 1 of argv & " && docker-compose down && docker-compose up -d && echo '✓ AI Orchestration Service 已启动（端口 8888）' && docker-compose logs -f"
+        do script "cd " & quoted form of item 1 of argv & " && echo '停止并清理旧容器...' && docker-compose down && echo '重新构建并启动服务...' && docker-compose up -d --build && echo '✓ AI Orchestration Service 已启动（端口 8888）' && docker-compose logs -f"
     end tell
 end run
 SCRIPT
@@ -56,7 +56,7 @@ osascript - "$DATA_STORAGE_DIR" <<'SCRIPT'
 on run argv
     tell application "Terminal"
         activate
-        do script "cd " & quoted form of item 1 of argv & " && docker-compose up -d && echo '✓ Data Storage Service 已启动（端口 8000）' && docker-compose logs -f"
+        do script "cd " & quoted form of item 1 of argv & " && echo '停止并清理旧容器...' && docker-compose down && echo '重新构建并启动服务...' && docker-compose up -d --build && echo '✓ Data Storage Service 已启动（端口 8000）' && docker-compose logs -f"
     end tell
 end run
 SCRIPT
