@@ -522,6 +522,29 @@ export const ingestionService = {
     })
     return response.data
   },
+
+  /**
+   * Chat with the AI agent
+   * POST /api/v1/chat (AIOrchestraService)
+   * 
+   * @param request - Chat request with message, history, and owner_id
+   * @returns Chat response with AI message and detected intent
+   */
+  chat: async (request: { 
+    message: string; 
+    history: { role: string; content: string }[]; 
+    owner_id: number 
+  }): Promise<{
+    response: string;
+    intent: string;
+    confidence: number;
+    reasoning?: string;
+    action: string;
+    action_data: any;
+  }> => {
+    const response = await aiOrchestraClient.post('/chat', request)
+    return response.data
+  },
 }
 
 // ============================================================================

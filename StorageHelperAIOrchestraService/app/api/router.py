@@ -12,9 +12,10 @@ from app.api.schemas import (
     FeedbackRequest, FeedbackResponse,
     IngestConfirmRequest, IngestConfirmResponse,
     SearchRequest, SearchResponse,
-    CategoryConfigResponse, CategoryTypeInfo
+    CategoryConfigResponse, CategoryTypeInfo,
+    ChatRequest, ChatResponse
 )
-from app.pipelines import ingestion, feedback
+from app.pipelines import ingestion, feedback, chat
 from app.modules.embedding import EmbeddingGenerator
 from app.storage.pipeline_storage import PipelineStorage
 
@@ -581,3 +582,39 @@ async def get_category_config():
     except Exception as e:
         logger.error(f"Error getting category config: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to get category config: {str(e)}")
+
+
+@api_router.post("/chat", response_model=ChatResponse)
+async def chat_with_agent(request: ChatRequest):
+    """
+    [Chat Agent]
+    Chat with the AI agent to determine intent and get natural language responses.
+    """
+    try:
+        logger.info(f"Chat request from owner_id={request.owner_id}: '{request.message}'")
+        
+        # Convert history to list of dicts for the pipeline
+        history_dicts = [
+            {"role": msg.role, "content": msg.content} 
+            for msg in request.history
+        ]
+        
+        # Run the chat pipeline
+        result = await chat.chat_pipeline.run(
+            user_input=request.message,
+            owner_id=request.owner_id,
+            history=history_dicts
+        )
+        
+        return ChatResponse(
+            response=result["response"],
+            intent=result["intent"],
+            confidence=result["confidence"],
+            reasoning=result["reasoning"],
+            action=result["action"],
+            action_data=result["action_data"]
+        )
+        
+    except Exception as e:
+        logger.error(f"Error in chat endpoint: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Chat failed: {str(e)}")

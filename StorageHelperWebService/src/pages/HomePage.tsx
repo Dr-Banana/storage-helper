@@ -1,138 +1,148 @@
-import { useState, useEffect } from 'react'
+import React, { useState } from 'react'
 import { Link } from 'react-router-dom'
-import { FileText, Upload, Search, TrendingUp, Clock, Folder } from 'lucide-react'
-import { userService, locationService } from '../api/services'
+import { 
+  Sparkles, 
+  Upload, 
+  TrendingUp, 
+  Clock, 
+  Folder, 
+  Utensils, 
+  Receipt, 
+  FileText,
+  ArrowRight,
+  Plus,
+  Search
+} from 'lucide-react'
 import { useAuth } from '../contexts/AuthContext'
 
 const HomePage = () => {
   const { userId } = useAuth()
-  const [totalDocuments, setTotalDocuments] = useState(0)
-  const [totalLocations, setTotalLocations] = useState(0)
-  const [loading, setLoading] = useState(true)
+  const [inputValue, setInput] = useState('')
 
-  useEffect(() => {
-    const loadStats = async () => {
-      if (!userId) {
-        setLoading(false)
-        return
-      }
+  const handleAskAI = (e: React.FormEvent) => {
+    e.preventDefault()
+    if (!inputValue.trim()) return
+    
+    // Dispatch custom event to open chat with the initial message
+    window.dispatchEvent(new CustomEvent('open-chat', { 
+      detail: { message: inputValue.trim() } 
+    }))
+    setInput('')
+  }
 
-      try {
-        setLoading(true)
-        const [documentsRes, locationsRes] = await Promise.all([
-          userService.getDocuments(userId),
-          locationService.getByUserId(userId)
-        ])
-        setTotalDocuments(documentsRes.total)
-        setTotalLocations(locationsRes.total)
-      } catch (error) {
-        console.error('Failed to load stats:', error)
-        setTotalDocuments(0)
-        setTotalLocations(0)
-      } finally {
-        setLoading(false)
-      }
-    }
-
-    loadStats()
-  }, [userId])
-
-  const quickActions = [
+  const suggestedPrompts = [
     {
-      title: 'Upload Document',
-      description: 'Upload new documents or images',
-      icon: Upload,
-      href: '/upload',
-      color: 'bg-home-primary-500',
+      title: 'Plan Dinner',
+      desc: 'Suggest recipes based on my fridge',
+      icon: Utensils,
+      prompt: 'What can I cook for dinner tonight with what I have?',
+      color: 'text-orange-500',
+      bg: 'bg-orange-50'
     },
     {
-      title: 'Browse Documents',
-      description: 'View all stored documents',
-      icon: FileText,
-      href: '/documents',
-      color: 'bg-home-secondary-500',
+      title: 'Find Receipts',
+      desc: 'Search for specific purchases',
+      icon: Receipt,
+      prompt: 'Find my Costco receipts from the last month',
+      color: 'text-blue-500',
+      bg: 'bg-blue-50'
     },
     {
-      title: 'Search Documents',
-      description: 'Intelligently search your documents',
+      title: 'Identify Food',
+      desc: 'Analyze a photo of ingredients',
       icon: Search,
-      href: '/search',
-      color: 'bg-home-success-500',
-    },
+      prompt: 'I have some chicken and broccoli, give me a quick recipe',
+      color: 'text-green-500',
+      bg: 'bg-green-50'
+    }
   ]
 
-  const stats = [
-    { label: 'Total Documents', value: loading ? '...' : (totalDocuments ?? 0).toString(), icon: FileText, color: 'text-home-primary-600' },
-    { label: 'This Month', value: '0', icon: TrendingUp, color: 'text-home-secondary-600' },
-    { label: 'Recent Activity', value: 'Today', icon: Clock, color: 'text-home-success-600' },
-    { label: 'Storage Locations', value: loading ? '...' : (totalLocations ?? 0).toString(), icon: Folder, color: 'text-home-warning-600' },
+  const quickActions = [
+    { title: 'Upload', icon: Plus, href: '/upload', color: 'bg-home-primary-600' },
+    { title: 'Documents', icon: FileText, href: '/documents', color: 'bg-home-secondary-600' },
+    { title: 'Locations', icon: Folder, href: '/locations', color: 'bg-home-warning-600' },
   ]
 
   return (
-    <div className="max-w-7xl mx-auto">
-      {/* Welcome banner */}
-      <div className="bg-gradient-to-r from-home-primary-400 to-home-primary-600 rounded-home shadow-home-lg p-8 mb-8 text-white">
-        <h1 className="text-3xl lg:text-4xl font-bold mb-2">Welcome Back!</h1>
-        <p className="text-lg text-white/90">
-          Your home file storage and management assistant, making life more organized
+    <div className="max-w-5xl mx-auto px-4 py-12 lg:py-20 min-h-[80vh] flex flex-col items-center">
+      
+      {/* AI Centric Hub */}
+      <div className="w-full text-center mb-12">
+        <h1 className="text-4xl lg:text-6xl font-extrabold text-home-text-dark mb-6 tracking-tight">
+          How can I help you <span className="text-home-primary-600">at home</span> today?
+        </h1>
+        <p className="text-xl text-home-text-light max-w-2xl mx-auto">
+          Manage your kitchen, documents, and daily life with the power of Home AI.
         </p>
       </div>
 
-      {/* Quick actions */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
+      {/* Main AI Input */}
+      <form 
+        onSubmit={handleAskAI}
+        className="w-full max-w-3xl mb-12 group"
+      >
+        <div className="relative flex items-center p-2 bg-white rounded-2xl shadow-home-xl border-2 border-home-primary-100 group-focus-within:border-home-primary-500 group-focus-within:ring-4 group-focus-within:ring-home-primary-50 transition-all duration-300">
+          <div className="pl-4 text-home-primary-500">
+            <Sparkles size={28} />
+          </div>
+          <input
+            type="text"
+            value={inputValue}
+            onChange={(e) => setInput(e.target.value)}
+            placeholder="Search for documents, plan a meal, or ask a question..."
+            className="flex-1 px-4 py-4 text-xl outline-none text-home-text-dark placeholder:text-home-text-light/60"
+          />
+          <button 
+            type="submit"
+            disabled={!inputValue.trim()}
+            className="bg-home-primary-600 text-white p-3 rounded-xl hover:bg-home-primary-700 disabled:opacity-50 disabled:grayscale transition-all shadow-lg active:scale-95"
+          >
+            <ArrowRight size={24} />
+          </button>
+        </div>
+      </form>
+
+      {/* Suggestion Grid */}
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-6 w-full max-w-4xl mb-16">
+        {suggestedPrompts.map((item) => {
+          const Icon = item.icon
+          return (
+            <button
+              key={item.title}
+              onClick={() => {
+                window.dispatchEvent(new CustomEvent('open-chat', { 
+                  detail: { message: item.prompt } 
+                }))
+              }}
+              className="card group hover:border-home-primary-300 hover:shadow-home-lg transition-all text-left p-6"
+            >
+              <div className={`${item.bg} ${item.color} w-12 h-12 rounded-xl flex items-center justify-center mb-4 group-hover:scale-110 transition-transform duration-300`}>
+                <Icon size={24} />
+              </div>
+              <h3 className="text-lg font-bold text-home-text-dark mb-1">{item.title}</h3>
+              <p className="text-sm text-home-text-light leading-relaxed">{item.desc}</p>
+            </button>
+          )
+        })}
+      </div>
+
+      {/* Bottom Quick Bar */}
+      <div className="w-full pt-8 border-t border-home-primary-100 flex flex-wrap justify-center gap-8 lg:gap-16">
         {quickActions.map((action) => {
           const Icon = action.icon
           return (
-            <Link
+            <Link 
               key={action.title}
               to={action.href}
-              className="card hover:shadow-home-lg transition-shadow duration-200 group"
+              className="flex items-center gap-2 text-home-text-light hover:text-home-primary-600 transition-colors font-medium"
             >
-              <div className={`${action.color} w-12 h-12 rounded-home flex items-center justify-center mb-4 group-hover:scale-110 transition-transform`}>
-                <Icon className="text-white" size={24} />
+              <div className={`${action.color} p-1.5 rounded-lg text-white`}>
+                <Icon size={16} />
               </div>
-              <h3 className="text-xl font-semibold text-home-text-dark mb-2">
-                {action.title}
-              </h3>
-              <p className="text-home-text-light">{action.description}</p>
+              <span>{action.title}</span>
             </Link>
           )
         })}
-      </div>
-
-      {/* Statistics */}
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
-        {stats.map((stat) => {
-          const Icon = stat.icon
-          return (
-            <div key={stat.label} className="card">
-              <div className="flex items-center justify-between mb-2">
-                <Icon className={stat.color} size={24} />
-              </div>
-              <p className="text-2xl font-bold text-home-text-dark mb-1">
-                {stat.value}
-              </p>
-              <p className="text-sm text-home-text-light">{stat.label}</p>
-            </div>
-          )
-        })}
-      </div>
-
-      {/* Recent documents */}
-      <div className="card">
-        <h2 className="text-xl font-semibold text-home-text-dark mb-4">
-          Recent Documents
-        </h2>
-        <div className="text-center py-12 text-home-text-light">
-          <FileText className="mx-auto mb-4 text-home-primary-300" size={48} />
-          <p>No documents yet</p>
-          <Link
-            to="/upload"
-            className="text-home-primary-600 hover:text-home-primary-700 font-medium mt-2 inline-block"
-          >
-            Upload Now →
-          </Link>
-        </div>
       </div>
     </div>
   )

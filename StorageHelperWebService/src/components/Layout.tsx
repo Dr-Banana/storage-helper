@@ -1,14 +1,15 @@
 import { Outlet, Link, useLocation } from 'react-router-dom'
 import { useState } from 'react'
+import ChatInterface from './ChatInterface'
 import {
   Home,
   FileText,
   Upload,
-  Search,
   User,
   Menu,
   X,
   MapPin,
+  Sparkles,
 } from 'lucide-react'
 
 const Layout = () => {
@@ -18,8 +19,6 @@ const Layout = () => {
   const navigation = [
     { name: 'Home', href: '/', icon: Home },
     { name: 'Documents', href: '/documents', icon: FileText },
-    { name: 'Upload', href: '/upload', icon: Upload },
-    { name: 'Search', href: '/search', icon: Search },
     { name: 'Profile', href: '/profile', icon: User },
     { name: 'Locations', href: '/locations', icon: MapPin },
   ]
@@ -67,6 +66,7 @@ const Layout = () => {
               {navigation.map((item) => {
                 const Icon = item.icon
                 const isActive = location.pathname === item.href
+
                 return (
                   <Link
                     key={item.name}
@@ -111,6 +111,8 @@ const Layout = () => {
           <div className="p-4 lg:p-8 flex-1">
             <Outlet />
           </div>
+          {/* AI Chat Interface */}
+          <ChatInterface />
           {/* Footer for mobile */}
           <footer className="px-6 py-4 border-t border-home-primary-100 lg:hidden bg-white/50 backdrop-blur-sm">
             <p className="text-xs text-home-text-light text-center">

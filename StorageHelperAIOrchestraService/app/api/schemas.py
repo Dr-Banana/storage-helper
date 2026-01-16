@@ -187,3 +187,28 @@ class CategoryConfigResponse(BaseModel):
     """
     allowed_category_types: List[str] = Field(..., description="List of all allowed category codes")
     category_types: List[CategoryTypeInfo] = Field(..., description="Detailed information about each category type")
+
+
+# ==========================================
+# 5. Chat Agent (AI Conversation)
+# ==========================================
+
+class ChatMessage(BaseModel):
+    """A single message in a chat history"""
+    role: str = Field(..., description="'user' or 'model'")
+    content: str = Field(..., description="Message text content")
+
+class ChatRequest(BaseModel):
+    """Request for AI chat agent"""
+    message: str = Field(..., description="User's current input message")
+    history: List[ChatMessage] = Field(default_factory=list, description="Previous messages in the conversation")
+    owner_id: int = Field(..., description="User ID associated with the chat")
+
+class ChatResponse(BaseModel):
+    """Response from AI chat agent"""
+    response: str = Field(..., description="AI's natural language response")
+    intent: str = Field(..., description="Detected user intent (SEARCH, PLAN_EAT_OUT, etc.)")
+    confidence: float = Field(..., description="Intent classification confidence")
+    reasoning: Optional[str] = Field(None, description="AI's reasoning for intent classification")
+    action: str = Field(..., description="The action to perform (SEARCH, GENERAL, etc.)")
+    action_data: Dict[str, Any] = Field(default_factory=dict, description="Metadata for the action")
