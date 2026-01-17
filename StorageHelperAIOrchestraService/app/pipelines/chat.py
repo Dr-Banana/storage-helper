@@ -22,7 +22,10 @@ Reasoning: {reasoning}
 
 If the intent is SEARCH: Acknowledge that you are looking for their items or documents.
 If the intent is PLAN_EAT_OUT: Suggest you can help find restaurants or make reservations.
-If the intent is PLAN_COOK_HOME: Offer to generate recipes or check their current ingredients.
+If the intent is PLAN_COOK_HOME: Offer to generate recipes based on their ACTUAL inventory items. 
+  - CRITICAL: Only suggest recipes using ingredients that are ACTUALLY in their inventory.
+  - NEVER make up or hallucinate ingredients that are not in the provided inventory list.
+  - If the inventory list is empty or limited, acknowledge this and suggest what they might need to buy.
 If the intent is GENERAL: Be friendly and helpful.
 
 Respond naturally in the same language as the user.
@@ -56,7 +59,44 @@ Respond naturally in the same language as the user.
         if intent_action['action'] == "SEARCH" and intent_action['data'].get('document_ids'):
              context_msg += f"\nSearch Results: Found document IDs {intent_action['data']['document_ids']}. Please let the user know you've found them."
         
-        if intent_action.get('data', {}).get('suggestion'):
+        if intent_action['action'] == "PLAN_COOK_HOME":
+            # Add detailed inventory information for recipe suggestions
+            inventory_items = intent_action.get('data', {}).get('inventory_items', [])
+            inventory_count = intent_action.get('data', {}).get('inventory_count', 0)
+            
+            if inventory_count > 0:
+                context_msg += f"\n\nUSER'S ACTUAL INVENTORY ({inventory_count} items):"
+                context_msg += "\nCRITICAL: You MUST ONLY suggest recipes using these actual ingredients."
+                context_msg += "\nDO NOT hallucinate or invent ingredients not in this list.\n"
+                
+                # Format inventory by category for better organization (limit to 30 items to avoid too long context)
+                items_by_category = {}
+                item_count = 0
+                max_items = 30
+                
+                for item in inventory_items:
+                    if item_count >= max_items:
+                        break
+                    category = item.get('category', 'Other')
+                    product_name = item.get('product_name', 'Unknown')
+                    if category not in items_by_category:
+                        items_by_category[category] = []
+                    items_by_category[category].append(product_name)
+                    item_count += 1
+                
+                for category, items in items_by_category.items():
+                    context_msg += f"\n{category}:\n"
+                    for item_name in items:
+                        context_msg += f"  - {item_name}\n"
+                
+                if inventory_count > max_items:
+                    context_msg += f"\n(Showing first {max_items} of {inventory_count} items)"
+                
+                context_msg += "\nWhen suggesting a recipe, list which items from the inventory above will be used."
+            else:
+                context_msg += "\n\nINVENTORY STATUS: No food items found in the user's inventory."
+                context_msg += "\nAcknowledge this and suggest that they upload a shopping receipt to add items first."
+        elif intent_action.get('data', {}).get('suggestion'):
             context_msg += f"\nSuggestion: {intent_action['data']['suggestion']}"
         
         system_instruction += context_msg
@@ -86,7 +126,7 @@ Respond naturally in the same language as the user.
             "systemInstruction": {"parts": [{"text": system_instruction}]},
             "generationConfig": {
                 "temperature": 0.7,
-                "maxOutputTokens": 500
+                "maxOutputTokens": 2048  # Increased from 500 to handle longer responses with recipe suggestions
             }
         }
 
@@ -98,8 +138,43 @@ Respond naturally in the same language as the user.
                 response.raise_for_status()
                 result = response.json()
 
-                response_text = result.get('candidates', [{}])[0].get('content', {}).get('parts', [{}])[0].get('text')
+                # Check for errors in response first
+                if 'error' in result:
+                    error_msg = result['error'].get('message', str(result['error']))
+                    logger.error(f"Gemini API returned error: {error_msg}")
+                    raise ValueError(f"Gemini API error: {error_msg}")
+
+                # Check if candidates exist
+                candidates = result.get('candidates', [])
+                if not candidates:
+                    logger.error(f"Gemini API response has no candidates. Full response: {result}")
+                    raise ValueError("Gemini API response missing candidates.")
+
+                # Check for finish reason (might indicate why content is missing)
+                finish_reason = candidates[0].get('finishReason', '')
+                if finish_reason and finish_reason != 'STOP':
+                    logger.warning(f"Gemini API finished with reason: {finish_reason}")
+
+                # Extract text content
+                content = candidates[0].get('content', {})
+                parts = content.get('parts', [])
+                
+                if not parts:
+                    # Handle MAX_TOKENS case - response was truncated
+                    if finish_reason == 'MAX_TOKENS':
+                        logger.warning("Gemini API response truncated due to max tokens limit. Consider increasing maxOutputTokens.")
+                        # Try to provide a fallback message
+                        response_text = "我的回答可能因为长度限制而被截断了。让我为您提供一个更简洁的建议："
+                        # Note: In this case, we'll return the fallback message
+                        # but ideally we should increase maxOutputTokens to prevent this
+                    else:
+                        logger.error(f"Gemini API response has no parts in content. Finish reason: {finish_reason}, Full response: {result}")
+                        raise ValueError(f"Gemini API response missing parts in content (finish reason: {finish_reason}).")
+                else:
+                    response_text = parts[0].get('text', '')
+                
                 if not response_text:
+                    logger.error(f"Gemini API response missing text content. Finish reason: {finish_reason}, Full response keys: {result.keys() if isinstance(result, dict) else 'not a dict'}")
                     raise ValueError("Gemini API response missing text content.")
 
                 return {
