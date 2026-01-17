@@ -248,6 +248,15 @@ export const documentService = {
   },
 
   /**
+   * Get document by ID
+   * GET /api/documents/{document_id}
+   */
+  getById: async (documentId: number): Promise<Document> => {
+    const response = await apiClient.get(`/documents/${documentId}`)
+    return response.data
+  },
+
+  /**
    * Update document storage location
    * PUT /api/documents/{document_id}/location
    */

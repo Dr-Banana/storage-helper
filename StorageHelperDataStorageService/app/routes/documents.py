@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import text
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import FileResponse
-from typing import List, Annotated
+from typing import List, Annotated, Optional, Dict, Any
 import json
 import os
 import urllib.parse
@@ -230,6 +230,37 @@ def get_document_pages(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to retrieve document pages: {str(e)}"
         )
+
+
+@router.get(
+    "/{document_id}",
+    response_model=dict,
+    summary="Get document by ID",
+    description="Retrieve basic metadata for a specific document."
+)
+def get_document_by_id(
+    document: Annotated[Document, Depends(get_document_if_owner)]
+):
+    """
+    Get a specific document's metadata.
+    
+    - **document_id**: The document's ID
+    
+    Authorization: User must own the document (verified by dependency)
+    """
+    return {
+        "id": document.id,
+        "title": document.title,
+        "category_id": document.category_id,
+        "owner_id": document.owner_id,
+        "event_id": document.event_id,
+        "current_location_id": document.current_location_id,
+        "metadata": document.doc_metadata,
+        "image_url": _convert_to_accessible_url(document.image_url) if document.image_url else None,
+        "created_at": document.created_at.isoformat() if document.created_at else None,
+        "updated_at": document.updated_at.isoformat() if document.updated_at else None,
+    }
+
 
 
 # ============================================================
