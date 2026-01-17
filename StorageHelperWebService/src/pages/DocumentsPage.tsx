@@ -8,7 +8,9 @@ import {
   List as ListIcon, 
   MapPin, 
   Clock,
-  ChevronRight
+  ChevronRight,
+  ChevronDown,
+  Layers
 } from 'lucide-react'
 import { documentService, userService, categoryService, locationService, Document, DocumentFile, DocumentCategory, StorageLocation } from '../api/services'
 import { useAuth } from '../contexts/AuthContext'
@@ -27,6 +29,7 @@ const DocumentsPage = () => {
   const [searchQuery, setSearchQuery] = useState('')
   const [viewMode, setViewMode] = useState<'grid' | 'list'>('grid')
   const [filterType, setFilterType] = useState<'all' | 'receipt' | 'food'>('all')
+  const [expandedDocs, setExpandedDocs] = useState<Record<number, boolean>>({})
 
   useEffect(() => {
     const loadDocuments = async () => {
@@ -121,6 +124,37 @@ const DocumentsPage = () => {
     return { label: `${days} days left`, color: 'bg-green-100 text-green-700' };
   };
 
+  const toggleExpand = (e: React.MouseEvent, docId: number) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setExpandedDocs(prev => ({ ...prev, [docId]: !prev[docId] }));
+  };
+
+  // Organize documents into a hierarchy (parent-child for receipts)
+  const buildHierarchy = (docs: DocumentWithExtras[]) => {
+    const docMap = new Map<number, DocumentWithExtras & { children: DocumentWithExtras[] }>();
+    const rootDocs: (DocumentWithExtras & { children: DocumentWithExtras[] })[] = [];
+
+    // First pass: create the map
+    docs.forEach(doc => {
+      docMap.set(doc.id, { ...doc, children: [] });
+    });
+
+    // Second pass: establish relationships
+    docs.forEach(doc => {
+      const parentId = doc.metadata?.source_receipt_id;
+      const docWithChildren = docMap.get(doc.id)!;
+      
+      if (parentId && docMap.has(parentId)) {
+        docMap.get(parentId)!.children.push(docWithChildren);
+      } else {
+        rootDocs.push(docWithChildren);
+      }
+    });
+
+    return rootDocs;
+  };
+
   const filteredDocuments = documents.filter((doc) => {
     const matchesSearch = doc.title?.toLowerCase().includes(searchQuery.toLowerCase()) || 
                          doc.metadata?.product_name?.toLowerCase().includes(searchQuery.toLowerCase()) ||
@@ -130,6 +164,8 @@ const DocumentsPage = () => {
     if (filterType === 'food') return matchesSearch && doc.metadata?.is_food;
     return matchesSearch;
   });
+
+  const hierarchicalDocs = buildHierarchy(filteredDocuments);
 
   return (
     <div className="max-w-7xl mx-auto">
@@ -217,90 +253,137 @@ const DocumentsPage = () => {
         </div>
       ) : viewMode === 'grid' ? (
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
-          {filteredDocuments.map((doc) => {
+          {hierarchicalDocs.map((doc) => {
             const isFood = doc.metadata?.is_food;
             const expiry = getExpiryStatus(doc.metadata?.expiry_date);
+            const hasChildren = doc.children && doc.children.length > 0;
+            const isExpanded = expandedDocs[doc.id];
             
             return (
-              <Link
-                key={doc.id}
-                to={`/documents/${doc.id}`}
-                className="group bg-white rounded-2xl border border-home-primary-100 shadow-sm hover:shadow-home-lg transition-all duration-300 overflow-hidden flex flex-col h-full relative"
-              >
-                {/* Delete button (hover only) */}
-                <button
-                  onClick={(e) => handleDelete(e, doc.id)}
-                  className="absolute top-3 right-3 p-2 bg-white/90 backdrop-blur-sm text-red-500 rounded-full opacity-0 group-hover:opacity-100 transition-all duration-200 hover:bg-red-500 hover:text-white z-20 shadow-sm"
+              <div key={doc.id} className="flex flex-col">
+                <Link
+                  to={`/documents/${doc.id}`}
+                  className={`group bg-white rounded-2xl border ${hasChildren ? 'border-home-primary-200' : 'border-home-primary-100'} shadow-sm hover:shadow-home-lg transition-all duration-300 overflow-hidden flex flex-col relative min-h-[320px]`}
                 >
-                  <Trash2 size={16} />
-                </button>
+                  {/* Delete button (hover only) */}
+                  <button
+                    onClick={(e) => handleDelete(e, doc.id)}
+                    className="absolute top-3 right-3 p-2 bg-white/90 backdrop-blur-sm text-red-500 rounded-full opacity-0 group-hover:opacity-100 transition-all duration-200 hover:bg-red-500 hover:text-white z-20 shadow-sm"
+                  >
+                    <Trash2 size={16} />
+                  </button>
 
-                {/* Media Section */}
-                <div className="relative aspect-[4/3] bg-home-background-dark overflow-hidden">
-                  {doc.image_url ? (
-                    <img
-                      src={doc.image_url}
-                      alt={doc.title}
-                      className="w-full h-full object-cover group-hover:scale-110 transition-transform duration-500"
-                    />
-                  ) : (
-                    <div className="w-full h-full flex flex-col items-center justify-center p-6 text-center">
-                      <CategoryIcon 
-                        categoryCode={doc.category?.code || (isFood ? 'VEGETABLE' : 'UNKNOWN')} 
-                        size={48} 
-                        className="mb-3 transform group-hover:scale-110 transition-transform duration-300 shadow-sm"
+                  {/* Media Section */}
+                  <div className="relative aspect-[4/3] bg-home-background-dark overflow-hidden">
+                    {doc.image_url ? (
+                      <img
+                        src={doc.image_url}
+                        alt={doc.title}
+                        className="w-full h-full object-cover group-hover:scale-110 transition-transform duration-500"
                       />
-                      {!isFood && <FileText className="text-home-primary-200" size={32} />}
-                    </div>
-                  )}
-                  
-                  {/* Category Badge */}
-                  {doc.category && (
-                    <div className="absolute bottom-3 left-3 px-2.5 py-1 bg-white/90 backdrop-blur-sm rounded-lg shadow-sm text-[10px] font-bold text-home-primary-700 uppercase tracking-wider border border-white/50">
-                      {doc.category.name}
-                    </div>
-                  )}
-
-                  {/* Expiry Overlay */}
-                  {expiry && (
-                    <div className={`absolute top-3 left-3 px-2 py-1 rounded-md text-[10px] font-bold shadow-sm ${expiry.color}`}>
-                      {expiry.label}
-                    </div>
-                  )}
-                </div>
-
-                {/* Content Section */}
-                <div className="p-4 flex-1 flex flex-col">
-                  <h3 className="font-bold text-home-text-dark mb-1 line-clamp-1 group-hover:text-home-primary-600 transition-colors">
-                    {(() => {
-                      if (doc.metadata?.merchant) return doc.metadata.merchant;
-                      if (doc.metadata?.product_name) return doc.metadata.product_name;
-                      if (doc.title && !doc.title.startsWith('uploaded_')) return doc.title;
-                      return `Document #${doc.id}`;
-                    })()}
-                  </h3>
-                  
-                  <div className="flex flex-col gap-2 mt-auto">
-                    <div className="flex items-center gap-1.5 text-xs text-home-text-light">
-                      <MapPin size={14} className="text-home-primary-400" />
-                      <span className="truncate">
-                        {doc.location?.name || doc.metadata?.suggested_storage || 'No location'}
-                      </span>
-                    </div>
-                    <div className="flex items-center justify-between pt-3 border-t border-home-primary-50">
-                      <div className="flex items-center gap-1 text-[10px] text-home-text-light font-medium uppercase tracking-tight">
-                        <Clock size={12} />
-                        {new Date(doc.created_at).toLocaleDateString()}
+                    ) : (
+                      <div className="w-full h-full flex flex-col items-center justify-center p-6 text-center">
+                        <CategoryIcon 
+                          categoryCode={doc.category?.code || (isFood ? 'VEGETABLE' : 'UNKNOWN')} 
+                          size={48} 
+                          className="mb-3 transform group-hover:scale-110 transition-transform duration-300 shadow-sm"
+                        />
+                        {!isFood && <FileText className="text-home-primary-200" size={32} />}
                       </div>
-                      {doc.previewFiles && doc.previewFiles.length > 1 && (
-                        <div className="bg-home-primary-50 text-home-primary-600 text-[10px] font-bold px-1.5 py-0.5 rounded uppercase">
-                          {doc.previewFiles.length} Pages
-                        </div>
+                    )}
+                    
+                    {/* Category Badge */}
+                    {doc.category && (
+                      <div className="absolute bottom-3 left-3 px-2.5 py-1 bg-white/90 backdrop-blur-sm rounded-lg shadow-sm text-[10px] font-bold text-home-primary-700 uppercase tracking-wider border border-white/50">
+                        {doc.category.name}
+                      </div>
+                    )}
+
+                    {/* Expiry Overlay */}
+                    {expiry && (
+                      <div className={`absolute top-3 left-3 px-2 py-1 rounded-md text-[10px] font-bold shadow-sm ${expiry.color}`}>
+                        {expiry.label}
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Content Section */}
+                  <div className="p-4 flex flex-col flex-grow">
+                    <div className="flex items-center justify-between gap-2 mb-2">
+                      <h3 className="font-bold text-home-text-dark line-clamp-1 group-hover:text-home-primary-600 transition-colors flex-1">
+                        {(() => {
+                          if (doc.metadata?.merchant) return doc.metadata.merchant;
+                          if (doc.metadata?.product_name) return doc.metadata.product_name;
+                          if (doc.title && !doc.title.startsWith('uploaded_')) return doc.title;
+                          return `Document #${doc.id}`;
+                        })()}
+                      </h3>
+                      
+                      {/* Children Count Badge */}
+                      {hasChildren && (
+                        <button 
+                          onClick={(e) => toggleExpand(e, doc.id)}
+                          className={`px-2.5 py-1 ${isExpanded ? 'bg-home-primary-500 text-white' : 'bg-home-primary-100 text-home-primary-700'} rounded-lg text-xs font-bold flex items-center gap-1.5 border border-home-primary-200 hover:scale-105 transition-all flex-shrink-0`}
+                        >
+                          <Layers size={14} />
+                          {doc.children.length}
+                          {isExpanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+                        </button>
                       )}
                     </div>
+                    
+                    <div className="flex flex-col gap-2 mt-auto">
+                      <div className="flex items-center gap-1.5 text-xs text-home-text-light">
+                        <MapPin size={14} className="text-home-primary-400" />
+                        <span className="truncate">
+                          {doc.location?.name || doc.metadata?.suggested_storage || 'No location'}
+                        </span>
+                      </div>
+                      <div className="flex items-center justify-between pt-3 border-t border-home-primary-50">
+                        <div className="flex items-center gap-1 text-[10px] text-home-text-light font-medium uppercase tracking-tight">
+                          <Clock size={12} />
+                          {new Date(doc.created_at).toLocaleDateString()}
+                        </div>
+                        {doc.previewFiles && doc.previewFiles.length > 1 && (
+                          <div className="bg-home-primary-50 text-home-primary-600 text-[10px] font-bold px-1.5 py-0.5 rounded uppercase">
+                            {doc.previewFiles.length} Pages
+                          </div>
+                        )}
+                      </div>
+                    </div>
                   </div>
-                </div>
-              </Link>
+                </Link>
+
+                {/* Expanded Children List (for Grid View) */}
+                {hasChildren && isExpanded && (
+                  <div className="mt-2 bg-home-primary-50/30 rounded-xl border border-home-primary-100 overflow-hidden divide-y divide-home-primary-100 max-h-[400px] overflow-y-auto">
+                    {doc.children.map((child) => (
+                      <Link 
+                        key={child.id} 
+                        to={`/documents/${child.id}`}
+                        className="flex items-center gap-3 p-2 hover:bg-white transition-colors group/child"
+                      >
+                        <div className="w-8 h-8 rounded-lg bg-home-background-dark overflow-hidden flex-shrink-0 flex items-center justify-center">
+                          {child.image_url ? (
+                            <img src={child.image_url} className="w-full h-full object-cover" />
+                          ) : (
+                            <CategoryIcon categoryCode={child.category?.code || 'VEGETABLE'} size={14} />
+                          )}
+                        </div>
+                        <div className="flex-1 min-w-0">
+                          <p className="text-xs font-bold text-home-text-dark truncate group-hover/child:text-home-primary-600">
+                            {child.metadata?.product_name || child.title}
+                          </p>
+                          <p className="text-[10px] text-home-text-light truncate">
+                            {child.location?.name || child.metadata?.suggested_storage || 'No location'}
+                          </p>
+                        </div>
+                        <ChevronRight size={12} className="text-home-primary-300 group-hover/child:text-home-primary-500 flex-shrink-0" />
+                      </Link>
+                    ))}
+                  </div>
+                )}
+              </div>
             )
           })}
         </div>
@@ -308,49 +391,109 @@ const DocumentsPage = () => {
         /* List View */
         <div className="bg-white rounded-2xl border border-home-primary-100 shadow-sm overflow-hidden">
           <div className="divide-y divide-home-primary-50">
-            {filteredDocuments.map((doc) => {
+            {hierarchicalDocs.map((doc) => {
               const isFood = doc.metadata?.is_food;
               const expiry = getExpiryStatus(doc.metadata?.expiry_date);
+              const hasChildren = doc.children && doc.children.length > 0;
+              const isExpanded = expandedDocs[doc.id];
               
               return (
-                <Link
-                  key={doc.id}
-                  to={`/documents/${doc.id}`}
-                  className="flex items-center gap-4 p-4 hover:bg-home-primary-50 transition-colors group"
-                >
-                  <div className="w-12 h-12 rounded-xl bg-home-background-dark overflow-hidden flex-shrink-0 flex items-center justify-center">
-                    {doc.image_url ? (
-                      <img src={doc.image_url} className="w-full h-full object-cover" />
-                    ) : (
-                      <CategoryIcon categoryCode={doc.category?.code || (isFood ? 'VEGETABLE' : 'UNKNOWN')} size={20} />
-                    )}
-                  </div>
-                  
-                  <div className="flex-1 min-w-0">
-                    <h4 className="font-bold text-home-text-dark truncate">
-                      {doc.metadata?.product_name || doc.metadata?.merchant || doc.title}
-                    </h4>
-                    <div className="flex items-center gap-3 mt-0.5">
-                      <span className="text-xs text-home-text-light flex items-center gap-1">
-                        <MapPin size={12} />
-                        {doc.location?.name || doc.metadata?.suggested_storage || 'No location'}
-                      </span>
-                      {expiry && (
-                        <span className={`text-[10px] px-1.5 py-0.5 rounded font-bold uppercase ${expiry.color}`}>
-                          {expiry.label}
-                        </span>
-                      )}
-                    </div>
+                <div key={doc.id} className="flex flex-col">
+                  <div className="flex items-center gap-4 p-4 hover:bg-home-primary-50 transition-colors group relative">
+                    <Link
+                      to={`/documents/${doc.id}`}
+                      className="flex-1 flex items-center gap-4 min-w-0"
+                    >
+                      <div className="w-12 h-12 rounded-xl bg-home-background-dark overflow-hidden flex-shrink-0 flex items-center justify-center">
+                        {doc.image_url ? (
+                          <img src={doc.image_url} className="w-full h-full object-cover" />
+                        ) : (
+                          <CategoryIcon categoryCode={doc.category?.code || (isFood ? 'VEGETABLE' : 'UNKNOWN')} size={20} />
+                        )}
+                      </div>
+                      
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-2">
+                          <h4 className="font-bold text-home-text-dark truncate">
+                            {doc.metadata?.product_name || doc.metadata?.merchant || doc.title}
+                          </h4>
+                          {hasChildren && (
+                            <span className="px-1.5 py-0.5 bg-home-primary-100 text-home-primary-600 rounded text-[10px] font-bold flex items-center gap-1">
+                              <Layers size={10} />
+                              {doc.children.length}
+                            </span>
+                          )}
+                        </div>
+                        <div className="flex items-center gap-3 mt-0.5">
+                          <span className="text-xs text-home-text-light flex items-center gap-1">
+                            <MapPin size={12} />
+                            {doc.location?.name || doc.metadata?.suggested_storage || 'No location'}
+                          </span>
+                          {expiry && (
+                            <span className={`text-[10px] px-1.5 py-0.5 rounded font-bold uppercase ${expiry.color}`}>
+                              {expiry.label}
+                            </span>
+                          )}
+                        </div>
+                      </div>
+
+                      <div className="flex items-center gap-3 flex-shrink-0 pr-2">
+                        <div className="text-right hidden sm:block">
+                          <p className="text-xs font-medium text-home-text-dark">{doc.category?.name || 'Uncategorized'}</p>
+                          <p className="text-[10px] text-home-text-light uppercase">{new Date(doc.created_at).toLocaleDateString()}</p>
+                        </div>
+                        {hasChildren ? (
+                          <button 
+                            onClick={(e) => toggleExpand(e, doc.id)}
+                            className={`px-2.5 py-1.5 ${isExpanded ? 'bg-home-primary-500 text-white' : 'bg-home-primary-100 text-home-primary-700'} rounded-lg text-xs font-bold flex items-center gap-1.5 border border-home-primary-200 hover:scale-105 transition-all`}
+                          >
+                            <Layers size={14} />
+                            {doc.children.length}
+                            {isExpanded ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
+                          </button>
+                        ) : (
+                          <ChevronRight size={20} className="text-home-primary-300 group-hover:text-home-primary-500 transform group-hover:translate-x-1 transition-all" />
+                        )}
+                      </div>
+                    </Link>
                   </div>
 
-                  <div className="flex items-center gap-4 flex-shrink-0 pr-2">
-                    <div className="text-right hidden sm:block">
-                      <p className="text-xs font-medium text-home-text-dark">{doc.category?.name || 'Uncategorized'}</p>
-                      <p className="text-[10px] text-home-text-light uppercase">{new Date(doc.created_at).toLocaleDateString()}</p>
+                  {/* Expanded Children List (for List View) */}
+                  {hasChildren && isExpanded && (
+                    <div className="bg-home-background-light/50 border-t border-home-primary-50">
+                      {doc.children.map((child) => (
+                        <Link
+                          key={child.id}
+                          to={`/documents/${child.id}`}
+                          className="flex items-center gap-4 p-3 pl-12 hover:bg-home-primary-50/50 transition-colors group/child"
+                        >
+                          <div className="w-8 h-8 rounded-lg bg-home-background-dark overflow-hidden flex-shrink-0 flex items-center justify-center">
+                            {child.image_url ? (
+                              <img src={child.image_url} className="w-full h-full object-cover" />
+                            ) : (
+                              <CategoryIcon categoryCode={child.category?.code || 'VEGETABLE'} size={14} />
+                            )}
+                          </div>
+                          <div className="flex-1 min-w-0">
+                            <h5 className="text-sm font-bold text-home-text-dark truncate group-hover/child:text-home-primary-600">
+                              {child.metadata?.product_name || child.title}
+                            </h5>
+                            <p className="text-[10px] text-home-text-light flex items-center gap-1">
+                              <MapPin size={10} />
+                              {child.location?.name || child.metadata?.suggested_storage || 'No location'}
+                            </p>
+                          </div>
+                          <div className="flex items-center gap-4 flex-shrink-0 pr-6">
+                            <div className="text-right hidden sm:block">
+                              <p className="text-[10px] font-medium text-home-text-dark">{child.category?.name}</p>
+                            </div>
+                            <ChevronRight size={16} className="text-home-primary-200 group-hover/child:text-home-primary-400" />
+                          </div>
+                        </Link>
+                      ))}
                     </div>
-                    <ChevronRight size={20} className="text-home-primary-300 group-hover:text-home-primary-500 transform group-hover:translate-x-1 transition-all" />
-                  </div>
-                </Link>
+                  )}
+                </div>
               )
             })}
           </div>
