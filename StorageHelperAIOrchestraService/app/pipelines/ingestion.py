@@ -877,6 +877,23 @@ async def run_unified_ingestion_pipeline(
                     temp_dir = tempfile.mkdtemp(prefix="pdf_pages_")
                     temp_files.append(temp_dir)
                     
+                    # For PDF, upload first page as preview image
+                    first_page_image_url: Optional[str] = None
+                    if pdf_result.pages:
+                        try:
+                            first_page_image = pdf_result.pages[0]["image"]
+                            first_page_temp = os.path.join(temp_dir, "first_page_preview.png")
+                            first_page_image.save(first_page_temp, "PNG")
+                            
+                            # Upload first page as preview
+                            first_page_image_url = await pipeline.pipeline_storage.upload_file_only(
+                                file_path=first_page_temp,
+                                owner_id=owner_id
+                            )
+                            logger.info(f"PDF first page uploaded as preview: {first_page_image_url}")
+                        except Exception as e:
+                            logger.warning(f"Failed to upload PDF first page preview: {e}")
+                    
                     for page_data in pdf_result.pages:
                         page_num = page_data["page_number"]
                         page_image = page_data["image"]
@@ -887,12 +904,15 @@ async def run_unified_ingestion_pipeline(
                         temp_files.append(temp_file_path)
                         
                         # Add to page tasks
+                        # Use first_page_image_url for first page, file_image_url for others
+                        display_image_url = first_page_image_url if page_num == 1 else file_image_url
+                        
                         page_tasks.append(
                             (
                                 current_page_global,   # Global index
                                 temp_file_path,        # OCR source file (single page image)
                                 "image",               # OCR file type
-                                file_image_url,        # image_url of this original file (from full file upload)
+                                display_image_url,     # image_url for display (first page as PNG, others as PDF)
                                 page_number_within_file,  # Page number within current file
                                 upload_error           # Upload failure info
                             )
