@@ -37,8 +37,9 @@ async def test_ingestion_endpoint():
         # Create a dummy file
         files = [('files', ('test.txt', b'content'))]
         data = {'owner_id': 1}
+        headers = {"Authorization": "Bearer user_1"}
         
-        response = client.post("/api/v1/ingestion", files=files, data=data)
+        response = client.post("/api/v1/ingestion", files=files, data=data, headers=headers)
         
         assert response.status_code == 200
         assert response.json()["status"] == "success"
@@ -67,8 +68,9 @@ async def test_confirm_endpoint():
                 }
             ]
         }
+        headers = {"Authorization": "Bearer user_1"}
         
-        response = client.post("/api/v1/ingestion/confirm", json=confirm_data)
+        response = client.post("/api/v1/ingestion/confirm", json=confirm_data, headers=headers)
         
         assert response.status_code == 200
         assert response.json()["status"] == "success"

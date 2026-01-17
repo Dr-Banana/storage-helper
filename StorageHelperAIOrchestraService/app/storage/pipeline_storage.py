@@ -290,7 +290,7 @@ class PipelineStorage:
             
             async with httpx.AsyncClient(base_url=base_url, timeout=30.0) as client:
                 upload_response = await client.post(
-                    endpoint_path,
+                    f"{api_prefix}{endpoint_path}",
                     files=files,
                     data=upload_data
                 )
@@ -394,7 +394,7 @@ class PipelineStorage:
             
             async with httpx.AsyncClient(base_url=base_url, timeout=30.0) as client:
                 process_response = await client.post(
-                    endpoint_path,
+                    f"{api_prefix}{endpoint_path}",
                     json=process_payload
                 )
                 
