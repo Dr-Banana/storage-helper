@@ -59,9 +59,14 @@ class RecommendationGenerator:
             "recommendation_reason": {
                 "type": "STRING",
                 "description": "A brief, one-sentence explanation for the recommendation."
+            },
+            "storage_suggestion": {
+                "type": "STRING",
+                "enum": ["Fridge", "Freezer", "Pantry", "Other"],
+                "description": "The general type of storage recommended for this item."
             }
         },
-        "required": ["category_code", "location_id", "location_name", "suggested_tags", "recommendation_reason"]
+        "required": ["category_code", "location_id", "location_name", "suggested_tags", "recommendation_reason", "storage_suggestion"]
     }
 
     # Define the System Instruction to guide the LLM's persona
@@ -582,7 +587,26 @@ class RecommendationGenerator:
                     )
                     print(f"DEBUG: Extracted metadata for {final_category_code}: {extracted_metadata}")
                     
-                    # 3. Assemble results
+                    # 3. Match locations for individual items if it's a receipt
+                    if final_category_code.upper() in ["RECEIPT", "REC"] and "items" in extracted_metadata and locations:
+                        for item in extracted_metadata["items"]:
+                            item_suggestion = item.get("storage_suggestion")
+                            if item_suggestion:
+                                # Try to match suggestion to existing locations
+                                suggestion_lower = item_suggestion.lower()
+                                matched_loc = None
+                                for loc in locations:
+                                    loc_name = loc.get("name", "").lower()
+                                    if suggestion_lower in loc_name or loc_name in suggestion_lower:
+                                        matched_loc = loc
+                                        break
+                                
+                                if matched_loc:
+                                    item["location_id"] = matched_loc.get("id")
+                                    item["location_name"] = matched_loc.get("name")
+                                    logger.info(f"Matched item '{item.get('product_name')}' to location '{matched_loc.get('name')}'")
+
+                    # 4. Assemble results
                     parsed_json["metadata"] = extracted_metadata
 
                     assigned_location_id = None

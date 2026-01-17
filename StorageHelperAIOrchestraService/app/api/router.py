@@ -400,15 +400,21 @@ async def confirm_and_upload_document(
                     location_id = -1
                 
                 # Process document page with user-modified data
-                metadata = None
+                metadata = {}
                 if request.recommendation:
-                    metadata = request.recommendation.get("metadata")
+                    # Merge extracted metadata and the top-level storage suggestion
+                    metadata = (request.recommendation.get("metadata") or {}).copy()
+                    if "storage_suggestion" in request.recommendation:
+                        metadata["storage_suggestion"] = request.recommendation["storage_suggestion"]
+                
+                # If this is a document update (document_id exists), we allow process_document_page 
+                # to proceed even if the page doesn't physically exist in the pages table yet.
                 process_result = await pipeline.pipeline_storage.process_document_page(
-                    image_url=page_result.file_url,
+                    image_url=page_result.file_url or "", # Fallback to empty if missing
                     owner_id=request.owner_id,
-                    page_number=page_result.page_number,
+                    page_number=page_result.page_number or 1,
                     ocr_text=page_result.ocr_text or "",
-                    document_id=final_document_id,  # Use document_id from request or None (creates new)
+                    document_id=final_document_id,
                     category_id=category_id,
                     location_id=location_id,
                     metadata=metadata

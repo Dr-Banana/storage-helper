@@ -249,40 +249,25 @@ class PipelineStorage:
     ) -> Optional[str]:
         """
         Upload document file to DataStorageService and get image_url.
-        
-        This is Step 1 of the two-step upload process:
-        - Uploads file to get image_url
-        - Does NOT process document metadata (that happens later in step_process_document_page)
-        
-        [API: POST /api/v1/documents/upload]
-        Service: DataStorageService (separate microservice)
-        
-        API format:
-        - file * (binary): Document page image file
-        - owner_id * (integer): Document owner user ID
-        
-        Returns:
-        - image_url (string): Image URL for later use in /documents/process endpoint
-        
-        :param file_path: Local file path or URL to the document file
-        :param owner_id: Document owner user ID
-        :return: image_url string if successful, None if failed
         """
-        # Extract base URL from STORAGE_SERVICE_URL
+        # Build the full endpoint URL safely
+        endpoint_path = "/documents/upload"
+        
+        # Get base URL and ensure it doesn't end with /api/v1 if we're adding it
         base_url = _get_storage_base_url()
         if not base_url:
             return None
         
-        # Build the full endpoint URL
-        endpoint_path = "/api/v1/documents/upload"
-        full_url = f"{base_url}{endpoint_path}"
+        # Ensure we don't double up on /api/v1
+        if not base_url.endswith("/api/v1"):
+            api_prefix = "/api/v1"
+        else:
+            api_prefix = ""
+            
+        full_url = f"{base_url}{api_prefix}{endpoint_path}"
         
         try:
-            logger.info(f"Uploading file to DataStorageService")
-            logger.info(f"  Base URL: {base_url}")
-            logger.info(f"  Endpoint: {endpoint_path}")
-            logger.info(f"  Full URL: {full_url}")
-            logger.info(f"  Owner ID: {owner_id}")
+            logger.info(f"Uploading file to DataStorageService: {full_url}")
             
             # Read file content
             file_content = await self._read_file_content(file_path)
@@ -363,47 +348,25 @@ class PipelineStorage:
     ) -> Optional[Dict[str, Any]]:
         """
         Process document page metadata via DataStorageService API.
-        
-        This is Step 2 of the two-step upload process:
-        - Processes document page metadata using image_url from upload step
-        - Should be called AFTER pipeline processing is complete
-        
-        [API: POST /api/v1/documents/process]
-        Service: DataStorageService (separate microservice)
-        
-        API format (JSON body):
-        - image_url * (string): Image URL from /documents/upload endpoint
-        - owner_id * (integer): Document owner user ID
-        - page_number * (integer): Page number within document (1-indexed)
-        - ocr_text (string, optional): OCR extracted text for this page
-        - document_id (integer, optional): Existing document ID. If not provided, creates new document
-        - category_id (integer, optional): Document category ID
-        - location_id (integer, optional): Storage location ID (use -1 for no location)
-        
-        :param image_url: Image URL from upload step
-        :param owner_id: Document owner user ID
-        :param page_number: Page number within document (1-indexed)
-        :param ocr_text: OCR extracted text for this page (cleaned text from pipeline)
-        :param document_id: Optional existing document ID. If not provided, creates new document
-        :param category_id: Optional document category ID
-        :param location_id: Optional storage location ID (use -1 for no location)
-        :return: Response dictionary with document_id, page_id, image_url, status, or None if failed
         """
-        # Extract base URL from STORAGE_SERVICE_URL
+        # Build the full endpoint URL safely
+        endpoint_path = "/documents/process"
+        
         base_url = _get_storage_base_url()
         if not base_url:
             return None
-        
-        # Build the full endpoint URL
-        endpoint_path = "/api/v1/documents/process"
-        full_url = f"{base_url}{endpoint_path}"
+            
+        # Ensure we don't double up on /api/v1
+        if not base_url.endswith("/api/v1"):
+            api_prefix = "/api/v1"
+        else:
+            api_prefix = ""
+            
+        full_url = f"{base_url}{api_prefix}{endpoint_path}"
         
         try:
-            logger.info(f"Processing document page via DataStorageService")
-            logger.info(f"  Base URL: {base_url}")
-            logger.info(f"  Endpoint: {endpoint_path}")
-            logger.info(f"  Full URL: {full_url}")
-            logger.info(f"  Owner ID: {owner_id}, Page: {page_number}")
+            logger.info(f"Processing document page via DataStorageService: {full_url}")
+            logger.info(f"  Owner ID: {owner_id}, Page: {page_number}, Doc ID: {document_id}")
             
             # Prepare JSON payload
             process_payload: Dict[str, Any] = {
@@ -447,14 +410,16 @@ class PipelineStorage:
                     "page_id": process_result.get("page_id"),
                     "image_url": process_result.get("image_url") or image_url,
                     "status": process_result.get("status"),
-                    "page_number": process_result.get("page_number", page_number)
+                    "page_number": process_result.get("page_number", page_number),
+                    "items_created": process_result.get("items_created", 0)
                 }
                 
                 logger.info(
                     f"Document page processed successfully. "
                     f"Document ID: {result['document_id']}, "
                     f"Page ID: {result['page_id']}, "
-                    f"Status: {result['status']}"
+                    f"Status: {result['status']}, "
+                    f"Items created: {result['items_created']}"
                 )
                 return result
                 

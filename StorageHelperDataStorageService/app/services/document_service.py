@@ -13,6 +13,7 @@ from app.models.event import Event
 from app.models.document_embedding import DocumentEmbedding
 from app.models.document_page import DocumentPage
 from app.models.user import User
+from app.models.storage_location import StorageLocation
 from app.schemas.document import DocumentCreate, DocumentUpdate
 from app.integrations.storage_client import StorageClient, StorageException
 
@@ -346,6 +347,38 @@ class DocumentService:
             raise ValueError(f"File upload failed: {str(e)}")
 
     @staticmethod
+    def _get_or_create_location_by_name(db: Session, owner_id: int, location_name: str) -> Optional[int]:
+        """
+        Helper to find a location by name or create it if it doesn't exist.
+        """
+        if not location_name:
+            return None
+            
+        try:
+            # 1. Try to find existing location (case-insensitive)
+            location = db.query(StorageLocation).filter(
+                StorageLocation.user_id == owner_id,
+                StorageLocation.name.ilike(location_name)
+            ).first()
+            
+            if location:
+                return location.id
+            
+            # 2. Not found, auto-create it
+            logger.info(f"Auto-creating missing storage location: '{location_name}' for user {owner_id}")
+            new_location = StorageLocation(
+                user_id=owner_id,
+                name=location_name,
+                description=f"Auto-created location for {location_name} storage"
+            )
+            db.add(new_location)
+            db.flush() # Get new_location.id
+            return new_location.id
+        except Exception as e:
+            logger.error(f"Failed to get/create location '{location_name}': {e}")
+            return None
+
+    @staticmethod
     def process_document_page(
         db: Session,
         image_url: str,
@@ -375,7 +408,7 @@ class DocumentService:
             metadata: Optional document metadata
             
         Returns:
-            Tuple of (document_id, page_id, image_url)
+            Tuple of (document_id, page_id, image_url, items_created)
             
         Raises:
             ValueError: If operation fails
@@ -389,6 +422,21 @@ class DocumentService:
             # Normalize location_id: -1 means no location, convert to None
             normalized_location_id = None if location_id == -1 else location_id
             
+            # 🎯 AUTO-CREATE LOCATION LOGIC:
+            # If no location_id is provided (or it's -1) and we have an AI storage suggestion,
+            # create the location automatically.
+            if normalized_location_id is None and metadata and metadata.get("storage_suggestion"):
+                suggestion = metadata.get("storage_suggestion")
+                # Don't auto-create if it's "Other"
+                if suggestion and suggestion != "Other":
+                    created_id = DocumentService._get_or_create_location_by_name(db, owner_id, suggestion)
+                    if created_id:
+                        normalized_location_id = created_id
+                        logger.info(f"Automatically assigned document to new/existing location: {suggestion} (ID: {created_id})")
+
+            # Track items created
+            items_created = 0
+
             # Get or create document
             if document_id:
                 # Verify document exists and belongs to owner
@@ -416,6 +464,17 @@ class DocumentService:
                         current_metadata.update(metadata)
                         document.doc_metadata = current_metadata
                         db.add(document)
+                    
+                    # Special handling for Receipts: create child documents for each item
+                    if metadata and "items" in metadata:
+                        is_receipt = False
+                        if document.category_id:
+                            category = db.query(DocumentCategory).filter(DocumentCategory.id == document.category_id).first()
+                            if category and category.code.upper() in ["RECEIPT", "REC"]:
+                                is_receipt = True
+                        
+                        if is_receipt:
+                            items_created = DocumentService._create_item_documents(db, document, metadata)
             else:
                 # Create new document
                 document = Document(
@@ -430,6 +489,17 @@ class DocumentService:
                 db.add(document)
                 db.flush()  # Get document.id
                 document_id = document.id
+
+                # Special handling for Receipts: create child documents for each item (New Document)
+                if metadata and "items" in metadata:
+                    is_receipt = False
+                    if document.category_id:
+                        category = db.query(DocumentCategory).filter(DocumentCategory.id == document.category_id).first()
+                        if category and category.code.upper() in ["RECEIPT", "REC"]:
+                            is_receipt = True
+                    
+                    if is_receipt:
+                        items_created = DocumentService._create_item_documents(db, document, metadata)
             
             # Check if page already exists (for Step 3B updates, page might already exist)
             existing_page = db.query(DocumentPage).filter(
@@ -441,25 +511,35 @@ class DocumentService:
                 page_id = existing_page.id
                 returned_image_url = existing_page.image_url
                 db.commit()
-                return (document_id, page_id, returned_image_url)
+                return (document_id, page_id, returned_image_url, items_created)
             else:
-                # Create document page record
-                page = DocumentPage(
-                    document_id=document_id,
-                    page_number=page_number,
-                    image_url=image_url,
-                    ocr_text=ocr_text
-                )
-                db.add(page)
-                
-                # Update document thumbnail if first page
-                if page_number == 1:
-                    document.image_url = image_url
-                
-                db.commit()
-                db.refresh(page)
-                
-                return (document_id, page.id, image_url)
+                # If image_url is missing but we're updating an existing document, 
+                # try to fallback to the document's own thumbnail
+                if not image_url and document:
+                    image_url = document.image_url
+
+                # Only create a page if we have a valid image_url
+                if image_url:
+                    # Create document page record
+                    page = DocumentPage(
+                        document_id=document_id,
+                        page_number=page_number,
+                        image_url=image_url,
+                        ocr_text=ocr_text
+                    )
+                    db.add(page)
+                    
+                    # Update document thumbnail if first page
+                    if page_number == 1 and not document.image_url:
+                        document.image_url = image_url
+                    
+                    db.commit()
+                    db.refresh(page)
+                    return (document_id, page.id, image_url, items_created)
+                else:
+                    # No image_url and no fallback, just commit the metadata changes we made earlier
+                    db.commit()
+                    return (document_id, 0, None, items_created)
             
         except Exception as e:
             db.rollback()
@@ -609,3 +689,131 @@ class DocumentService:
                 raise e
             logger.error(f"Failed to delete document: {e}")
             raise ValueError(f"Failed to delete document: {str(e)}")
+
+    @staticmethod
+    def _create_item_documents(db: Session, receipt_doc: Document, metadata: Dict[str, Any]) -> int:
+        """
+        Create child Document records for each item in a receipt.
+        
+        Args:
+            db: Database session
+            receipt_doc: The parent receipt Document
+            metadata: The extracted metadata containing 'items'
+            
+        Returns:
+            Number of items created
+        """
+        try:
+            items_data = metadata.get("items", [])
+            if not items_data:
+                return 0
+
+            purchase_date_str = metadata.get("purchase_date")
+            purchase_date = None
+            if purchase_date_str:
+                try:
+                    from datetime import datetime
+                    purchase_date = datetime.strptime(purchase_date_str, "%Y-%m-%d")
+                except Exception:
+                    logger.warning(f"Failed to parse purchase_date: {purchase_date_str}")
+
+            # Delete existing child documents for this receipt to avoid duplicates on update
+            # We identify them by source_receipt_id in metadata
+            existing_items = db.query(Document).filter(
+                Document.owner_id == receipt_doc.owner_id
+            ).all()
+            for doc in existing_items:
+                if doc.doc_metadata and doc.doc_metadata.get("source_receipt_id") == receipt_doc.id:
+                    db.delete(doc)
+            db.flush()
+
+            items_created = 0
+            # For each item, create a new document
+            for item_data in items_data:
+                item_name = item_data.get("product_name") or item_data.get("original_text") or "Unknown Item"
+                category_code = item_data.get("category")
+                
+                # 1. Get or create the category for this item
+                category_id = None
+                if category_code:
+                    category = db.query(DocumentCategory).filter(
+                        DocumentCategory.user_id == receipt_doc.owner_id,
+                        DocumentCategory.code.ilike(category_code)
+                    ).first()
+                    if not category:
+                        # Auto-create kitchen category if it doesn't exist
+                        category = DocumentCategory(
+                            user_id=receipt_doc.owner_id,
+                            code=category_code.upper(),
+                            name=category_code.title(),
+                            description=f"Auto-created from receipt item"
+                        )
+                        db.add(category)
+                        db.flush()
+                    category_id = category.id
+
+                # 2. Determine location
+                # Try to map storage suggestion to an existing location, or create it
+                item_location_id = receipt_doc.current_location_id
+                item_location_name = None
+                storage_suggestion = item_data.get("storage_suggestion")
+                
+                if storage_suggestion and storage_suggestion != "Other":
+                    # Use helper to find or create the location
+                    created_id = DocumentService._get_or_create_location_by_name(db, receipt_doc.owner_id, storage_suggestion)
+                    if created_id:
+                        item_location_id = created_id
+                        # Get the name for metadata update
+                        matched_loc = db.query(StorageLocation).filter(StorageLocation.id == created_id).first()
+                        item_location_name = matched_loc.name if matched_loc else storage_suggestion
+                
+                # Update item_data in the metadata list so it reflects the matched/created location
+                item_data["location_id"] = item_location_id
+                item_data["location_name"] = item_location_name
+
+                # 3. Calculate expiry
+                expiry_date_str = None
+                shelf_life_days = item_data.get("estimated_shelf_life_days")
+                if shelf_life_days is not None and purchase_date:
+                    from datetime import timedelta
+                    expiry_date = purchase_date + timedelta(days=int(shelf_life_days))
+                    expiry_date_str = expiry_date.strftime("%Y-%m-%d")
+
+                # 4. Prepare metadata
+                item_doc_metadata = {
+                    "source_receipt_id": receipt_doc.id,
+                    "is_food": item_data.get("is_food", True),
+                    "quantity": str(item_data.get("quantity") or "1"),
+                    "purchase_date": purchase_date_str,
+                    "expiry_date": expiry_date_str,
+                    "status": "unopened",
+                    "original_text": item_data.get("original_text"),
+                    "suggested_storage": storage_suggestion # Store AI suggestion even if not matched to a location_id
+                }
+
+                # 5. Create the item document
+                item_doc = Document(
+                    title=item_name,
+                    owner_id=receipt_doc.owner_id,
+                    category_id=category_id,
+                    current_location_id=item_location_id,
+                    image_url=receipt_doc.image_url, # Reference the same image
+                    doc_metadata=item_doc_metadata
+                )
+                db.add(item_doc)
+                items_created += 1
+            
+            # Save updated metadata with location info back to receipt document
+            current_metadata = dict(receipt_doc.doc_metadata or {})
+            current_metadata["items"] = items_data
+            receipt_doc.doc_metadata = current_metadata
+            db.add(receipt_doc)
+            
+            db.flush()
+            logger.info(f"Created {items_created} item documents for receipt {receipt_doc.id}")
+            return items_created
+            
+        except Exception as e:
+            logger.error(f"Error creating item documents: {e}")
+            # Non-critical, don't raise
+            return 0

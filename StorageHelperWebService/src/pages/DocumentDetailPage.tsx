@@ -161,46 +161,18 @@ const DocumentDetailPage = () => {
   const handleSave = async () => {
     if (!document || !userId || !id) return
 
-    if (pages.length === 0) {
-      alert('Cannot update document: No pages found. Please ensure the document has been properly uploaded.')
-      return
-    }
-
     setSaving(true)
     try {
-      // Prepare page_results from existing pages
-      const pageResults = pages.map((page) => ({
-        page_number: page.page_number,
-        status: 'success' as const,
-        error: null,
-        ocr_text: page.ocr_text || '',
-        file_url: page.image_url,
-        document_id: document.id,
-        page_id: page.id
-      }))
-
-      // Prepare recommendation
-      const recommendation = {
-        category_id: selectedCategoryId || document.category_id,
-        location_id: selectedLocationId !== null ? selectedLocationId : -1,
-        metadata: document.metadata // Include updated metadata
-      }
-
-      // Call ingestion/confirm API to update document
-      const confirmRequest = {
-        page_results: pageResults,
-        recommendation: recommendation,
-        owner_id: userId,
-        document_id: document.id,
+      // Direct update using the new PATCH endpoint
+      const updateData = {
         category_id: selectedCategoryId,
-        location_id: selectedLocationId !== null ? selectedLocationId : -1,
-        embedding: null,
-        embedding_dimension: null
+        current_location_id: selectedLocationId !== null ? selectedLocationId : -1,
+        metadata: document.metadata
       }
 
-      const result = await ingestionService.confirm(confirmRequest)
+      const result = await documentService.update(document.id, updateData)
 
-      if (result.status === 'success' || result.status === 'partial_success') {
+      if (result.status === 'updated') {
         // Reload document to get updated data
         const pagesData = await documentService.getPages(parseInt(id))
         const updatedDoc = pagesData.document || document
@@ -463,7 +435,13 @@ const DocumentDetailPage = () => {
                   ) : (
                     <div className="flex items-center gap-2 text-home-text-light">
                       <MapPin size={18} />
-                      <span>Storage Location: No Location</span>
+                      <span>
+                        Storage Location: {document.metadata?.suggested_storage ? (
+                          <span className="text-amber-600 font-medium">
+                            AI Suggested: {document.metadata.suggested_storage}
+                          </span>
+                        ) : 'No Location'}
+                      </span>
                     </div>
                   )}
                   {(document.category_id != null && document.category_id > 0) ? (

@@ -36,6 +36,7 @@ class PipelineState:
     file_url: Optional[str] = None  # URL of file stored in database (from upload/process API)
     page_id: Optional[int] = None  # Page ID from database (from upload/process API)
     processed_page_number: Optional[int] = None  # Page number returned by /documents/process
+    items_created: int = 0  # Number of child item documents created
     file_upload_error: Optional[str] = None  # Error message if file upload failed
     embedding_save_error: Optional[str] = None  # Error message if embedding save failed
     
@@ -417,7 +418,10 @@ class IngestionPipeline:
                     location_id = -1
                 
                 # Get extracted metadata
-                metadata = rec_data.get("metadata")
+                metadata = (rec_data.get("metadata") or {}).copy()
+                if "storage_suggestion" in rec_data:
+                    metadata["storage_suggestion"] = rec_data["storage_suggestion"]
+                
                 if metadata:
                     logger.info(f"Metadata extracted for page processing: {metadata}")
             
@@ -451,6 +455,11 @@ class IngestionPipeline:
                 returned_page_number = process_result.get("page_number")
                 if returned_page_number is not None:
                     state.processed_page_number = returned_page_number
+                
+                # Update items created count from API response
+                returned_items_created = process_result.get("items_created")
+                if returned_items_created is not None:
+                    state.items_created = returned_items_created
                 
                 # Update document_id if we got one from the process step
                 # For first page: use returned document_id if we didn't have one
@@ -1152,6 +1161,7 @@ async def run_unified_ingestion_pipeline(
         # Count successes and failures
         successful_pages = sum(1 for r in processed_results if r["status"] == "success")
         failed_pages = total_pages - successful_pages
+        total_items_created = sum(r.get("items_created", 0) for r in processed_results if r["status"] == "success")
         
         # Step 3: Run Recommendation and Embedding on combined text from all pages
         recommendation_result = None
@@ -1419,7 +1429,8 @@ async def run_unified_ingestion_pipeline(
                         if page_state.page_id is not None:
                             page_result["page_id"] = page_state.page_id
                             page_result["document_id"] = page_state.document_id # 同时也更新页面级的 ID
-                            logger.info(f"Page processed successfully: page_id={page_state.page_id}, document_id={page_state.document_id}, page_number={global_page_num}")
+                            page_result["items_created"] = page_state.items_created
+                            logger.info(f"Page processed successfully: page_id={page_state.page_id}, document_id={page_state.document_id}, page_number={global_page_num}, items={page_state.items_created}")
                         else:
                             # If page_id is None, document processing may have failed
                             # Update error status in page_result
@@ -1490,6 +1501,7 @@ async def run_unified_ingestion_pipeline(
             "total_pages": total_pages,
             "successful_pages": successful_pages,
             "failed_pages": failed_pages,
+            "items_created": total_items_created,
             "page_results": processed_results
         }
         

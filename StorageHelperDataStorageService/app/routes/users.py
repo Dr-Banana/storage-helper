@@ -192,16 +192,16 @@ def delete_user(user_id: int, db: Session = Depends(get_db)):
 @router.get(
     "/{user_id}/documents",
     response_model=dict,
-    summary="Get all document IDs for a user",
-    description="Retrieve all document IDs owned by a specific user"
+    summary="Get all documents for a user",
+    description="Retrieve all documents owned by a specific user"
 )
 def get_user_documents(user_id: int, db: Session = Depends(get_db)):
     """
-    Get all document IDs for a specific user
+    Get all documents for a specific user
     
     - **user_id**: The user's ID
     
-    Returns a list of document IDs owned by the user
+    Returns a list of documents owned by the user
     """
     try:
         # Verify user exists
@@ -214,13 +214,18 @@ def get_user_documents(user_id: int, db: Session = Depends(get_db)):
         
         # Get all documents for the user
         from app.models.document import Document
-        documents = db.query(Document.id).filter(Document.owner_id == user_id).all()
-        document_ids = [doc.id for doc in documents]
+        from app.schemas.document import DocumentResponse
+        
+        documents = db.query(Document).filter(Document.owner_id == user_id).all()
+        
+        # Convert to response objects
+        doc_responses = [DocumentResponse.model_validate(doc).model_dump(by_alias=True) for doc in documents]
         
         return {
             "user_id": user_id,
-            "total": len(document_ids),
-            "document_ids": document_ids
+            "total": len(documents),
+            "documents": doc_responses,
+            "document_ids": [doc.id for doc in documents] # Keep document_ids for backward compatibility
         }
     except HTTPException:
         raise

@@ -189,7 +189,16 @@ const ReceiptMetadataViewer: React.FC<{
                       className="w-full text-sm font-medium border border-home-primary-200 rounded px-1 focus:ring-0"
                     />
                   ) : (
-                    <span className="text-sm text-home-text-dark font-medium">{item.storage_suggestion}</span>
+                    <div className="flex flex-col">
+                      {item.location_name ? (
+                        <span className="text-sm text-green-600 font-bold">{item.location_name}</span>
+                      ) : (
+                        <span className="text-sm text-home-text-dark font-medium">{item.storage_suggestion}</span>
+                      )}
+                      {!item.location_id && item.storage_suggestion && (
+                        <span className="text-[10px] text-amber-600 font-medium italic">AI Suggested</span>
+                      )}
+                    </div>
                   )}
                 </td>
                 <td className="px-4 py-3 text-center">

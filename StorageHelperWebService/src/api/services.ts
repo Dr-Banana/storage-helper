@@ -216,10 +216,10 @@ export const userService = {
   },
 
   /**
-   * Get all document IDs for a user
+   * Get all documents for a user
    * GET /api/users/{user_id}/documents
    */
-  getDocuments: async (userId: number): Promise<{ user_id: number; total: number; document_ids: number[] }> => {
+  getDocuments: async (userId: number): Promise<{ user_id: number; total: number; documents: Document[] }> => {
     const response = await apiClient.get(`/users/${userId}/documents`)
     return response.data
   },
@@ -265,6 +265,50 @@ export const documentService = {
     const response = await apiClient.put(`/documents/${documentId}/location`, {
       location_id: locationIdValue
     })
+    return response.data
+  },
+
+  /**
+   * Search for similar documents by embedding
+   * POST /api/v1/documents/search-similar
+   */
+  searchSimilar: async (
+    embedding: number[],
+    limit: number = 10,
+    ownerId?: number
+  ): Promise<{
+    count: number
+    documents: Document[]
+  }> => {
+    const formData = new FormData()
+    formData.append('embedding', JSON.stringify(embedding))
+    formData.append('limit', (limit ?? 10).toString())
+    if (ownerId !== undefined && ownerId !== null) {
+      formData.append('owner_id', ownerId.toString())
+    }
+    
+    const response = await apiClient.post('/v1/documents/search-similar', formData, {
+      headers: {
+        'Content-Type': 'multipart/form-data',
+      },
+    })
+    return response.data
+  },
+
+  /**
+   * Update document details directly
+   * PATCH /api/documents/{document_id}
+   */
+  update: async (
+    documentId: number,
+    data: {
+      title?: string
+      category_id?: number | null
+      current_location_id?: number | null
+      metadata?: Record<string, any>
+    }
+  ): Promise<{ id: number; status: string; message: string }> => {
+    const response = await apiClient.patch(`/documents/${documentId}`, data)
     return response.data
   },
 

@@ -36,7 +36,7 @@ class DocumentResponse(BaseModel):
     event_id: Optional[int] = None
     current_location_id: Optional[int] = None
     image_url: Optional[str] = None
-    doc_metadata: Optional[Dict[str, Any]] = Field(None, alias="metadata")
+    doc_metadata: Optional[Dict[str, Any]] = Field(None, validation_alias="doc_metadata", serialization_alias="metadata")
     created_at: datetime
     updated_at: datetime
 
@@ -54,7 +54,7 @@ class DocumentWithPagesResponse(BaseModel):
     event_id: Optional[int] = None
     current_location_id: Optional[int] = None
     image_url: Optional[str] = None
-    doc_metadata: Optional[Dict[str, Any]] = Field(None, alias="metadata")
+    doc_metadata: Optional[Dict[str, Any]] = Field(None, validation_alias="doc_metadata", serialization_alias="metadata")
     pages: Optional[list] = Field(None, description="List of document pages")
     created_at: datetime
     updated_at: datetime

@@ -393,10 +393,22 @@ const UploadPage = () => {
                 <div>
                   <p className="text-xs text-home-text-light mb-1">Recommended Location</p>
                   <p className="text-sm font-medium text-home-text-dark">
-                    {ingestionResult.recommendation.location_id && ingestionResult.recommendation.location_id !== -1
-                      ? (locations.find(l => l.id === ingestionResult.recommendation.location_id)?.name || 
-                         `ID: ${ingestionResult.recommendation.location_id}`)
-                      : 'No Location'}
+                    {selectedCategoryId && (categories.find(c => c.id === selectedCategoryId)?.code === 'REC' || categories.find(c => c.id === selectedCategoryId)?.code === 'RECEIPT') ? (
+                      <span className="text-home-primary-600 flex items-center gap-1">
+                        <FileText size={14} />
+                        Distributed by Item (see table)
+                      </span>
+                    ) : (
+                      ingestionResult.recommendation.location_id && ingestionResult.recommendation.location_id !== -1
+                        ? (locations.find(l => l.id === ingestionResult.recommendation.location_id)?.name || 
+                           `ID: ${ingestionResult.recommendation.location_id}`)
+                        : (ingestionResult.recommendation.storage_suggestion 
+                           ? <span className="text-amber-600 flex items-center gap-1">
+                               <AlertCircle size={14} />
+                               AI Suggestion: {ingestionResult.recommendation.storage_suggestion}
+                             </span>
+                           : 'No Location matched')
+                    )}
                   </p>
                 </div>
               </div>
@@ -511,6 +523,19 @@ const UploadPage = () => {
                 </option>
               ))}
             </select>
+            {selectedLocationId === -1 && (
+              <div className="mt-2 p-3 bg-amber-50 border border-amber-200 rounded-home text-xs text-amber-700">
+                <p className="font-semibold flex items-center gap-1 mb-1">
+                  <AlertCircle size={14} />
+                  {locations.length === 0 ? 'No storage locations found.' : 'No location selected.'}
+                </p>
+                <p>
+                  Items will be saved with AI storage suggestions 
+                  {ingestionResult.recommendation.storage_suggestion ? ` (e.g., "${ingestionResult.recommendation.storage_suggestion}")` : ''}. 
+                  You can organize them into physical locations later.
+                </p>
+              </div>
+            )}
           </div>
 
           {/* Page Results Preview */}

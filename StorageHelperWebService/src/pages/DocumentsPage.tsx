@@ -1,33 +1,32 @@
 import { useState, useEffect } from 'react'
 import { Link } from 'react-router-dom'
-import { FileText, Calendar, User, Search, Trash2 } from 'lucide-react'
-import { documentService, userService, Document, DocumentFile } from '../api/services'
+import { 
+  FileText, 
+  Search, 
+  Trash2, 
+  LayoutGrid, 
+  List as ListIcon, 
+  MapPin, 
+  Clock,
+  ChevronRight
+} from 'lucide-react'
+import { documentService, userService, categoryService, locationService, Document, DocumentFile, DocumentCategory, StorageLocation } from '../api/services'
 import { useAuth } from '../contexts/AuthContext'
+import CategoryIcon from '../components/CategoryIcon'
 
-interface DocumentWithFiles extends Document {
+interface DocumentWithExtras extends Document {
   previewFiles?: DocumentFile[]
+  category?: DocumentCategory
+  location?: StorageLocation
 }
 
 const DocumentsPage = () => {
   const { userId } = useAuth()
-  const [documents, setDocuments] = useState<DocumentWithFiles[]>([])
+  const [documents, setDocuments] = useState<DocumentWithExtras[]>([])
   const [loading, setLoading] = useState(true)
   const [searchQuery, setSearchQuery] = useState('')
-  const [user, setUser] = useState<{ id: number; display_name: string } | null>(null)
-  const [loadingFiles, setLoadingFiles] = useState<Set<number>>(new Set())
-
-  useEffect(() => {
-    const loadUser = async () => {
-      if (!userId) return
-      try {
-        const userData = await userService.getById(userId)
-        setUser({ id: userData.id, display_name: userData.display_name })
-      } catch (error) {
-        console.error('Failed to load user:', error)
-      }
-    }
-    loadUser()
-  }, [userId])
+  const [viewMode, setViewMode] = useState<'grid' | 'list'>('grid')
+  const [filterType, setFilterType] = useState<'all' | 'receipt' | 'food'>('all')
 
   useEffect(() => {
     const loadDocuments = async () => {
@@ -36,28 +35,36 @@ const DocumentsPage = () => {
       try {
         setLoading(true)
         
-        // Get document IDs for current user
+        // Get all document objects for current user (DataStorageService API now returns full list)
         const docsResponse = await userService.getDocuments(userId)
+        const rawDocs = docsResponse.documents || []
         
-        // Create minimal document objects
-        const userDocs: DocumentWithFiles[] = docsResponse.document_ids.map(docId => ({
-          id: docId,
-          title: `Document #${docId}`,
-          owner_id: userId,
-          created_at: new Date().toISOString(),
-          updated_at: new Date().toISOString(),
+        // Load categories and locations for enrichment
+        const [categoriesRes, locationsRes] = await Promise.all([
+          categoryService.getByUserId(userId),
+          locationService.getByUserId(userId)
+        ])
+        
+        const categoryMap = new Map(categoriesRes.categories.map(c => [c.id, c]))
+        const locationMap = new Map(locationsRes.locations.map(l => [l.id, l]))
+        
+        // Enrich documents with category and location objects
+        const enrichedDocs: DocumentWithExtras[] = rawDocs.map((doc: any) => ({
+          ...doc,
           previewFiles: [],
+          category: doc.category_id ? categoryMap.get(doc.category_id) : undefined,
+          location: doc.current_location_id ? locationMap.get(doc.current_location_id) : undefined
         }))
         
-        // Sort by created_at descending (newest first)
-        userDocs.sort((a, b) => 
+        // Sort by created_at descending
+        enrichedDocs.sort((a, b) => 
           new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
         )
         
-        setDocuments(userDocs)
+        setDocuments(enrichedDocs)
         
-        // Load preview files for each document
-        loadPreviewFiles(userDocs)
+        // Load preview files only for non-food items
+        loadPreviewFiles(enrichedDocs.filter(d => !d.metadata?.is_food))
       } catch (error) {
         console.error('Failed to load documents:', error)
       } finally {
@@ -68,42 +75,26 @@ const DocumentsPage = () => {
     loadDocuments()
   }, [userId])
 
-  const loadPreviewFiles = async (docs: DocumentWithFiles[]) => {
-    const loadingSet = new Set<number>()
-    
+  const loadPreviewFiles = async (docs: DocumentWithExtras[]) => {
     for (const doc of docs) {
-      if (loadingSet.has(doc.id)) continue
-      
-      loadingSet.add(doc.id)
-      setLoadingFiles(prev => new Set(prev).add(doc.id))
-      
       try {
         const pagesData = await documentService.getPages(doc.id)
         
         // Use files field from API response (already deduplicated)
         const fileList = pagesData.files || []
         
-        // Update document with preview files
+        // Update document with preview files and full details
+        const fullDoc = pagesData.document;
         setDocuments(prevDocs => 
           prevDocs.map(d => 
-            d.id === doc.id ? { ...d, previewFiles: fileList } : d
+            d.id === doc.id ? { ...d, ...fullDoc, previewFiles: fileList } : d
           )
         )
       } catch (error) {
         console.error(`Failed to load preview files for document ${doc.id}:`, error)
-      } finally {
-        setLoadingFiles(prev => {
-          const newSet = new Set(prev)
-          newSet.delete(doc.id)
-          return newSet
-        })
       }
     }
   }
-
-  const filteredDocuments = documents.filter((doc) =>
-    doc.title?.toLowerCase().includes(searchQuery.toLowerCase())
-  )
 
   const handleDelete = async (e: React.MouseEvent, docId: number) => {
     e.preventDefault()
@@ -122,151 +113,247 @@ const DocumentsPage = () => {
     }
   }
 
+  const getExpiryStatus = (expiryDate?: string) => {
+    if (!expiryDate) return null;
+    const days = Math.ceil((new Date(expiryDate).getTime() - new Date().getTime()) / (1000 * 60 * 60 * 24));
+    if (days < 0) return { label: 'Expired', color: 'bg-red-100 text-red-700' };
+    if (days <= 3) return { label: `In ${days} days`, color: 'bg-orange-100 text-orange-700' };
+    return { label: `${days} days left`, color: 'bg-green-100 text-green-700' };
+  };
+
+  const filteredDocuments = documents.filter((doc) => {
+    const matchesSearch = doc.title?.toLowerCase().includes(searchQuery.toLowerCase()) || 
+                         doc.metadata?.product_name?.toLowerCase().includes(searchQuery.toLowerCase()) ||
+                         doc.category?.name?.toLowerCase().includes(searchQuery.toLowerCase());
+    
+    if (filterType === 'receipt') return matchesSearch && (doc.category?.code === 'REC' || doc.category?.code === 'RECEIPT');
+    if (filterType === 'food') return matchesSearch && doc.metadata?.is_food;
+    return matchesSearch;
+  });
+
   return (
     <div className="max-w-7xl mx-auto">
       {/* Page title and actions */}
       <div className="mb-6 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
-        <h1 className="text-3xl font-bold text-home-text-dark">My Documents</h1>
+        <div>
+          <h1 className="text-3xl font-bold text-home-text-dark">My Inventory</h1>
+          <p className="text-home-text-light mt-1">Manage your documents and kitchen items</p>
+        </div>
         <Link
           to="/upload"
           className="btn-primary inline-flex items-center justify-center gap-2"
         >
           <FileText size={20} />
-          Upload New Document
+          New Upload
         </Link>
       </div>
 
       {/* Search and filter bar */}
-      <div className="card mb-6">
-        <div className="flex flex-col sm:flex-row gap-4">
-          <div className="flex-1 relative">
-            <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 text-home-text-light" size={20} />
-            <input
-              type="text"
-              placeholder="Search documents..."
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              className="input pl-10"
-            />
-          </div>
+      <div className="flex flex-col md:flex-row gap-4 mb-8">
+        <div className="flex-1 relative">
+          <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 text-home-text-light" size={20} />
+          <input
+            type="text"
+            placeholder="Search items, categories, receipts..."
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            className="input pl-10 w-full"
+          />
+        </div>
+        <div className="flex items-center gap-2 bg-white p-1 rounded-lg border border-home-primary-200 shadow-sm">
+          <button 
+            onClick={() => setFilterType('all')}
+            className={`px-4 py-1.5 rounded-md text-sm font-medium transition-colors ${filterType === 'all' ? 'bg-home-primary-500 text-white' : 'text-home-text-light hover:bg-home-primary-50'}`}
+          >
+            All
+          </button>
+          <button 
+            onClick={() => setFilterType('food')}
+            className={`px-4 py-1.5 rounded-md text-sm font-medium transition-colors ${filterType === 'food' ? 'bg-home-primary-500 text-white' : 'text-home-text-light hover:bg-home-primary-50'}`}
+          >
+            Food
+          </button>
+          <button 
+            onClick={() => setFilterType('receipt')}
+            className={`px-4 py-1.5 rounded-md text-sm font-medium transition-colors ${filterType === 'receipt' ? 'bg-home-primary-500 text-white' : 'text-home-text-light hover:bg-home-primary-50'}`}
+          >
+            Receipts
+          </button>
+        </div>
+        <div className="flex items-center gap-1 bg-white p-1 rounded-lg border border-home-primary-200 shadow-sm">
+          <button 
+            onClick={() => setViewMode('grid')}
+            className={`p-1.5 rounded-md ${viewMode === 'grid' ? 'bg-home-primary-100 text-home-primary-600' : 'text-home-text-light'}`}
+          >
+            <LayoutGrid size={20} />
+          </button>
+          <button 
+            onClick={() => setViewMode('list')}
+            className={`p-1.5 rounded-md ${viewMode === 'list' ? 'bg-home-primary-100 text-home-primary-600' : 'text-home-text-light'}`}
+          >
+            <ListIcon size={20} />
+          </button>
         </div>
       </div>
 
       {/* Document list */}
       {loading ? (
-        <div className="card text-center py-12">
+        <div className="text-center py-20">
           <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-home-primary-500 mx-auto"></div>
-          <p className="mt-4 text-home-text-light">Loading...</p>
+          <p className="mt-4 text-home-text-light font-medium">Loading inventory...</p>
         </div>
       ) : filteredDocuments.length === 0 ? (
-        <div className="card text-center py-12">
-          <FileText className="mx-auto mb-4 text-home-primary-300" size={48} />
-          <p className="text-home-text-light mb-4">
-            {searchQuery ? 'No matching documents found' : 'No documents yet'}
+        <div className="card text-center py-20 bg-home-background-light border-dashed border-2 border-home-primary-200">
+          <FileText className="mx-auto mb-4 text-home-primary-300" size={64} />
+          <h3 className="text-xl font-bold text-home-text-dark mb-2">No items found</h3>
+          <p className="text-home-text-light mb-8 max-w-sm mx-auto">
+            {searchQuery ? `We couldn't find anything matching "${searchQuery}"` : "Your inventory is currently empty. Start by uploading a receipt or food photo."}
           </p>
           {!searchQuery && (
-            <Link to="/upload" className="btn-primary inline-flex items-center gap-2">
-              Upload First Document
+            <Link to="/upload" className="btn-primary inline-flex items-center gap-2 px-8">
+              Upload First Item
             </Link>
           )}
         </div>
-      ) : (
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-          {filteredDocuments.map((doc) => (
-            <Link
-              key={doc.id}
-              to={`/documents/${doc.id}`}
-              state={{ ownerId: doc.owner_id }}
-              className="card hover:shadow-home-lg transition-all duration-200 group relative"
-            >
-              {/* Delete button */}
-              <button
-                onClick={(e) => handleDelete(e, doc.id)}
-                className="absolute top-2 right-2 p-2 bg-red-50 text-red-500 rounded-full opacity-0 group-hover:opacity-100 transition-opacity duration-200 hover:bg-red-100 z-10"
-                title="Delete document"
+      ) : viewMode === 'grid' ? (
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
+          {filteredDocuments.map((doc) => {
+            const isFood = doc.metadata?.is_food;
+            const expiry = getExpiryStatus(doc.metadata?.expiry_date);
+            
+            return (
+              <Link
+                key={doc.id}
+                to={`/documents/${doc.id}`}
+                className="group bg-white rounded-2xl border border-home-primary-100 shadow-sm hover:shadow-home-lg transition-all duration-300 overflow-hidden flex flex-col h-full relative"
               >
-                <Trash2 size={18} />
-              </button>
+                {/* Delete button (hover only) */}
+                <button
+                  onClick={(e) => handleDelete(e, doc.id)}
+                  className="absolute top-3 right-3 p-2 bg-white/90 backdrop-blur-sm text-red-500 rounded-full opacity-0 group-hover:opacity-100 transition-all duration-200 hover:bg-red-500 hover:text-white z-20 shadow-sm"
+                >
+                  <Trash2 size={16} />
+                </button>
 
-              {/* Show preview files if available */}
-              {doc.previewFiles && doc.previewFiles.length > 0 ? (
-                <div className="mb-4 relative h-56 rounded-home overflow-hidden bg-home-background-dark border border-home-primary-100 group-hover:border-home-primary-300 transition-colors">
-                  {/* Main Preview (first file) */}
-                  {(() => {
-                    const firstFile = doc.previewFiles[0];
-                    return firstFile.file_type === 'pdf' ? (
-                      <div className="w-full h-full relative">
-                        <iframe
-                          src={`${firstFile.url}#toolbar=0&navpanes=0&scrollbar=0&page=1&zoom=page-fit`}
-                          className="w-full h-full border-0"
-                          title={`PDF Preview ${doc.id}`}
-                          style={{ 
-                            pointerEvents: 'none',
-                            width: '100%',
-                            height: '100%'
-                          }}
-                        />
-                      </div>
-                    ) : (
-                      <img
-                        src={firstFile.url}
-                        alt={doc.title || 'Document'}
-                        className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
+                {/* Media Section */}
+                <div className="relative aspect-[4/3] bg-home-background-dark overflow-hidden">
+                  {doc.image_url ? (
+                    <img
+                      src={doc.image_url}
+                      alt={doc.title}
+                      className="w-full h-full object-cover group-hover:scale-110 transition-transform duration-500"
+                    />
+                  ) : (
+                    <div className="w-full h-full flex flex-col items-center justify-center p-6 text-center">
+                      <CategoryIcon 
+                        categoryCode={doc.category?.code || (isFood ? 'VEGETABLE' : 'UNKNOWN')} 
+                        size={48} 
+                        className="mb-3 transform group-hover:scale-110 transition-transform duration-300 shadow-sm"
                       />
-                    );
-                  })()}
-                  
-                  {/* Badge for total files if > 1 */}
-                  {doc.previewFiles.length > 1 && (
-                    <div className="absolute bottom-3 right-3 bg-home-text-dark/70 text-white text-[10px] font-bold px-2 py-1 rounded shadow-sm backdrop-blur-[2px] flex items-center gap-1 z-10">
-                      <FileText size={10} />
-                      <span>{doc.previewFiles.length} PAGES</span>
+                      {!isFood && <FileText className="text-home-primary-200" size={32} />}
                     </div>
                   )}
                   
-                  {/* Overlay on hover */}
-                  <div className="absolute inset-0 bg-home-primary-900/0 group-hover:bg-home-primary-900/5 transition-colors duration-300" />
+                  {/* Category Badge */}
+                  {doc.category && (
+                    <div className="absolute bottom-3 left-3 px-2.5 py-1 bg-white/90 backdrop-blur-sm rounded-lg shadow-sm text-[10px] font-bold text-home-primary-700 uppercase tracking-wider border border-white/50">
+                      {doc.category.name}
+                    </div>
+                  )}
+
+                  {/* Expiry Overlay */}
+                  {expiry && (
+                    <div className={`absolute top-3 left-3 px-2 py-1 rounded-md text-[10px] font-bold shadow-sm ${expiry.color}`}>
+                      {expiry.label}
+                    </div>
+                  )}
                 </div>
-              ) : doc.image_url ? (
-                <div className="mb-4 h-56 rounded-home overflow-hidden bg-home-background-dark border border-home-primary-100">
-                  <img
-                    src={doc.image_url}
-                    alt={doc.title || 'Document'}
-                    className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
-                  />
-                </div>
-              ) : loadingFiles.has(doc.id) ? (
-                <div className="mb-4 h-56 rounded-home overflow-hidden bg-home-background-dark border border-home-primary-100 flex items-center justify-center">
-                  <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-home-primary-500"></div>
-                </div>
-              ) : (
-                <div className="mb-4 h-56 rounded-home overflow-hidden bg-home-background-light border border-dashed border-home-primary-200 flex items-center justify-center">
-                  <FileText className="text-home-primary-200" size={48} />
-                </div>
-              )}
-              <h3 className="text-lg font-semibold text-home-text-dark mb-2 line-clamp-2">
-                {doc.title || `Document #${doc.id}`}
-              </h3>
-              <div className="flex items-center gap-4 text-sm text-home-text-light">
-                <div className="flex items-center gap-1">
-                  <Calendar size={16} />
-                  <span>{new Date(doc.created_at).toLocaleDateString('en-US')}</span>
-                </div>
-                {user && (
-                  <div className="flex items-center gap-1">
-                    <User size={16} />
-                    <span>{user.display_name}</span>
+
+                {/* Content Section */}
+                <div className="p-4 flex-1 flex flex-col">
+                  <h3 className="font-bold text-home-text-dark mb-1 line-clamp-1 group-hover:text-home-primary-600 transition-colors">
+                    {(() => {
+                      if (doc.metadata?.merchant) return doc.metadata.merchant;
+                      if (doc.metadata?.product_name) return doc.metadata.product_name;
+                      if (doc.title && !doc.title.startsWith('uploaded_')) return doc.title;
+                      return `Document #${doc.id}`;
+                    })()}
+                  </h3>
+                  
+                  <div className="flex flex-col gap-2 mt-auto">
+                    <div className="flex items-center gap-1.5 text-xs text-home-text-light">
+                      <MapPin size={14} className="text-home-primary-400" />
+                      <span className="truncate">
+                        {doc.location?.name || doc.metadata?.suggested_storage || 'No location'}
+                      </span>
+                    </div>
+                    <div className="flex items-center justify-between pt-3 border-t border-home-primary-50">
+                      <div className="flex items-center gap-1 text-[10px] text-home-text-light font-medium uppercase tracking-tight">
+                        <Clock size={12} />
+                        {new Date(doc.created_at).toLocaleDateString()}
+                      </div>
+                      {doc.previewFiles && doc.previewFiles.length > 1 && (
+                        <div className="bg-home-primary-50 text-home-primary-600 text-[10px] font-bold px-1.5 py-0.5 rounded uppercase">
+                          {doc.previewFiles.length} Pages
+                        </div>
+                      )}
+                    </div>
                   </div>
-                )}
-                {doc.previewFiles && doc.previewFiles.length > 0 && (
-                  <div className="flex items-center gap-1">
-                    <FileText size={16} />
-                    <span>{doc.previewFiles.length} {doc.previewFiles.length === 1 ? 'file' : 'files'}</span>
+                </div>
+              </Link>
+            )
+          })}
+        </div>
+      ) : (
+        /* List View */
+        <div className="bg-white rounded-2xl border border-home-primary-100 shadow-sm overflow-hidden">
+          <div className="divide-y divide-home-primary-50">
+            {filteredDocuments.map((doc) => {
+              const isFood = doc.metadata?.is_food;
+              const expiry = getExpiryStatus(doc.metadata?.expiry_date);
+              
+              return (
+                <Link
+                  key={doc.id}
+                  to={`/documents/${doc.id}`}
+                  className="flex items-center gap-4 p-4 hover:bg-home-primary-50 transition-colors group"
+                >
+                  <div className="w-12 h-12 rounded-xl bg-home-background-dark overflow-hidden flex-shrink-0 flex items-center justify-center">
+                    {doc.image_url ? (
+                      <img src={doc.image_url} className="w-full h-full object-cover" />
+                    ) : (
+                      <CategoryIcon categoryCode={doc.category?.code || (isFood ? 'VEGETABLE' : 'UNKNOWN')} size={20} />
+                    )}
                   </div>
-                )}
-              </div>
-            </Link>
-          ))}
+                  
+                  <div className="flex-1 min-w-0">
+                    <h4 className="font-bold text-home-text-dark truncate">
+                      {doc.metadata?.product_name || doc.metadata?.merchant || doc.title}
+                    </h4>
+                    <div className="flex items-center gap-3 mt-0.5">
+                      <span className="text-xs text-home-text-light flex items-center gap-1">
+                        <MapPin size={12} />
+                        {doc.location?.name || doc.metadata?.suggested_storage || 'No location'}
+                      </span>
+                      {expiry && (
+                        <span className={`text-[10px] px-1.5 py-0.5 rounded font-bold uppercase ${expiry.color}`}>
+                          {expiry.label}
+                        </span>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="flex items-center gap-4 flex-shrink-0 pr-2">
+                    <div className="text-right hidden sm:block">
+                      <p className="text-xs font-medium text-home-text-dark">{doc.category?.name || 'Uncategorized'}</p>
+                      <p className="text-[10px] text-home-text-light uppercase">{new Date(doc.created_at).toLocaleDateString()}</p>
+                    </div>
+                    <ChevronRight size={20} className="text-home-primary-300 group-hover:text-home-primary-500 transform group-hover:translate-x-1 transition-all" />
+                  </div>
+                </Link>
+              )
+            })}
+          </div>
         </div>
       )}
     </div>

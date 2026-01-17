@@ -113,6 +113,14 @@ class DocumentLocationUpdate(BaseModel):
     location_id: int
 
 
+class DocumentUpdate(BaseModel):
+    """Request model for updating document details"""
+    title: Optional[str] = None
+    category_id: Optional[int] = None
+    current_location_id: Optional[int] = None
+    metadata: Optional[Dict[str, Any]] = None
+
+
 class EmbeddingRequest(BaseModel):
     """Request model for updating document embedding"""
     document_id: int
@@ -352,6 +360,68 @@ def search_documents(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to search documents: {str(e)}"
+        )
+
+
+@router.patch(
+    "/{document_id}",
+    response_model=dict,
+    summary="Update document details",
+    description="Update document title, category, location, or metadata directly."
+)
+def update_document(
+    document_id: int,
+    update_data: DocumentUpdate,
+    db: Session = Depends(get_db)
+):
+    """
+    Update document details directly.
+    """
+    try:
+        document = db.query(Document).filter(Document.id == document_id).first()
+        if not document:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Document with ID {document_id} not found"
+            )
+        
+        if update_data.title is not None:
+            document.title = update_data.title
+        
+        if update_data.category_id is not None:
+            document.category_id = update_data.category_id
+            
+        if update_data.current_location_id is not None:
+            # Handle -1 as None (no location)
+            loc_id = None if update_data.current_location_id == -1 else update_data.current_location_id
+            document.current_location_id = loc_id
+            
+        if update_data.metadata is not None:
+            # Merge metadata
+            current_metadata = dict(document.doc_metadata or {})
+            current_metadata.update(update_data.metadata)
+            document.doc_metadata = current_metadata
+            
+            # Special logic: If this is a receipt and items are updated, we might need to sync items
+            # But for simplicity in this direct update, we just save the metadata.
+            # If the user wants full re-sync, they should use the ingestion pipeline.
+            # For food items, this is exactly what we need.
+
+        db.commit()
+        db.refresh(document)
+        
+        return {
+            "id": document.id,
+            "status": "updated",
+            "message": "Document updated successfully"
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to update document: {str(e)}"
         )
 
 
