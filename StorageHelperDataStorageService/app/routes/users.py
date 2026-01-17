@@ -2,11 +2,13 @@
 User management routes
 """
 from sqlalchemy.orm import Session
-from fastapi import APIRouter, Depends, HTTPException, status
-from typing import List
+from fastapi import APIRouter, Depends, HTTPException, status, Path
+from typing import List, Annotated
 import urllib.parse
 
 from app.core.database import get_db
+from app.core.auth import get_current_user_id
+from app.core.auth_decorators import get_document_if_owner
 from app.services.user_service import UserService
 from app.schemas.user import UserCreate, UserUpdate, UserResponse, UserListResponse
 from app.schemas.category import CategoryCreate
@@ -336,8 +338,9 @@ def get_user_locations(user_id: int, db: Session = Depends(get_db)):
     description="Create a new document category for a specific user"
 )
 def create_user_category(
-    user_id: int,
+    user_id: Annotated[int, Path()],
     category_data: CategoryCreate,
+    current_user_id: Annotated[int, Depends(get_current_user_id)],
     db: Session = Depends(get_db)
 ) -> dict:
     """
@@ -347,7 +350,16 @@ def create_user_category(
     - **category_data**: Category information (code, name, description, classification)
     
     Returns nothing on success, error message on failure
+    
+    Authorization: user_id must match current user
     """
+    # Verify user_id matches current user
+    if user_id != current_user_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Cannot perform this action for other users"
+        )
+    
     try:
         # Verify user exists
         user = UserService.get_user_by_id(db, user_id)

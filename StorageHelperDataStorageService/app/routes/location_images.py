@@ -6,12 +6,14 @@ Allows associating image URLs with storage locations.
 """
 from fastapi import APIRouter, Depends, HTTPException, status, Query, UploadFile, File, Form
 from sqlalchemy.orm import Session
-from typing import Optional
+from typing import Optional, Annotated
 from pydantic import BaseModel, Field, HttpUrl
 from io import BytesIO
 import urllib.parse
 
 from app.core.database import get_db
+from app.core.auth import get_current_user_id
+from app.core.auth_decorators import get_location_if_owner
 from app.models.storage_location import StorageLocation
 from app.schemas.location import LocationResponse
 from app.integrations import StorageClient
@@ -280,45 +282,25 @@ def update_location_image(
     Retrieve the image URL and details of a storage location.
     
     - **location_id**: ID of the storage location (path parameter)
-    - **user_id**: User ID (query parameter, for authorization check)
     """
 )
 def get_location_image(
-    location_id: int,
-    user_id: int = Query(None, description="User ID (for authorization check)"),
-    db: Session = Depends(get_db)
+    location: Annotated[StorageLocation, Depends(get_location_if_owner)]
 ):
     """
     Get the image URL and details of a storage location.
     
     - **location_id**: ID of the storage location
-    - **user_id**: User ID (optional, for authorization check)
     
     Returns LocationResponse with the image_url
+    
+    Authorization: User must own the location (verified by dependency)
     
     Raises:
     - 404: Location not found
     - 403: User not authorized to view this location
     """
     try:
-        # Fetch the location
-        location = db.query(StorageLocation).filter(
-            StorageLocation.id == location_id
-        ).first()
-        
-        if not location:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Storage location with id {location_id} not found"
-            )
-        
-        # Verify user ownership if user_id is provided
-        if user_id and location.user_id != user_id:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="User not authorized to view this location"
-            )
-        
         return LocationResponse(
             id=location.id,
             user_id=location.user_id,

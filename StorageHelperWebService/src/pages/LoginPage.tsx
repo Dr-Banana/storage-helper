@@ -25,8 +25,8 @@ const LoginPage = () => {
       // Send token to backend for authentication
       const response = await userService.googleLogin(credentialResponse.credential)
       
-      // Login successful
-      login(response.user_id, response.email, response.display_name)
+      // Login successful - now with auth token
+      login(response.user_id, response.email, response.display_name, response.auth_token)
       
       // Show message for new users
       if (response.is_new_user) {

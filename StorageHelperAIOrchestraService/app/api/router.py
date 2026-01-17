@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, BackgroundTasks, UploadFile, File, Form, Request
+from fastapi import APIRouter, HTTPException, BackgroundTasks, UploadFile, File, Form, Request, Depends, status, Header
 from fastapi.responses import JSONResponse, StreamingResponse
 import logging
 import json
@@ -7,6 +7,7 @@ from typing import List, Optional, Dict, Any
 import tempfile
 import os
 import shutil
+from typing import Optional as OptionalType
 from app.api.schemas import (
     IngestResponse, 
     FeedbackRequest, FeedbackResponse,
@@ -23,18 +24,61 @@ logger = logging.getLogger(__name__)
 api_router = APIRouter()
 
 
+# ============================================================
+# Authentication Helper (simplified for AI service)
+# ============================================================
+
+async def get_current_user_id_ai(
+    authorization: OptionalType[str] = Header(None)
+) -> int:
+    """Extract user ID from Authorization header"""
+    if not authorization:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Missing authorization header"
+        )
+    
+    try:
+        parts = authorization.split()
+        if len(parts) != 2 or parts[0].lower() != "bearer":
+            raise ValueError("Invalid format")
+        
+        credentials = parts[1]
+        if not credentials.startswith("user_"):
+            raise ValueError("Invalid credentials format")
+        
+        user_id = int(credentials.split("_")[1])
+        if user_id <= 0:
+            raise ValueError("Invalid user ID")
+        
+        return user_id
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=f"Invalid authorization token"
+        )
 @api_router.post("/ingestion/stream")
 async def process_document_stream(
     request: Request,
     files: List[UploadFile] = File(..., description="Document files to process"),
     owner_id: int = Form(..., description="Document owner user ID"),
     document_id: str = Form("", description="Optional existing document ID"),
-    file_type: str = Form("", description="Optional file type override")
+    file_type: str = Form("", description="Optional file type override"),
+    current_user_id: int = Depends(get_current_user_id_ai)
 ):
     """
     [Ingestion Pipeline with Stream]
     Process document(s) and stream real-time progress updates via SSE.
+    
+    Authorization: owner_id must match current user
     """
+    # Verify owner_id matches current user
+    if owner_id != current_user_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Cannot upload documents for other users"
+        )
+    
     from app.pipelines.ingestion import run_unified_ingestion_pipeline
     
     temp_files = []
@@ -138,42 +182,22 @@ async def process_document(
     # Similarly, file_type also allows empty string, which will be normalized to None
     file_type: str = Form(
         "", description="Optional file type override: 'image' or 'pdf' (auto-detected if not provided). Only used for single file upload."
-    )
+    ),
+    current_user_id: int = Depends(get_current_user_id_ai)
 ):
     """
     [Ingestion Pipeline]
     Process document(s) for AI ingestion pipeline.
     
-    **API Design (receives file binary data):**
-    - Frontend uploads files via `multipart/form-data` (similar to `/api/v1/documents/upload`)
-    - Supports single or multiple file uploads (`files` parameter can be single or multiple `UploadFile`)
-    - After AIOrchestraService receives files:
-      1. Temporarily save files to temp directory (or use in-memory data)
-      2. Call DataStorageService `/api/v1/documents/upload` to upload file and get `image_url`
-      3. Execute full AI pipeline (OCR -> Vision -> Cleaning -> Recommendation -> Embedding)
-      4. Call `/api/v1/documents/process` to save structured results and `ocr_text`
-    
-    Pipeline flow:
-    - **Single file**:
-      1. OCR -> Vision(optional) -> Cleaning
-      2. Call DataStorageService `/api/v1/documents/upload` via `PipelineStorage.upload_file_only()`
-         to complete file upload and get `image_url`
-      3. Recommendation + Embedding (parallel)
-      4. Call `/api/v1/documents/process` to save page metadata and `ocr_text`, get `document_id` / `page_id`
-    - **Multiple files / Multi-page PDF**:
-      1. Split PDF into pages -> Create independent page task for each page
-      2. Each page: OCR -> Vision(optional) -> Cleaning -> Upload(`/documents/upload`)
-      3. Aggregate text from all pages for one Recommendation + Embedding
-      4. Call `/documents/process` for each page, using the same `document_id`
-    
-    For batch processing:
-    - Multiple PDF files are split into individual pages
-    - Multiple image files are treated as separate pages
-    - All pages are associated with the same document
-    - Page numbers are assigned sequentially across all files
-    
-    Returns complete pipeline output including all processing results.
+    Authorization: owner_id must match current user
     """
+    # Verify owner_id matches current user
+    if owner_id != current_user_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Cannot upload documents for other users"
+        )
+    
     from app.pipelines.ingestion import run_unified_ingestion_pipeline
     
     temp_files = []  # Track temporary files for cleanup
@@ -291,7 +315,10 @@ async def process_document(
 
 
 @api_router.post("/ingestion/confirm", response_model=IngestConfirmResponse)
-async def confirm_and_upload_document(request: IngestConfirmRequest):
+async def confirm_and_upload_document(
+    request: IngestConfirmRequest,
+    current_user_id: int = Depends(get_current_user_id_ai)
+):
     """
     [Ingestion Confirmation]
     User confirms preview results and uploads document to database.
@@ -299,11 +326,20 @@ async def confirm_and_upload_document(request: IngestConfirmRequest):
     This API receives preview results and user-modified category_id, location_id,
     then executes database upload operation.
     
+    Authorization: owner_id must match current user
+    
     Process:
     1. Call /api/v1/documents/process for each page with user-modified category_id and location_id
     2. Save embedding (if available)
     3. Return upload results
     """
+    # Verify owner_id matches current user
+    if request.owner_id != current_user_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Cannot confirm ingestion for other users"
+        )
+    
     from app.pipelines.ingestion import IngestionPipeline
     from app.modules.embedding import EmbeddingResult
     

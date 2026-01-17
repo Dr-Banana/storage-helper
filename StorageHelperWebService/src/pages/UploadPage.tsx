@@ -94,9 +94,16 @@ const UploadPage = () => {
 
       // Use native fetch for streaming SSE
       const apiUrl = import.meta.env.VITE_API_URL || 'http://localhost:8888'
+      
+      // Get auth token
+      const authToken = localStorage.getItem('authToken')
+      
       const response = await fetch(`${apiUrl}/api/v1/ingestion/stream`, {
         method: 'POST',
         body: formData,
+        headers: authToken ? {
+          'Authorization': `Bearer ${authToken}`
+        } : {}
       })
 
       if (!response.ok) {

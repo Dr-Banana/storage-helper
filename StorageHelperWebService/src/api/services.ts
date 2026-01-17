@@ -163,6 +163,7 @@ export const userService = {
     is_new_user: boolean
     email: string
     display_name: string
+    auth_token: string
   }> => {
     const response = await apiClient.post('/auth/google/login', {
       token: token,
@@ -229,36 +230,6 @@ export const userService = {
 // ============================================================================
 
 export const documentService = {
-  /**
-   * Get document by ID
-   * Note: Backend doesn't have GET /api/v1/documents/{id} endpoint
-   * This function uses /api/documents/{id}/pages to verify document exists
-   * and returns the document object from the API response
-   */
-  getById: async (id: number): Promise<Document> => {
-    try {
-      // Use /api/documents/{id}/pages to get document details
-      const pagesResponse = await apiClient.get(`/documents/${id}/pages`)
-      
-      // Backend now returns full document details in the response
-      if (pagesResponse.data.document) {
-        return pagesResponse.data.document
-      }
-      
-      // Fallback: Create a minimal document object if document not in response
-      const minimalDoc: Document = {
-        id: id,
-        title: `Document #${id}`,
-        owner_id: 0, // Owner ID not available from this endpoint
-        created_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
-      }
-      
-      return minimalDoc
-    } catch (error: any) {
-      throw error
-    }
-  },
 
   /**
    * Get all pages for a document
@@ -273,87 +244,6 @@ export const documentService = {
     total_files?: number
   }> => {
     const response = await apiClient.get(`/documents/${documentId}/pages`)
-    return response.data
-  },
-
-  /**
-   * Upload file to temporary storage
-   * POST /api/v1/files/upload-temp
-   * 
-   * This endpoint uploads a file to temporary storage and returns the absolute file path.
-   * Note: This does NOT call the ingestion API - it only uploads the file.
-   */
-  uploadAndProcess: async (formData: FormData): Promise<{ file_path: string; filename: string }> => {
-    // Extract file from formData
-    const file = formData.get('file') as File
-    
-    if (!file) {
-      throw new Error('File is required')
-    }
-    
-    // Upload file to temporary storage
-    const tempFormData = new FormData()
-    tempFormData.append('file', file)
-    
-    const uploadResponse = await apiClient.post('/v1/files/upload-temp', tempFormData, {
-      headers: {
-        'Content-Type': 'multipart/form-data',
-      },
-    })
-    
-    return uploadResponse.data
-  },
-
-  /**
-   * Save OCR text and embedding for a document
-   * POST /api/v1/documents/{document_id}/save-ocr-and-embedding
-   */
-  saveOcrAndEmbedding: async (
-    documentId: number,
-    ocrText: string,
-    embedding: number[]
-  ): Promise<{
-    document_id: number
-    status: string
-    ocr_length: number
-    embedding_dimensions: number
-  }> => {
-    const formData = new FormData()
-    formData.append('ocr_text', ocrText)
-    formData.append('embedding', JSON.stringify(embedding))
-    
-    const response = await apiClient.post(`/v1/documents/${documentId}/save-ocr-and-embedding`, formData, {
-      headers: {
-        'Content-Type': 'multipart/form-data',
-      },
-    })
-    return response.data
-  },
-
-  /**
-   * Update document status
-   * PATCH /api/v1/documents/{document_id}/status
-   */
-  updateStatus: async (
-    documentId: number,
-    statusValue: string,
-    metadata?: Record<string, any>
-  ): Promise<{
-    id: number
-    status: string
-    updated_at: string
-  }> => {
-    const formData = new FormData()
-    formData.append('status_value', statusValue)
-    if (metadata) {
-      formData.append('metadata', JSON.stringify(metadata))
-    }
-    
-    const response = await apiClient.patch(`/v1/documents/${documentId}/status`, formData, {
-      headers: {
-        'Content-Type': 'multipart/form-data',
-      },
-    })
     return response.data
   },
 
@@ -374,33 +264,6 @@ export const documentService = {
     const locationIdValue = locationId === null ? -1 : locationId
     const response = await apiClient.put(`/documents/${documentId}/location`, {
       location_id: locationIdValue
-    })
-    return response.data
-  },
-
-  /**
-   * Search for similar documents by embedding
-   * POST /api/v1/documents/search-similar
-   */
-  searchSimilar: async (
-    embedding: number[],
-    limit: number = 10,
-    ownerId?: number
-  ): Promise<{
-    count: number
-    documents: Document[]
-  }> => {
-    const formData = new FormData()
-    formData.append('embedding', JSON.stringify(embedding))
-    formData.append('limit', (limit ?? 10).toString())
-    if (ownerId !== undefined && ownerId !== null) {
-      formData.append('owner_id', ownerId.toString())
-    }
-    
-    const response = await apiClient.post('/v1/documents/search-similar', formData, {
-      headers: {
-        'Content-Type': 'multipart/form-data',
-      },
     })
     return response.data
   },
@@ -430,6 +293,18 @@ const AI_ORCHESTRA_BASE_URL = import.meta.env.VITE_AI_ORCHESTRA_URL || '/ai-orch
 const aiOrchestraClient = axios.create({
   baseURL: AI_ORCHESTRA_BASE_URL,
   // Don't set Content-Type header - let browser set it with boundary for multipart/form-data
+})
+
+// Add Authorization header interceptor for AI Orchestr client
+aiOrchestraClient.interceptors.request.use((config) => {
+  // Get token from the getter function (set by AuthContext) or localStorage
+  const token = localStorage.getItem('authToken')
+  
+  if (token && !config.headers.Authorization) {
+    config.headers.Authorization = `Bearer ${token}`
+  }
+  
+  return config
 })
 
 export const ingestionService = {

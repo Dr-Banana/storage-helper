@@ -6,13 +6,15 @@ from sqlalchemy.orm import Session
 from sqlalchemy import text
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import FileResponse
-from typing import List
+from typing import List, Annotated
 import json
 import os
 import urllib.parse
 from pathlib import Path
 
 from app.core.database import get_db
+from app.core.auth import get_current_user_id
+from app.core.auth_decorators import get_document_if_owner, get_location_if_owner
 from app.models.document import Document
 from app.models.document_page import DocumentPage
 from app.models.document_embedding import DocumentEmbedding
@@ -131,26 +133,24 @@ class EmbeddingRequest(BaseModel):
     summary="Get all pages for a document",
     description="Retrieve all pages for a specific document. Returns full page details including image_url."
 )
-def get_document_pages(document_id: int, db: Session = Depends(get_db)):
+def get_document_pages(
+    document: Annotated[Document, Depends(get_document_if_owner)],
+    db: Session = Depends(get_db)
+):
     """
     Get all pages for a specific document
     
     - **document_id**: The document's ID
     
     Returns a list of page details including image_url for the document
+    
+    Authorization: User must own the document (verified by dependency)
     """
     try:
-        # Verify document exists
-        document = db.query(Document).filter(Document.id == document_id).first()
-        if not document:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Document with ID {document_id} not found"
-            )
         
         # Get all pages for the document with full details
         pages = db.query(DocumentPage).filter(
-            DocumentPage.document_id == document_id
+            DocumentPage.document_id == document.id
         ).order_by(DocumentPage.page_number).all()
         
         # Convert to response format
@@ -197,7 +197,7 @@ def get_document_pages(document_id: int, db: Session = Depends(get_db)):
         file_list = list(unique_files.values())
         
         return {
-            "document_id": document_id,
+            "document_id": document.id,
             "document": {
                 "id": document.id,
                 "title": document.title,
@@ -243,7 +243,7 @@ def get_document_pages(document_id: int, db: Session = Depends(get_db)):
     """
 )
 def update_document_embedding(
-    document_id: int,
+    document: Annotated[Document, Depends(get_document_if_owner)],
     embedding_request: EmbeddingRequest,
     db: Session = Depends(get_db)
 ):
@@ -252,24 +252,21 @@ def update_document_embedding(
     
     - **document_id**: Document ID (path parameter, must match request body)
     - **embedding**: 768-dimensional embedding vector
+    
+    Authorization: User must own the document (verified by dependency)
     """
     try:
-        # Verify document_id matches
-        if document_id != embedding_request.document_id:
+        # Verify document_id matches request body
+        if document.id != embedding_request.document_id:
             raise ValueError("document_id in path and body must match")
         
         # Verify embedding dimensions
         if len(embedding_request.embedding) != 768:
             raise ValueError(f"Embedding must be 768 dimensions, got {len(embedding_request.embedding)}")
         
-        # Verify document exists
-        document = db.query(Document).filter(Document.id == document_id).first()
-        if not document:
-            raise ValueError(f"Document with ID {document_id} not found")
-        
         # Check if embedding already exists
         existing_embedding = db.query(DocumentEmbedding).filter(
-            DocumentEmbedding.document_id == document_id
+            DocumentEmbedding.document_id == document.id
         ).first()
         
         if existing_embedding:
@@ -279,7 +276,7 @@ def update_document_embedding(
         else:
             # Insert new embedding
             new_embedding = DocumentEmbedding(
-                document_id=document_id,
+                document_id=document.id,
                 embedding=embedding_request.embedding
             )
             db.add(new_embedding)
@@ -364,27 +361,24 @@ def search_documents(
     summary="Get document storage location",
     description="Retrieve the physical storage location details for a specific document."
 )
-def get_document_location(document_id: int, db: Session = Depends(get_db)):
+def get_document_location(
+    document: Annotated[Document, Depends(get_document_if_owner)],
+    db: Session = Depends(get_db)
+):
     """
     Get storage location for a specific document
     
     - **document_id**: The document's ID
     
     Returns the StorageLocation details
+    
+    Authorization: User must own the document (verified by dependency)
     """
     try:
-        # Verify document exists
-        document = db.query(Document).filter(Document.id == document_id).first()
-        if not document:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Document with ID {document_id} not found"
-            )
-        
         if not document.current_location_id:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Document with ID {document_id} has no storage location assigned"
+                detail=f"Document with ID {document.id} has no storage location assigned"
             )
         
         # Get location details
@@ -416,8 +410,9 @@ def get_document_location(document_id: int, db: Session = Depends(get_db)):
     description="Update the physical storage location for a specific document."
 )
 def update_document_location(
-    document_id: int,
+    document: Annotated[Document, Depends(get_document_if_owner)],
     location_update: DocumentLocationUpdate,
+    current_user_id: Annotated[int, Depends(get_current_user_id)],
     db: Session = Depends(get_db)
 ):
     """
@@ -427,44 +422,33 @@ def update_document_location(
     - **location_id**: The storage location ID to assign
     
     Returns status and confirmation message
+    
+    Authorization: User must own both the document and location
     """
     try:
-        # Verify document exists
-        document = db.query(Document).filter(Document.id == document_id).first()
-        if not document:
+        # Verify location ownership
+        location = db.query(StorageLocation).filter(
+            StorageLocation.id == location_update.location_id
+        ).first()
+        
+        if not location:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Document with ID {document_id} not found"
+                detail="Location not found"
             )
         
-        # Verify location exists (if location_id is not -1)
-        if location_update.location_id != -1:
-            location = db.query(StorageLocation).filter(
-                StorageLocation.id == location_update.location_id
-            ).first()
-            if not location:
-                raise HTTPException(
-                    status_code=status.HTTP_404_NOT_FOUND,
-                    detail=f"Storage location with ID {location_update.location_id} not found"
-                )
-            
-            # Verify location belongs to the same user as the document
-            if location.user_id != document.owner_id:
-                raise HTTPException(
-                    status_code=status.HTTP_403_FORBIDDEN,
-                    detail="Storage location does not belong to the document owner"
-                )
-            
-            document.current_location_id = location_update.location_id
-        else:
-            # -1 means remove location
-            document.current_location_id = None
+        if location.user_id != current_user_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Not authorized to access this location"
+            )
         
+        document.current_location_id = location.id
         db.commit()
         
         return {
-            "document_id": document_id,
-            "location_id": document.current_location_id,
+            "document_id": document.id,
+            "location_id": location.id,
             "status": "updated",
             "message": "Document storage location updated successfully"
         }

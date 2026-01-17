@@ -52,3 +52,4 @@ class GoogleAuthResponse(BaseModel):
     is_new_user: bool = Field(..., description="Whether this is a newly created user")
     email: str = Field(..., description="User email")
     display_name: str = Field(..., description="User display name")
+    auth_token: str = Field(..., description="Authentication token for API requests")

@@ -40,11 +40,16 @@ def google_login(
         # Authenticate user with Google token
         auth_result = GoogleAuthService.authenticate_user(db, request.token)
         
+        # Generate auth token (simplified format: "user_<id>")
+        # In production, this should be a proper JWT token
+        auth_token = f"user_{auth_result['user_id']}"
+        
         return GoogleAuthResponse(
             user_id=auth_result["user_id"],
             is_new_user=auth_result["is_new_user"],
             email=auth_result["email"],
-            display_name=auth_result["display_name"]
+            display_name=auth_result["display_name"],
+            auth_token=auth_token
         )
     
     except ValueError as e:

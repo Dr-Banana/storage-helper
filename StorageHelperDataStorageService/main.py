@@ -17,7 +17,7 @@ load_dotenv(".env.local")
 
 from app.core.config import settings
 from app.core.database import engine, Base
-from app.routes import users, public_api, documents, location_images, google_auth
+from app.routes import users, public_api, documents, location_images, google_auth, auth
 from app.services.google_auth_service import GoogleAuthService
 # Import all models to register them with SQLAlchemy
 from app.models import (
@@ -62,6 +62,7 @@ app.include_router(documents.router, prefix="/api", tags=["documents"])
 app.include_router(location_images.router, tags=["location-images"])
 app.include_router(public_api.router, tags=["public-api"])
 app.include_router(google_auth.router, prefix="/api", tags=["authentication"])
+app.include_router(auth.router, prefix="/api", tags=["authentication"])
 
 
 @app.get("/", tags=["root"])
