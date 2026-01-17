@@ -1,4 +1,5 @@
 import React from 'react';
+import { Trash2 } from 'lucide-react';
 
 interface MetadataViewerProps {
   metadata: Record<string, any>;
@@ -55,6 +56,13 @@ const ReceiptMetadataViewer: React.FC<{
     if (onMetadataChange) {
       const newItems = [...items];
       newItems[index] = { ...newItems[index], [key]: value };
+      onMetadataChange({ ...metadata, items: newItems });
+    }
+  };
+
+  const handleItemDelete = (index: number) => {
+    if (onMetadataChange && window.confirm(`Are you sure you want to delete "${items[index]?.product_name || 'this item'}"?`)) {
+      const newItems = items.filter((_: any, i: number) => i !== index);
       onMetadataChange({ ...metadata, items: newItems });
     }
   };
@@ -126,6 +134,9 @@ const ReceiptMetadataViewer: React.FC<{
               <th className="px-4 py-2 text-center text-xs font-semibold text-home-text-dark uppercase tracking-wider">Qty</th>
               <th className="px-4 py-2 text-left text-xs font-semibold text-home-text-dark uppercase tracking-wider">Storage</th>
               <th className="px-4 py-2 text-center text-xs font-semibold text-home-text-dark uppercase tracking-wider">Life</th>
+              {isEditing && (
+                <th className="px-4 py-2 text-center text-xs font-semibold text-home-text-dark uppercase tracking-wider w-16">Action</th>
+              )}
             </tr>
           </thead>
           <tbody className="bg-white divide-y divide-home-primary-100">
@@ -218,6 +229,17 @@ const ReceiptMetadataViewer: React.FC<{
                     </span>
                   )}
                 </td>
+                {isEditing && (
+                  <td className="px-4 py-3 text-center">
+                    <button
+                      onClick={() => handleItemDelete(idx)}
+                      className="p-1.5 hover:bg-red-50 text-red-500 hover:text-red-700 rounded transition-colors"
+                      title="Delete item"
+                    >
+                      <Trash2 size={16} />
+                    </button>
+                  </td>
+                )}
               </tr>
             ))}
           </tbody>
