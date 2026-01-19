@@ -184,9 +184,18 @@ class PipelineStorage:
             document_data_with_id = document_data.copy()
             document_data_with_id["document_id"] = doc_id
             
+            # Get owner_id for authorization
+            owner_id = document_data_with_id.get("owner_id")
+            
+            # Prepare authorization header
+            headers = {}
+            if owner_id:
+                auth_token = f"user_{owner_id}"
+                headers["Authorization"] = f"Bearer {auth_token}"
+            
             # Asynchronously save to remote storage
             url = "/documents"
-            response = await self.client.post(url, json=document_data_with_id, timeout=10.0)
+            response = await self.client.post(url, json=document_data_with_id, timeout=10.0, headers=headers)
             response.raise_for_status()
             
             remote_id = response.json().get("id") if response.status_code == 201 else None

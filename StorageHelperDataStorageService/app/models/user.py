@@ -3,6 +3,7 @@ Database models for User
 """
 from datetime import datetime
 from sqlalchemy import Column, Integer, String, Text, DateTime, func, UniqueConstraint
+from sqlalchemy.orm import relationship
 
 from app.core.database import Base
 
@@ -22,6 +23,9 @@ class User(Base):
     note = Column(Text, nullable=True)
     created_at = Column(DateTime, default=func.now(), nullable=False)
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now(), nullable=False)
+
+    # Relationships
+    schedules = relationship("Schedule", back_populates="user")
 
     def __repr__(self):
         return f"<User(id={self.id}, google_id='{self.google_id}', display_name='{self.display_name}')>"

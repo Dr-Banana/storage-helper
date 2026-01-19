@@ -278,9 +278,16 @@ class RecommendationGenerator:
             
             logger.debug(f"Saving category to API: {url}, payload: {payload}")
             
+            # Prepare auth headers
+            auth_token = f"user_{user_id}"
+            headers = {
+                "Authorization": f"Bearer {auth_token}",
+                "Content-Type": "application/json"
+            }
+            
             # Use sync httpx client for this sync method
             with httpx.Client(timeout=10.0) as client:
-                response = client.post(url, json=payload)
+                response = client.post(url, json=payload, headers=headers)
                 response.raise_for_status()
                 logger.info(f"Successfully saved category '{code}' ({name}) for user {user_id}")
                 # API returns empty dict on success, but we return the payload as the category info

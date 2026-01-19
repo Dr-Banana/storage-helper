@@ -8,6 +8,7 @@ import {
   Menu,
   X,
   MapPin,
+  Calendar,
 } from 'lucide-react'
 
 const Layout = () => {
@@ -17,6 +18,7 @@ const Layout = () => {
   const navigation = [
     { name: 'Home', href: '/', icon: Home },
     { name: 'Documents', href: '/documents', icon: FileText },
+    { name: 'Schedule', href: '/schedule', icon: Calendar },
     { name: 'Profile', href: '/profile', icon: User },
     { name: 'Locations', href: '/locations', icon: MapPin },
   ]

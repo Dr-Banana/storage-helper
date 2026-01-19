@@ -36,9 +36,14 @@ def google_login(
     - 400: Invalid token or token verification failed
     - 500: Server error
     """
+    import logging
+    logger = logging.getLogger(__name__)
+    logger.info(f"Google login attempt with token (first 20 chars): {request.token[:20] if request.token else 'None'}...")
+    
     try:
         # Authenticate user with Google token
         auth_result = GoogleAuthService.authenticate_user(db, request.token)
+        logger.info(f"Authentication successful for user: {auth_result['email']}")
         
         # Generate auth token (simplified format: "user_<id>")
         # In production, this should be a proper JWT token
@@ -53,11 +58,13 @@ def google_login(
         )
     
     except ValueError as e:
+        logger.error(f"Token verification failed: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(e)
         )
     except Exception as e:
+        logger.error(f"Authentication error: {str(e)}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Authentication failed: {str(e)}"

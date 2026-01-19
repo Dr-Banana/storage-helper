@@ -9,6 +9,7 @@ from app.models.document import Document
 from app.models.document_page import DocumentPage
 from app.models.document_embedding import DocumentEmbedding
 from app.models.feedback_message import FeedbackMessage
+from app.models.schedule import Schedule
 
 __all__ = [
     "User",
@@ -19,4 +20,5 @@ __all__ = [
     "DocumentPage",
     "DocumentEmbedding",
     "FeedbackMessage",
+    "Schedule",
 ]

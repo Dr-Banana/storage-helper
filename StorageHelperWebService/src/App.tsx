@@ -11,6 +11,7 @@ import UploadPage from './pages/UploadPage'
 import SearchPage from './pages/SearchPage'
 import ProfilePage from './pages/ProfilePage'
 import LocationsPage from './pages/LocationsPage'
+import SchedulePage from './pages/SchedulePage'
 
 const AppRoutes = () => {
   const { isAuthenticated } = useAuth()
@@ -31,6 +32,7 @@ const AppRoutes = () => {
         <Route path="documents/:id" element={<DocumentDetailPage />} />
         <Route path="upload" element={<UploadPage />} />
         <Route path="search" element={<SearchPage />} />
+        <Route path="schedule" element={<SchedulePage />} />
         <Route path="profile" element={<ProfilePage />} />
         <Route path="locations" element={<LocationsPage />} />
       </Route>
