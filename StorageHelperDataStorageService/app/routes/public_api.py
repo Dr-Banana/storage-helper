@@ -120,7 +120,7 @@ async def process_document_page(
     """
     try:
         # Process page and save to database
-        doc_id, page_id, returned_image_url, items_created = DocumentService.process_document_page(
+        doc_id, page_id, returned_image_url, item_ids = DocumentService.process_document_page(
             db=db,
             image_url=payload.image_url,
             owner_id=payload.owner_id,
@@ -138,13 +138,17 @@ async def process_document_page(
         else:
             status_value = "created"
         
+        # item_ids is a list of created item document IDs
+        items_created = len(item_ids) if item_ids else 0
+        
         return {
             "document_id": doc_id,
             "page_id": page_id,
             "image_url": returned_image_url,
             "status": status_value,
             "page_number": payload.page_number,
-            "items_created": items_created
+            "items_created": items_created,
+            "item_ids": item_ids  # Include item IDs for embedding generation
         }
         
     except ValueError as e:

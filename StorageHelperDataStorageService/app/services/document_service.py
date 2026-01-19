@@ -191,36 +191,89 @@ class DocumentService:
         db: Session,
         embedding: List[float],
         limit: int = 10,
-        owner_id: Optional[int] = None
+        owner_id: Optional[int] = None,
+        exclude_receipts: bool = False
     ) -> List[Document]:
         """
         Search documents by vector similarity
         
         Called by AI Service for semantic search
         
+        Note: This method does NOT sort results by similarity. Sorting will be handled
+        by a separate recommendation service in the future.
+        
         Args:
             db: Database session
-            embedding: Query embedding vector
+            embedding: Query embedding vector (currently used only for filtering, not sorting)
             limit: Maximum results to return
             owner_id: Optional filter by owner
+            exclude_receipts: If True, exclude receipt parent documents (category is RECEIPT/REC 
+                            but no source_receipt_id in metadata). Only return item documents.
             
         Returns:
-            List of similar documents (ordered by similarity)
+            List of documents (order is not guaranteed - sorting will be handled separately)
         """
         try:
+            from sqlalchemy import and_, or_
+            from app.models.document_category import DocumentCategory
+            
             query = db.query(Document)\
                 .join(DocumentEmbedding, Document.id == DocumentEmbedding.document_id)
             
             if owner_id:
                 query = query.filter(Document.owner_id == owner_id)
             
-            # Use pgvector's cosine distance for similarity search
-            # Order by distance (smaller is more similar)
-            documents = query.order_by(
-                DocumentEmbedding.embedding.cosine_distance(embedding)
-            ).limit(limit).all()
+            # If excluding receipts, filter out receipt parent documents
+            # Receipt parent: category is RECEIPT/REC but metadata does NOT have source_receipt_id
+            # Item documents: have source_receipt_id in metadata (or category is not RECEIPT/REC)
+            if exclude_receipts:
+                # Join with category to check category code
+                query = query.join(DocumentCategory, Document.category_id == DocumentCategory.id, isouter=True)
+                
+                # Filter: exclude receipt parent documents
+                # Receipt parent: category is RECEIPT/REC AND metadata does NOT have source_receipt_id
+                # Keep: all non-RECEIPT docs, or RECEIPT docs that have source_receipt_id (items)
+                # Note: Items typically have their own category (FRUIT, SNACK, etc.), not RECEIPT
+                # So we mainly need to exclude category=RECEIPT with no source_receipt_id
+                # Use PostgreSQL JSONB '?' operator via text() for key existence check
+                from sqlalchemy import text, cast
+                from sqlalchemy.dialects.postgresql import JSONB
+                
+                # Filter: exclude documents where category is RECEIPT/REC AND metadata does NOT have source_receipt_id
+                # This excludes receipt parent documents but keeps item documents (which have their own category or source_receipt_id)
+                query = query.filter(
+                    or_(
+                        Document.category_id.is_(None),  # No category = keep
+                        DocumentCategory.code.is_(None),  # Category has no code = keep
+                        ~DocumentCategory.code.in_(["RECEIPT", "REC"]),  # Category is not RECEIPT/REC = keep (includes most items)
+                        # If category IS RECEIPT/REC, must have source_receipt_id (meaning it's an item, not parent receipt)
+                        and_(
+                            DocumentCategory.code.in_(["RECEIPT", "REC"]),
+                            text("document.metadata ? 'source_receipt_id'")  # PostgreSQL JSONB '?' operator to check key exists
+                        )
+                    )
+                )
             
-            return documents
+            # Search documents (without explicit ordering - sorting will be handled by a separate recommendation service in the future)
+            # Search more documents if we're filtering, to ensure enough results after removing duplicates
+            search_limit = limit * 3 if exclude_receipts else limit * 2
+            
+            # Get documents without explicit ordering
+            # Note: Future sorting/recommendation will be handled by a separate service
+            documents = query.limit(search_limit).all()
+            
+            # Remove duplicates while preserving order
+            # This handles cases where LEFT JOIN with DocumentCategory might create duplicate Document rows
+            seen_ids = set()
+            unique_documents = []
+            for doc in documents:
+                if doc.id not in seen_ids:
+                    seen_ids.add(doc.id)
+                    unique_documents.append(doc)
+            documents = unique_documents
+            
+            # Apply final limit
+            return documents[:limit]
             
         except Exception as e:
             raise ValueError(f"Failed to search documents: {str(e)}")
@@ -408,7 +461,7 @@ class DocumentService:
             metadata: Optional document metadata
             
         Returns:
-            Tuple of (document_id, page_id, image_url, items_created)
+            Tuple of (document_id, page_id, image_url, item_ids) where item_ids is a list of created item document IDs
             
         Raises:
             ValueError: If operation fails
@@ -434,8 +487,8 @@ class DocumentService:
                         normalized_location_id = created_id
                         logger.info(f"Automatically assigned document to new/existing location: {suggestion} (ID: {created_id})")
 
-            # Track items created
-            items_created = 0
+            # Track item IDs created
+            item_ids = []
 
             # Get or create document
             if document_id:
@@ -474,7 +527,7 @@ class DocumentService:
                                 is_receipt = True
                         
                         if is_receipt:
-                            items_created = DocumentService._create_item_documents(db, document, metadata)
+                            item_ids = DocumentService._create_item_documents(db, document, metadata)
             else:
                 # Create new document
                 document = Document(
@@ -499,7 +552,7 @@ class DocumentService:
                             is_receipt = True
                     
                     if is_receipt:
-                        items_created = DocumentService._create_item_documents(db, document, metadata)
+                        item_ids = DocumentService._create_item_documents(db, document, metadata)
             
             # Check if page already exists (for Step 3B updates, page might already exist)
             existing_page = db.query(DocumentPage).filter(
@@ -511,7 +564,7 @@ class DocumentService:
                 page_id = existing_page.id
                 returned_image_url = existing_page.image_url
                 db.commit()
-                return (document_id, page_id, returned_image_url, items_created)
+                return (document_id, page_id, returned_image_url, item_ids)
             else:
                 # If image_url is missing but we're updating an existing document, 
                 # try to fallback to the document's own thumbnail
@@ -535,11 +588,11 @@ class DocumentService:
                     
                     db.commit()
                     db.refresh(page)
-                    return (document_id, page.id, image_url, items_created)
+                    return (document_id, page.id, image_url, item_ids)
                 else:
                     # No image_url and no fallback, just commit the metadata changes we made earlier
                     db.commit()
-                    return (document_id, 0, None, items_created)
+                    return (document_id, 0, None, item_ids)
             
         except Exception as e:
             db.rollback()
@@ -691,7 +744,7 @@ class DocumentService:
             raise ValueError(f"Failed to delete document: {str(e)}")
 
     @staticmethod
-    def _create_item_documents(db: Session, receipt_doc: Document, metadata: Dict[str, Any]) -> int:
+    def _create_item_documents(db: Session, receipt_doc: Document, metadata: Dict[str, Any]) -> List[int]:
         """
         Create child Document records for each item in a receipt.
         
@@ -701,7 +754,7 @@ class DocumentService:
             metadata: The extracted metadata containing 'items'
             
         Returns:
-            Number of items created
+            List of created item document IDs
         """
         try:
             items_data = metadata.get("items", [])
@@ -727,7 +780,7 @@ class DocumentService:
                     db.delete(doc)
             db.flush()
 
-            items_created = 0
+            item_ids = []
             # For each item, create a new document
             for item_data in items_data:
                 item_name = item_data.get("product_name") or item_data.get("original_text") or "Unknown Item"
@@ -801,7 +854,8 @@ class DocumentService:
                     doc_metadata=item_doc_metadata
                 )
                 db.add(item_doc)
-                items_created += 1
+                db.flush()  # Flush to get item_doc.id
+                item_ids.append(item_doc.id)
             
             # Save updated metadata with location info back to receipt document
             current_metadata = dict(receipt_doc.doc_metadata or {})
@@ -810,8 +864,9 @@ class DocumentService:
             db.add(receipt_doc)
             
             db.flush()
-            logger.info(f"Created {items_created} item documents for receipt {receipt_doc.id}")
-            return items_created
+            items_created = len(item_ids)
+            logger.info(f"Created {items_created} item documents for receipt {receipt_doc.id}: {item_ids}")
+            return item_ids
             
         except Exception as e:
             logger.error(f"Error creating item documents: {e}")

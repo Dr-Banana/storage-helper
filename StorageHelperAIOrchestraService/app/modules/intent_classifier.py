@@ -11,12 +11,13 @@ logger = logging.getLogger(__name__)
 
 class Intent(str, Enum):
     SEARCH = "SEARCH"
+    UPDATE = "UPDATE"
     PLAN_EAT_OUT = "PLAN_EAT_OUT"
     PLAN_COOK_HOME = "PLAN_COOK_HOME"
     GENERAL = "GENERAL"
 
 class IntentClassificationResult(BaseModel):
-    intent: Intent = Field(..., description="The detected intent of the user. MUST be one of: SEARCH, PLAN_EAT_OUT, PLAN_COOK_HOME, GENERAL.")
+    intent: Intent = Field(..., description="The detected intent of the user. MUST be one of: SEARCH, UPDATE, PLAN_EAT_OUT, PLAN_COOK_HOME, GENERAL.")
     confidence: float = Field(..., description="Confidence score from 0.0 to 1.0.")
     reasoning: str = Field(..., description="Brief explanation of why this intent was chosen.")
 
@@ -31,18 +32,21 @@ You are an expert Intent Classifier for a Home AI Agent. Your task is to analyze
 1. **SEARCH**: The user wants to find something. This includes searching for documents, receipts, specific food items in inventory, or looking up history.
    - Example: "Find my Costco receipt from last week", "Do I have any eggs?", "Show me the tax documents from 2024".
 
-2. **PLAN_EAT_OUT**: The user wants to plan a meal outside the home. This includes restaurant reservations, looking for places to eat, or checking restaurant information.
+2. **UPDATE**: The user wants to update or modify an existing item. This includes updating item information, changing quantities, modifying metadata, or editing existing documents/items.
+   - Example: "Update the quantity of eggs", "Change the expiration date of milk", "Modify the category of apples", "Update my Costco receipt from last week".
+
+3. **PLAN_EAT_OUT**: The user wants to plan a meal outside the home. This includes restaurant reservations, looking for places to eat, or checking restaurant information.
    - Example: "Book a table for two at a sushi place", "Where should we go for dinner tonight?", "Check the menu for the Italian restaurant nearby".
 
-3. **PLAN_COOK_HOME**: The user wants to plan or execute a meal at home. This includes meal planning, recipe generation, using up ingredients, or checking what to cook.
+4. **PLAN_COOK_HOME**: The user wants to plan or execute a meal at home. This includes meal planning, recipe generation, using up ingredients, or checking what to cook.
    - Example: "What can I cook with tomatoes and eggs?", "Plan my meals for the next week", "Generate a recipe for a healthy dinner".
 
-4. **GENERAL**: Basic greetings, general conversation, or queries that don't fit the above tasks.
+5. **GENERAL**: Basic greetings, general conversation, or queries that don't fit the above tasks.
    - Example: "Hello", "How are you?", "What can you do?".
 
 Respond ONLY with a JSON object that strictly adheres to the following schema:
 {
-  "intent": "SEARCH" | "PLAN_EAT_OUT" | "PLAN_COOK_HOME" | "GENERAL",
+  "intent": "SEARCH" | "UPDATE" | "PLAN_EAT_OUT" | "PLAN_COOK_HOME" | "GENERAL",
   "confidence": number (0.0 to 1.0),
   "reasoning": "string"
 }

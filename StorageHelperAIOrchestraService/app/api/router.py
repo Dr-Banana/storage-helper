@@ -350,6 +350,7 @@ async def confirm_and_upload_document(
     successful_pages = 0
     failed_pages = 0
     final_document_id = request.document_id
+    item_embedding_errors = []  # Track errors from items embedding generation
     
     try:
         # Process each page with user-modified category_id and location_id
@@ -425,6 +426,35 @@ async def confirm_and_upload_document(
                     if final_document_id is None and process_result.get("document_id"):
                         final_document_id = process_result.get("document_id")
                     
+                    # Check if items were created and generate embeddings for them
+                    item_ids = process_result.get("item_ids", [])
+                    if item_ids:
+                        # Create a temporary state to hold items data for embedding generation
+                        # We need recommendation_result with items in metadata
+                        # Format recommendation_result to match the expected structure
+                        from app.pipelines.ingestion import PipelineState
+                        recommendation_result = None
+                        if request.recommendation:
+                            # Wrap recommendation in the expected format
+                            recommendation_result = {
+                                "status": "llm_success",
+                                "recommendation": request.recommendation
+                            }
+                        
+                        temp_state = PipelineState(
+                            image_url=page_result.file_url or "",
+                            owner_id=request.owner_id,
+                            document_id=final_document_id,
+                            recommendation_result=recommendation_result
+                        )
+                        temp_state.item_ids = item_ids
+                        
+                        # Generate embeddings for items
+                        page_item_errors = await pipeline._generate_item_embeddings(temp_state)
+                        if page_item_errors:
+                            item_embedding_errors.extend(page_item_errors)
+                            logger.warning(f"{len(page_item_errors)} item embedding(s) failed: {page_item_errors}")
+                    
                     page_results.append({
                         "page_number": process_result.get("page_number", page_result.page_number),
                         "status": "success",
@@ -461,7 +491,7 @@ async def confirm_and_upload_document(
                 })
                 failed_pages += 1
         
-        # Save embedding if available
+        # Save embedding if available (main document embedding)
         embedding_save_error = None
         if final_document_id and request.embedding and request.embedding_dimension:
             try:
@@ -469,7 +499,8 @@ async def confirm_and_upload_document(
                 if request.embedding_dimension == 768 and len(request.embedding) == 768:
                     save_success = await pipeline.pipeline_storage.save_document_embedding(
                         document_id=final_document_id,
-                        embedding=request.embedding
+                        embedding=request.embedding,
+                        owner_id=request.owner_id
                     )
                     if not save_success:
                         embedding_save_error = "Failed to save document embedding via API"
@@ -478,6 +509,17 @@ async def confirm_and_upload_document(
             except Exception as e:
                 logger.error(f"Error saving embedding: {e}", exc_info=True)
                 embedding_save_error = f"Error saving embedding: {str(e)}"
+        
+        # Combine main document and items embedding errors
+        all_embedding_errors = []
+        if embedding_save_error:
+            all_embedding_errors.append(f"Main document: {embedding_save_error}")
+        if item_embedding_errors:
+            all_embedding_errors.append(f"Items ({len(item_embedding_errors)} failed): {'; '.join(item_embedding_errors)}")
+        
+        # Set combined error message if any errors occurred
+        if all_embedding_errors:
+            embedding_save_error = " | ".join(all_embedding_errors)
         
         # Determine status
         total_pages = len(request.page_results)
@@ -633,8 +675,6 @@ async def chat_with_agent(request: ChatRequest):
     Chat with the AI agent to determine intent and get natural language responses.
     """
     try:
-        logger.info(f"Chat request from owner_id={request.owner_id}: '{request.message}'")
-        
         # Convert history to list of dicts for the pipeline
         history_dicts = [
             {"role": msg.role, "content": msg.content} 

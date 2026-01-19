@@ -411,7 +411,8 @@ class PipelineStorage:
                     "image_url": process_result.get("image_url") or image_url,
                     "status": process_result.get("status"),
                     "page_number": process_result.get("page_number", page_number),
-                    "items_created": process_result.get("items_created", 0)
+                    "items_created": process_result.get("items_created", 0),
+                    "item_ids": process_result.get("item_ids", [])  # List of created item document IDs
                 }
                 
                 logger.info(
@@ -561,7 +562,8 @@ class PipelineStorage:
     async def save_document_embedding(
         self,
         document_id: Union[int, str],
-        embedding: List[float]
+        embedding: List[float],
+        owner_id: int
     ) -> bool:
         """
         Save document embedding vector via DataStorageService API.
@@ -575,9 +577,11 @@ class PipelineStorage:
             "document_id": int,
             "embedding": List[float]  # 768-dimensional vector
           }
+        - Authorization header: Bearer user_{owner_id}
         
         :param document_id: Document ID (int or str that can be converted to int)
         :param embedding: Embedding vector (must be 768 dimensions)
+        :param owner_id: Document owner user ID (for authorization)
         :return: True if saved successfully, False otherwise
         """
         # Convert document_id to int if needed
@@ -634,8 +638,14 @@ class PipelineStorage:
             full_url = f"{base_url}{url}"
             logger.debug(f"Saving embedding to DataStorageService at: {full_url}")
             
+            # Generate authorization header for DataStorageService
+            # Format: Bearer user_{owner_id}
+            headers = {
+                "Authorization": f"Bearer user_{owner_id}"
+            }
+            
             async with httpx.AsyncClient(base_url=base_url, timeout=30.0) as client:
-                response = await client.post(url, json=payload)
+                response = await client.post(url, json=payload, headers=headers)
                 response.raise_for_status()
                 
                 result = response.json()
@@ -665,7 +675,8 @@ class PipelineStorage:
         self,
         query_embedding: List[float],
         owner_id: int,
-        top_k: int = 5
+        top_k: int = 5,
+        exclude_receipts: bool = False
     ) -> List[int]:
         """
         Search for documents by embedding via DataStorageService API.
@@ -676,13 +687,15 @@ class PipelineStorage:
         :param query_embedding: 768-dimensional query vector
         :param owner_id: User ID to search documents for
         :param top_k: Number of results to return
+        :param exclude_receipts: If True, exclude receipt parent documents
         :return: List of document IDs
         """
         url = "/api/documents/search"
         payload = {
             "embedding": query_embedding,
             "user_id": owner_id,
-            "top_k": top_k
+            "top_k": top_k,
+            "exclude_receipts": exclude_receipts
         }
         
         # Extract base URL from STORAGE_SERVICE_URL

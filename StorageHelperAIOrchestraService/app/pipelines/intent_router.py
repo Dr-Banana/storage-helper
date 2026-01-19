@@ -104,6 +104,26 @@ async def route_by_intent(intent: Intent, user_input: str, owner_id: int) -> Dic
                 "data": {"query": user_input, "document_ids": []}
             }
     
+    elif intent == Intent.UPDATE:
+        # Currently performs the same operation as SEARCH, will be enhanced in the future
+        document_ids = await perform_search(user_input, owner_id)
+        
+        if document_ids:
+            return {
+                "action": "SEARCH",
+                "message": f"I found {len(document_ids)} document(s) that might match your request.",
+                "data": {
+                    "query": user_input,
+                    "document_ids": document_ids
+                }
+            }
+        else:
+            return {
+                "action": "SEARCH",
+                "message": "I searched for your documents but couldn't find anything relevant.",
+                "data": {"query": user_input, "document_ids": []}
+            }
+    
     elif intent == Intent.PLAN_EAT_OUT:
         # This is a V2 feature
         return {

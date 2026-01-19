@@ -44,6 +44,7 @@ class PipelineState:
     processing_steps: list = field(default_factory=list)
     status: str = "initialized"
     error: Optional[str] = None
+    item_ids: List[int] = field(default_factory=list)  # List of created item document IDs for embedding generation
     
     # Output schema for unified output management
     output_schema: DocumentOutputSchema = field(default_factory=lambda: default_output_schema)
@@ -461,6 +462,12 @@ class IngestionPipeline:
                 if returned_items_created is not None:
                     state.items_created = returned_items_created
                 
+                # Update item IDs from API response (for embedding generation)
+                returned_item_ids = process_result.get("item_ids", [])
+                if returned_item_ids:
+                    state.item_ids = returned_item_ids
+                    logger.info(f"Received {len(returned_item_ids)} item IDs for embedding generation: {returned_item_ids}")
+                
                 # Update document_id if we got one from the process step
                 # For first page: use returned document_id if we didn't have one
                 # For subsequent pages: should already have document_id, but update if returned
@@ -488,6 +495,87 @@ class IngestionPipeline:
             state.file_upload_error = f"Document processing error: {error_msg}"
             logger.warning(f"Document processing error (non-critical): {process_error}")
             return True  # Non-critical, continue pipeline
+    
+    async def _generate_item_embeddings(self, state: PipelineState) -> List[str]:
+        """
+        Generate embeddings for created item documents from receipt.
+        
+        This method:
+        1. Extracts items information from recommendation_result metadata
+        2. Generates text description for each item (product_name, category, etc.)
+        3. Generates embedding for each item text
+        4. Saves embedding for each item document
+        
+        :param state: Pipeline state containing item_ids and recommendation_result
+        :return: List of error messages for failed embedding saves (empty if all succeeded)
+        """
+        item_embedding_errors = []
+        
+        if not state.item_ids:
+            logger.debug("No item IDs to generate embeddings for")
+            return item_embedding_errors
+        
+        # Get items data from recommendation_result metadata
+        items_data = []
+        if state.recommendation_result and state.recommendation_result.get("status") == "llm_success":
+            rec_data = state.recommendation_result.get("recommendation", {})
+            metadata = rec_data.get("metadata", {})
+            items_data = metadata.get("items", [])
+        
+        if not items_data:
+            logger.warning(f"Item IDs received ({state.item_ids}) but no items data in metadata for embedding generation")
+            return [f"No items data available for {len(state.item_ids)} item(s)"]
+        
+        if len(items_data) != len(state.item_ids):
+            logger.warning(f"Mismatch between item IDs count ({len(state.item_ids)}) and items data count ({len(items_data)})")
+        
+        logger.info(f"Generating embeddings for {len(state.item_ids)} items...")
+        
+        # Generate embeddings for each item
+        for idx, item_id in enumerate(state.item_ids):
+            if idx >= len(items_data):
+                logger.warning(f"Item ID {item_id} at index {idx} has no corresponding item data, skipping embedding")
+                continue
+            
+            item_data = items_data[idx]
+            
+            # Build text description for the item
+            product_name = item_data.get("product_name") or item_data.get("original_text") or "Unknown Item"
+            category = item_data.get("category", "")
+            
+            # Create a descriptive text for embedding generation
+            item_text = product_name
+            if category:
+                item_text += f" {category}"
+            
+            # Generate embedding for the item
+            try:
+                logger.info(f"Generating embedding for item {item_id}: '{item_text}'")
+                embedding_result = await self.embedding_generator.generate(item_text.strip())
+                
+                if embedding_result.is_successful and embedding_result.vector and len(embedding_result.vector) == 768:
+                    # Save embedding for this item document
+                    save_success = await self.pipeline_storage.save_document_embedding(
+                        document_id=item_id,
+                        embedding=embedding_result.vector,
+                        owner_id=state.owner_id
+                    )
+                    if save_success:
+                        logger.info(f"Embedding saved successfully for item document {item_id}: '{product_name}'")
+                    else:
+                        error_msg = f"Failed to save embedding for item document {item_id}: '{product_name}'"
+                        logger.warning(error_msg)
+                        item_embedding_errors.append(error_msg)
+                else:
+                    error_msg = f"Failed to generate embedding for item {item_id}: {embedding_result.error if embedding_result else 'Unknown error'}"
+                    logger.warning(error_msg)
+                    item_embedding_errors.append(error_msg)
+            except Exception as e:
+                error_msg = f"Error generating embedding for item {item_id}: {str(e)}"
+                logger.error(error_msg, exc_info=True)
+                item_embedding_errors.append(error_msg)
+        
+        return item_embedding_errors
     
     async def step_recommendation(self, state: PipelineState) -> bool:
         """
@@ -735,7 +823,8 @@ class IngestionPipeline:
                     if embedding_vector and len(embedding_vector) == 768:
                         save_success = await self.pipeline_storage.save_document_embedding(
                             document_id=doc_id,
-                            embedding=embedding_vector
+                            embedding=embedding_vector,
+                            owner_id=state.owner_id
                         )
                         if save_success:
                             logger.info(f"Document embedding saved successfully via API for document_id={doc_id}")
@@ -760,6 +849,11 @@ class IngestionPipeline:
         # Step 4B: Process document page metadata
         await report_progress("Finalizing document metadata", 0.9)
         await self.step_process_document(state, page_number=1)
+        
+        # Step 3D: Generate embeddings for created items (if any)
+        if state.item_ids:
+            await report_progress("Generating embeddings for items", 0.91)
+            await self._generate_item_embeddings(state)
         
         # Step 4: Persistence
         await report_progress("Completing processing", 1.0)
@@ -1349,7 +1443,8 @@ async def run_unified_ingestion_pipeline(
                         # Actually attempt to save - this is where we track failures
                         save_success = await pipeline.pipeline_storage.save_document_embedding(
                             document_id=doc_id,
-                            embedding=embedding_vector
+                            embedding=embedding_vector,
+                            owner_id=owner_id
                         )
                         if save_success:
                             logger.info(f"Document embedding saved successfully via API for document_id={doc_id}")
@@ -1441,6 +1536,11 @@ async def run_unified_ingestion_pipeline(
                         
                         # Process document page with structured results (use global page number for database)
                         await pipeline.step_process_document(page_state, page_number=global_page_num)
+                        
+                        # Generate embeddings for created items (if any)
+                        if page_state.item_ids:
+                            logger.info(f"Generating embeddings for {len(page_state.item_ids)} items created from page {global_page_num}...")
+                            await pipeline._generate_item_embeddings(page_state)
 
                         if page_state.document_id is not None:
                             final_document_id = page_state.document_id

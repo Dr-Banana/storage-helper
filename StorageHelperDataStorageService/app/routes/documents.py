@@ -324,7 +324,7 @@ def update_document_embedding(
         db.commit()
         
         return {
-            "document_id": document_id,
+            "document_id": document.id,
             "status": action,
             "message": f"Embedding {action} successfully"
         }
@@ -377,7 +377,8 @@ def search_documents(
             db=db,
             embedding=search_request.embedding,
             limit=search_request.top_k,
-            owner_id=search_request.user_id
+            owner_id=search_request.user_id,
+            exclude_receipts=search_request.exclude_receipts
         )
         
         return [doc.id for doc in documents]

@@ -104,14 +104,23 @@ const ChatInterface: React.FC = () => {
 
       let documents: Document[] = []
       if (response.action === 'SEARCH' && response.action_data?.document_ids) {
-        const promises = response.action_data.document_ids.slice(0, 3).map(async (id: number) => {
+        // Display all search results (don't limit to 3) to match what AI reports
+        const promises = response.action_data.document_ids.map(async (id: number) => {
           try {
             const pagesData = await documentService.getPages(id)
             return pagesData.document || { id, title: `Document #${id}`, owner_id: userId, created_at: new Date().toISOString(), updated_at: new Date().toISOString() }
           } catch (e) { return null }
         })
         const docs = await Promise.all(promises)
-        documents = docs.filter((d): d is Document => d !== null)
+        // Filter out nulls but preserve the original order from document_ids (which is sorted by similarity)
+        const validDocs = docs.filter((d): d is Document => d !== null)
+        // Ensure documents are in the same order as document_ids (sorted by similarity)
+        // Create a map for quick lookup
+        const docMap = new Map(validDocs.map(d => [d.id, d]))
+        // Reorder documents to match the original document_ids order (which is sorted by similarity)
+        documents = response.action_data.document_ids
+          .map((id: number) => docMap.get(id))
+          .filter((d: Document | undefined): d is Document => d !== null && d !== undefined)
       }
 
       setMessages(prev => [...prev, { 

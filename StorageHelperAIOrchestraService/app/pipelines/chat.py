@@ -21,6 +21,7 @@ Current Intent: {intent}
 Reasoning: {reasoning}
 
 If the intent is SEARCH: Acknowledge that you are looking for their items or documents.
+If the intent is UPDATE: Acknowledge that you understand they want to update an item. Currently, this performs a search to find the items they want to update.
 If the intent is PLAN_EAT_OUT: Suggest you can help find restaurants or make reservations.
 If the intent is PLAN_COOK_HOME: Offer to generate recipes based on their ACTUAL inventory items. 
   - CRITICAL: Only suggest recipes using ingredients that are ACTUALLY in their inventory.
@@ -42,7 +43,6 @@ Respond naturally in the same language as the user.
         """
         # 1. Classify intent
         intent_result = await intent_classifier.classify(user_input)
-        logger.info(f"Detected intent: {intent_result.intent} (confidence: {intent_result.confidence})")
 
         # 2. Get intent-specific mock action/data
         intent_action = await route_by_intent(intent_result.intent, user_input, owner_id)
@@ -57,7 +57,10 @@ Respond naturally in the same language as the user.
         # Add context about the specific action we're taking
         context_msg = f"\nSystem Action: {intent_action['message']}"
         if intent_action['action'] == "SEARCH" and intent_action['data'].get('document_ids'):
-             context_msg += f"\nSearch Results: Found document IDs {intent_action['data']['document_ids']}. Please let the user know you've found them."
+             document_ids = intent_action['data']['document_ids']
+             num_found = len(document_ids)
+             # Explicitly tell AI the exact number of documents found
+             context_msg += f"\nSearch Results: Found exactly {num_found} document(s) (IDs: {document_ids}). You MUST report this exact number to the user, not any other number."
         
         if intent_action['action'] == "PLAN_COOK_HOME":
             # Add detailed inventory information for recipe suggestions

@@ -75,3 +75,4 @@ class DocumentSearchRequest(BaseModel):
     embedding: list[float] = Field(..., description="768-dimensional query vector")
     user_id: int = Field(..., description="ID of the user whose documents to search")
     top_k: int = Field(5, description="Number of results to return")
+    exclude_receipts: bool = Field(False, description="If True, exclude receipt parent documents and only return items")
