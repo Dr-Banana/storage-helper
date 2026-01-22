@@ -1,50 +1,53 @@
+"""
+文档语义搜索：query -> embedding -> DataStorageService /api/documents/search
+"""
 import logging
-from typing import List
+from typing import List, Optional
+
 from app.modules.embedding import EmbeddingGenerator
 from app.storage.pipeline_storage import PipelineStorage
 
 logger = logging.getLogger(__name__)
 
-async def perform_search(query: str, owner_id: int, top_k: int = 5) -> List[int]:
+RECEIPT_KEYWORDS = ["receipt", "receipts", "小票", "发票", "收据", "receipt document"]
+
+
+async def perform_search(
+    query: str,
+    owner_id: int,
+    top_k: int = 5,
+    exclude_receipts: Optional[bool] = None,
+) -> List[int]:
     """
-    Performs semantic search for documents.
-    
-    By default, excludes receipt parent documents and only returns item documents.
-    If the query explicitly requests receipts (e.g., "receipt", "小票", "发票"), 
-    receipts will be included in results.
+    query -> embedding -> /api/documents/search，返回 document id 列表。
+    exclude_receipts 为 None 时按 query 是否含小票关键词推断。
     """
     try:
-        # Check if user explicitly wants receipts
-        query_lower = query.lower()
-        receipt_keywords = ['receipt', 'receipts', '小票', '发票', '收据', '发票', 'receipt document']
-        include_receipts = any(keyword in query_lower for keyword in receipt_keywords)
-        
-        # 1. Generate embedding for the query
-        generator = EmbeddingGenerator(task_type="RETRIEVAL_QUERY")
-        embedding_result = await generator.generate(query.strip())
-        
-        if not embedding_result.is_successful:
-            logger.error(f"Failed to generate embedding for search query: {embedding_result.error}")
+        query_clean = (query or "").strip()
+        if not query_clean:
+            logger.warning("perform_search: empty query")
             return []
-        
-        # 2. Call DataStorageService search API (search more to account for filtering)
-        # If excluding receipts, we may need to search more to get enough items
-        search_limit = top_k * 2 if not include_receipts else top_k
-        
+
+        if exclude_receipts is None:
+            ql = query_clean.lower()
+            include_receipts = any(kw in ql for kw in RECEIPT_KEYWORDS)
+            exclude_receipts = not include_receipts
+
+        gen = EmbeddingGenerator(task_type="RETRIEVAL_QUERY")
+        emb = await gen.generate(query_clean)
+        if not emb.is_successful:
+            logger.error("perform_search: embedding failed: %s", emb.error)
+            return []
+
+        search_limit = top_k * 2 if exclude_receipts else top_k
         storage = PipelineStorage()
-        all_document_ids = await storage.search_documents(
-            query_embedding=embedding_result.vector,
+        ids = await storage.search_documents(
+            query_embedding=emb.vector,
             owner_id=owner_id,
             top_k=search_limit,
-            exclude_receipts=not include_receipts  # Exclude receipts if user didn't ask for them
+            exclude_receipts=exclude_receipts,
         )
-        
-        # Limit to top_k if we searched for more
-        document_ids = all_document_ids[:top_k]
-        
-        return document_ids
-        
+        return (ids or [])[:top_k]
     except Exception as e:
-        logger.error(f"Search operation failed: {e}", exc_info=True)
+        logger.error("perform_search failed: %s", e, exc_info=True)
         return []
-

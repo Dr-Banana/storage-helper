@@ -195,23 +195,21 @@ class DocumentService:
         exclude_receipts: bool = False
     ) -> List[Document]:
         """
-        Search documents by vector similarity
+        Search documents by vector similarity (cosine distance).
         
-        Called by AI Service for semantic search
-        
-        Note: This method does NOT sort results by similarity. Sorting will be handled
-        by a separate recommendation service in the future.
+        Called by AI Service for semantic search. Results are ordered by
+        similarity to the query embedding (most similar first).
         
         Args:
             db: Database session
-            embedding: Query embedding vector (currently used only for filtering, not sorting)
+            embedding: Query embedding vector (768-dimensional)
             limit: Maximum results to return
             owner_id: Optional filter by owner
             exclude_receipts: If True, exclude receipt parent documents (category is RECEIPT/REC 
                             but no source_receipt_id in metadata). Only return item documents.
             
         Returns:
-            List of documents (order is not guaranteed - sorting will be handled separately)
+            List of documents ordered by cosine similarity (most similar first)
         """
         try:
             from sqlalchemy import and_, or_
@@ -254,12 +252,12 @@ class DocumentService:
                     )
                 )
             
-            # Search documents (without explicit ordering - sorting will be handled by a separate recommendation service in the future)
+            # Order by vector similarity (cosine distance: lower = more similar)
+            query = query.order_by(DocumentEmbedding.embedding.cosine_distance(embedding))
+            
             # Search more documents if we're filtering, to ensure enough results after removing duplicates
             search_limit = limit * 3 if exclude_receipts else limit * 2
             
-            # Get documents without explicit ordering
-            # Note: Future sorting/recommendation will be handled by a separate service
             documents = query.limit(search_limit).all()
             
             # Remove duplicates while preserving order
@@ -856,6 +854,15 @@ class DocumentService:
                 db.add(item_doc)
                 db.flush()  # Flush to get item_doc.id
                 item_ids.append(item_doc.id)
+
+                # 6. 若 caller 在 metadata.items[].embedding 中传入了 768 维向量，则写入 document_embedding（不调 AI，仅用现有 API/DB）
+                emb_raw = item_data.get("embedding")
+                if isinstance(emb_raw, list) and len(emb_raw) == 768:
+                    try:
+                        emb_floats = [float(x) for x in emb_raw]
+                        db.add(DocumentEmbedding(document_id=item_doc.id, embedding=emb_floats))
+                    except (ValueError, TypeError):
+                        logger.warning("Item document_id=%s has invalid embedding, skipping document_embedding", item_doc.id)
             
             # Save updated metadata with location info back to receipt document
             current_metadata = dict(receipt_doc.doc_metadata or {})

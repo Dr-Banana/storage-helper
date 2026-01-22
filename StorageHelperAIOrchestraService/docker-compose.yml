@@ -12,6 +12,7 @@ services:
       # 必须设置的环境变量（使用 local 环境，会读取 .env.local 文件）
       - APP_ENV=local
     volumes:
+      - ./app:/app/app
       # 挂载临时文件目录（可选，用于持久化）
       - ./tmp:/app/tmp
       # 挂载 .env.local 配置文件

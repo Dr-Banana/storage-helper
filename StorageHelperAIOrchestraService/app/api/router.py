@@ -17,6 +17,7 @@ from app.api.schemas import (
     ChatRequest, ChatResponse
 )
 from app.pipelines import ingestion, feedback, chat
+from app.pipelines.search import perform_search
 from app.modules.embedding import EmbeddingGenerator
 from app.storage.pipeline_storage import PipelineStorage
 
@@ -350,8 +351,27 @@ async def confirm_and_upload_document(
     successful_pages = 0
     failed_pages = 0
     final_document_id = request.document_id
-    item_embedding_errors = []  # Track errors from items embedding generation
-    
+    item_embedding_errors = []  # 现改为在 process 前写入 metadata.items[].embedding，此处仅保留占位
+
+    # 在 classification 后、process 前：用 item 名称生成 embedding 并填入 metadata.items[].embedding，供 DataStorage 写入 document_embedding
+    rec = request.recommendation or {}
+    meta = rec.get("metadata") or {}
+    items = meta.get("items") or []
+    if items:
+        emb_gen = EmbeddingGenerator(task_type="RETRIEVAL_DOCUMENT")
+        for item in items:
+            if item.get("embedding"):
+                continue
+            name = item.get("product_name") or item.get("original_text") or "Unknown Item"
+            cat = (item.get("category") or "").strip()
+            text = f"{name} {cat}".strip() if cat else name
+            try:
+                res = await emb_gen.generate(text)
+                if res.is_successful and res.vector and len(res.vector) == 768:
+                    item["embedding"] = res.vector
+            except Exception as e:
+                logger.warning("Item embedding gen failed for %r: %s", name, e)
+
     try:
         # Process each page with user-modified category_id and location_id
         for page_result in request.page_results:
@@ -425,36 +445,7 @@ async def confirm_and_upload_document(
                     # Update final_document_id from first successful page
                     if final_document_id is None and process_result.get("document_id"):
                         final_document_id = process_result.get("document_id")
-                    
-                    # Check if items were created and generate embeddings for them
-                    item_ids = process_result.get("item_ids", [])
-                    if item_ids:
-                        # Create a temporary state to hold items data for embedding generation
-                        # We need recommendation_result with items in metadata
-                        # Format recommendation_result to match the expected structure
-                        from app.pipelines.ingestion import PipelineState
-                        recommendation_result = None
-                        if request.recommendation:
-                            # Wrap recommendation in the expected format
-                            recommendation_result = {
-                                "status": "llm_success",
-                                "recommendation": request.recommendation
-                            }
-                        
-                        temp_state = PipelineState(
-                            image_url=page_result.file_url or "",
-                            owner_id=request.owner_id,
-                            document_id=final_document_id,
-                            recommendation_result=recommendation_result
-                        )
-                        temp_state.item_ids = item_ids
-                        
-                        # Generate embeddings for items
-                        page_item_errors = await pipeline._generate_item_embeddings(temp_state)
-                        if page_item_errors:
-                            item_embedding_errors.extend(page_item_errors)
-                            logger.warning(f"{len(page_item_errors)} item embedding(s) failed: {page_item_errors}")
-                    
+                    # item 的 embedding 已在 process 前写入 metadata.items[].embedding，由 DataStorage 在 _create_item_documents 中写入 document_embedding
                     page_results.append({
                         "page_number": process_result.get("page_number", page_result.page_number),
                         "status": "success",
@@ -563,52 +554,30 @@ async def submit_feedback(request: FeedbackRequest):
 @api_router.post("/search", response_model=SearchResponse)
 async def search_documents(request: SearchRequest):
     """
-    [Search Pipeline]
-    Search for documents using natural language queries.
-    
-    Process:
-    1. Generate embedding for the query text using Gemini
-    2. Call DataStorageService /api/documents/search with the embedding
-    3. Return the list of matching document IDs
+    [纯搜索，不经过 LLM]
+    输入 query -> 生成 embedding -> 直接调用 DataStorageService /api/documents/search，
+    返回按相似度排序的 document_ids。无意图分类、无对话生成。
     """
     try:
-        logger.info(f"Processing search query: '{request.query}' for owner_id={request.owner_id}")
-        
-        # 1. Generate embedding for the query
-        # Use task_type="RETRIEVAL_QUERY" for search queries to match 
-        # the "RETRIEVAL_DOCUMENT" used during ingestion.
-        generator = EmbeddingGenerator(task_type="RETRIEVAL_QUERY")
-        
-        # Basic cleaning to match ingestion normalization
-        clean_query = request.query.strip()
-        
-        embedding_result = await generator.generate(clean_query)
-        
-        if not embedding_result.is_successful:
-            logger.error(f"Failed to generate embedding for query: {embedding_result.error}")
-            raise HTTPException(
-                status_code=500, 
-                detail=f"Failed to generate embedding: {embedding_result.error}"
-            )
-        
-        # 2. Call DataStorageService search API
-        storage = PipelineStorage()
-        document_ids = await storage.search_documents(
-            query_embedding=embedding_result.vector,
-            owner_id=request.owner_id,
-            top_k=request.top_k
+        logger.info(
+            "Pure search (no LLM): query=%r len=%d owner_id=%d top_k=%d",
+            request.query, len((request.query or "").strip()), request.owner_id, request.top_k,
         )
-        
+        document_ids = await perform_search(
+            request.query,
+            request.owner_id,
+            top_k=request.top_k,
+            exclude_receipts=False,
+        )
         return SearchResponse(
             query=request.query,
             document_ids=document_ids,
-            count=len(document_ids)
+            count=len(document_ids),
         )
-        
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error in search pipeline: {e}", exc_info=True)
+        logger.error("Pure search failed: %s", e, exc_info=True)
         raise HTTPException(status_code=500, detail=f"Search failed: {str(e)}")
 
 

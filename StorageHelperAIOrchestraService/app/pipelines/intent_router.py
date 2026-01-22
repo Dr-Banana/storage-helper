@@ -85,7 +85,7 @@ async def route_by_intent(intent: Intent, user_input: str, owner_id: int) -> Dic
     logger.info(f"Routing intent: {intent} for user: {owner_id}")
 
     if intent == Intent.SEARCH:
-        # Perform actual search
+        # Perform actual search: query -> embedding -> /api/documents/search
         document_ids = await perform_search(user_input, owner_id)
         
         if document_ids:

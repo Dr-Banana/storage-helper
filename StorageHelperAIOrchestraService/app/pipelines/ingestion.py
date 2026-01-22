@@ -422,6 +422,21 @@ class IngestionPipeline:
                 metadata = (rec_data.get("metadata") or {}).copy()
                 if "storage_suggestion" in rec_data:
                     metadata["storage_suggestion"] = rec_data["storage_suggestion"]
+
+                # 在 classification 后、process 前：用 item 名称生成 embedding 并填入 metadata.items[].embedding，供 DataStorage 写入 document_embedding
+                items = metadata.get("items") or []
+                for item in items:
+                    if item.get("embedding"):
+                        continue
+                    name = item.get("product_name") or item.get("original_text") or "Unknown Item"
+                    cat = (item.get("category") or "").strip()
+                    text = f"{name} {cat}".strip() if cat else name
+                    try:
+                        res = await self.embedding_generator.generate(text)
+                        if res.is_successful and res.vector and len(res.vector) == 768:
+                            item["embedding"] = res.vector
+                    except Exception as e:
+                        logger.warning("Item embedding gen failed for %r: %s", name, e)
                 
                 if metadata:
                     logger.info(f"Metadata extracted for page processing: {metadata}")
@@ -846,14 +861,9 @@ class IngestionPipeline:
             elif not state.embedding_result or not state.embedding_result.is_successful:
                 logger.info("Skipping embedding save: embedding generation failed")
 
-        # Step 4B: Process document page metadata
+        # Step 4B: Process document page metadata（step 内已在 process 前为 metadata.items 生成 embedding，DataStorage 在 _create_item_documents 中写入 document_embedding）
         await report_progress("Finalizing document metadata", 0.9)
         await self.step_process_document(state, page_number=1)
-        
-        # Step 3D: Generate embeddings for created items (if any)
-        if state.item_ids:
-            await report_progress("Generating embeddings for items", 0.91)
-            await self._generate_item_embeddings(state)
         
         # Step 4: Persistence
         await report_progress("Completing processing", 1.0)
@@ -1408,7 +1418,7 @@ async def run_unified_ingestion_pipeline(
             else:
                 logger.warning(f"Step 3B: Skipping update - category_id is None and location_id is None. rec_data: {rec_data}")
         elif total_pages == 1:
-            logger.info(f"Step 3B: Skipping update - single page document, first page was already processed with recommendation in Step 2A")
+            logger.info(f"Step 3B: Skipping update for single-page document (preview mode or recommendation not ready; DB processing will occur on /ingestion/confirm)")
         else:
             if not final_document_id:
                 logger.warning("Step 3B: Skipping - no final_document_id")
@@ -1472,7 +1482,7 @@ async def run_unified_ingestion_pipeline(
             # Save wasn't attempted due to missing preconditions - don't set embedding_save_error
             # These are expected conditions, not errors
             if not final_document_id:
-                logger.info("Skipping embedding save: document_id not available (this is expected for failed page processing)")
+                logger.info("Skipping embedding save: document_id not available (expected in preview mode or when document processing was skipped)")
             elif not embedding_result or not (isinstance(embedding_result, EmbeddingResult) and embedding_result.is_successful):
                 logger.info("Skipping embedding save: embedding generation failed or not successful (this is expected when embedding generation fails)")
         
@@ -1535,12 +1545,8 @@ async def run_unified_ingestion_pipeline(
                             page_state.recommendation_result = recommendation_result
                         
                         # Process document page with structured results (use global page number for database)
+                        # step_process_document 内已在 process 前为 metadata.items 生成 embedding，DataStorage 在 _create_item_documents 中写入 document_embedding
                         await pipeline.step_process_document(page_state, page_number=global_page_num)
-                        
-                        # Generate embeddings for created items (if any)
-                        if page_state.item_ids:
-                            logger.info(f"Generating embeddings for {len(page_state.item_ids)} items created from page {global_page_num}...")
-                            await pipeline._generate_item_embeddings(page_state)
 
                         if page_state.document_id is not None:
                             final_document_id = page_state.document_id
