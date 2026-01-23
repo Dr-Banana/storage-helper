@@ -1,177 +1,42 @@
+"""
+Intent Router: Routes requests to appropriate agents based on intent
+Refactored to use agent architecture for better modularity
+"""
 import logging
-import httpx
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any
 from app.modules.intent_classifier import Intent
-from app.pipelines.search import perform_search
-from app.storage.pipeline_storage import _get_storage_base_url
+from app.agents.agent_factory import agent_factory
 
 logger = logging.getLogger(__name__)
-
-async def get_user_inventory(owner_id: int) -> List[Dict[str, Any]]:
-    """
-    Get the user's current inventory from documents (extracted receipt items).
-    Only returns food items (is_food=True) from receipt metadata.
-    
-    :param owner_id: User ID
-    :return: List of inventory items with product_name, category, etc.
-    """
-    try:
-        base_url = _get_storage_base_url()
-        if not base_url:
-            logger.warning("Cannot get inventory: Invalid STORAGE_SERVICE_URL configuration")
-            return []
-        
-        # Get all documents for the user
-        url = f"{base_url}/api/users/{owner_id}/documents"
-        logger.debug(f"Fetching user documents from: {url}")
-        
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            response = await client.get(url)
-            response.raise_for_status()
-            result = response.json()
-            documents = result.get("documents", [])
-        
-        # Extract food items from document metadata
-        inventory_items = []
-        for doc in documents:
-            metadata = doc.get("metadata") or {}
-            
-            # Check if this is a receipt with items
-            if "items" in metadata and isinstance(metadata["items"], list):
-                for item in metadata["items"]:
-                    # Only include food items
-                    if item.get("is_food", False):
-                        inventory_items.append({
-                            "product_name": item.get("product_name", "Unknown"),
-                            "category": item.get("category", ""),
-                            "quantity": item.get("quantity", "1"),
-                            "storage_suggestion": item.get("storage_suggestion", ""),
-                            "estimated_shelf_life_days": item.get("estimated_shelf_life_days", 0)
-                        })
-            else:
-                # Check if this is an individual item document (not a receipt)
-                # Item documents have product_name in metadata or title
-                product_name = metadata.get("product_name") or doc.get("title")
-                is_food = metadata.get("is_food", False)
-                
-                if is_food and product_name:
-                    inventory_items.append({
-                        "product_name": product_name,
-                        "category": metadata.get("category", ""),
-                        "quantity": metadata.get("quantity", "1"),
-                        "storage_suggestion": metadata.get("storage_suggestion", ""),
-                        "estimated_shelf_life_days": metadata.get("estimated_shelf_life_days", 0)
-                    })
-        
-        logger.info(f"Retrieved {len(inventory_items)} food items from inventory for user {owner_id}")
-        return inventory_items
-        
-    except httpx.ConnectError as e:
-        logger.error(f"Cannot connect to DataStorageService to get inventory: {e}")
-        return []
-    except httpx.HTTPStatusError as e:
-        logger.error(f"HTTP {e.response.status_code} when fetching inventory: {e.response.text[:200]}")
-        return []
-    except Exception as e:
-        logger.error(f"Error fetching user inventory: {e}", exc_info=True)
-        return []
 
 
 async def route_by_intent(intent: Intent, user_input: str, owner_id: int) -> Dict[str, Any]:
     """
-    Routes the user request to the appropriate service based on detected intent.
-    Currently implements mock responses for the V2 features.
+    Route user request to the appropriate agent based on detected intent
+    
+    Args:
+        intent: Detected intent
+        user_input: User input
+        owner_id: User ID
+        
+    Returns:
+        Dictionary containing action, message, and data
     """
     logger.info(f"Routing intent: {intent} for user: {owner_id}")
 
-    if intent == Intent.SEARCH:
-        # Perform actual search: query -> embedding -> /api/documents/search
-        document_ids = await perform_search(user_input, owner_id)
-        
-        if document_ids:
-            return {
-                "action": "SEARCH",
-                "message": f"I found {len(document_ids)} document(s) that might match your request.",
-                "data": {
-                    "query": user_input,
-                    "document_ids": document_ids
-                }
-            }
-        else:
-            return {
-                "action": "SEARCH",
-                "message": "I searched for your documents but couldn't find anything relevant.",
-                "data": {"query": user_input, "document_ids": []}
-            }
+    # Use agent factory to get the corresponding agent
+    agent = agent_factory.get_agent(intent)
     
-    elif intent == Intent.UPDATE:
-        # Currently performs the same operation as SEARCH, will be enhanced in the future
-        document_ids = await perform_search(user_input, owner_id)
-        
-        if document_ids:
-            return {
-                "action": "SEARCH",
-                "message": f"I found {len(document_ids)} document(s) that might match your request.",
-                "data": {
-                    "query": user_input,
-                    "document_ids": document_ids
-                }
-            }
-        else:
-            return {
-                "action": "SEARCH",
-                "message": "I searched for your documents but couldn't find anything relevant.",
-                "data": {"query": user_input, "document_ids": []}
-            }
-    
-    elif intent == Intent.PLAN_EAT_OUT:
-        # This is a V2 feature
-        return {
-            "action": "PLAN_EAT_OUT",
-            "message": "I see you want to eat out. I can help you find restaurants or make a reservation.",
-            "data": {"suggestion": "Would you like me to look for Italian or Japanese restaurants nearby?"}
-        }
-    
-    elif intent == Intent.PLAN_COOK_HOME:
-        # Get real inventory from user's documents
-        inventory_items = await get_user_inventory(owner_id)
-        
-        if inventory_items:
-            # Format inventory list for AI context
-            inventory_list = []
-            for item in inventory_items[:20]:  # Limit to 20 items to avoid too long context
-                product_name = item.get("product_name", "Unknown")
-                category = item.get("category", "")
-                inventory_list.append(f"- {product_name}" + (f" ({category})" if category else ""))
-            
-            inventory_text = "\n".join(inventory_list)
-            inventory_summary = f"I found {len(inventory_items)} food items in your inventory:\n{inventory_text}"
-            
-            return {
-                "action": "PLAN_COOK_HOME",
-                "message": "Let's plan a meal at home. I can check your fridge and suggest a recipe.",
-                "data": {
-                    "suggestion": inventory_summary,
-                    "inventory_items": inventory_items,
-                    "inventory_count": len(inventory_items)
-                }
-            }
-        else:
-            # No inventory found
-            return {
-                "action": "PLAN_COOK_HOME",
-                "message": "Let's plan a meal at home. I can check your fridge and suggest a recipe.",
-                "data": {
-                    "suggestion": "I couldn't find any food items in your current inventory. Try uploading a shopping receipt first to add items to your inventory.",
-                    "inventory_items": [],
-                    "inventory_count": 0
-                }
-            }
-    
-    else:
-        return {
-            "action": "GENERAL",
-            "message": "How else can I help you today?",
-            "data": {}
-        }
+    # Execute agent logic
+    try:
+        result = await agent.execute(
+            user_input=user_input,
+            owner_id=owner_id
+        )
+        return result
+    except Exception as e:
+        logger.error(f"Error executing agent {agent.name}: {e}", exc_info=True)
+        # Return general response on error
+        general_agent = agent_factory.get_agent(Intent.GENERAL)
+        return await general_agent.execute(user_input, owner_id)
 
