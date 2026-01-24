@@ -1,9 +1,11 @@
 """
 SearchAgent: Agent for handling search intent
 """
-from typing import Dict, Any
+from typing import Dict, Any, List
 from app.agents.base import BaseAgent
 from app.pipelines.search import perform_search
+from app.storage.pipeline_storage import PipelineStorage
+import asyncio
 
 
 class SearchAgent(BaseAgent):
@@ -13,6 +15,7 @@ class SearchAgent(BaseAgent):
     
     def __init__(self):
         super().__init__("SEARCH")
+        self.storage = PipelineStorage()
     
     async def execute(
         self,
@@ -42,13 +45,30 @@ class SearchAgent(BaseAgent):
             top_k=top_k
         )
         
+        # Fetch document details
+        documents = []
+        if document_ids:
+            try:
+                # Fetch documents concurrently
+                tasks = [self.storage.get_document(str(doc_id), owner_id=owner_id) for doc_id in document_ids]
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+                
+                for res in results:
+                    if isinstance(res, dict):
+                        documents.append(res)
+                    elif isinstance(res, Exception):
+                        self.logger.error(f"Error fetching document: {res}")
+            except Exception as e:
+                self.logger.error(f"Error fetching document details: {e}")
+        
         if document_ids:
             return self.format_response(
                 action="SEARCH",
                 message=f"I found {len(document_ids)} document(s) that might match your request.",
                 data={
                     "query": user_input,
-                    "document_ids": document_ids
+                    "document_ids": document_ids,
+                    "documents": documents  # Include full document details
                 }
             )
         else:
@@ -57,6 +77,7 @@ class SearchAgent(BaseAgent):
                 message="I searched for your documents but couldn't find anything relevant.",
                 data={
                     "query": user_input,
-                    "document_ids": []
+                    "document_ids": [],
+                    "documents": []
                 }
             )

@@ -772,45 +772,62 @@ class PipelineStorage:
             logger.error(f"Failed to update document metadata via API: {e}")
             return False
     
-    async def get_document(self, doc_id: str, include_embedding: bool = False) -> Optional[Dict[str, Any]]:
+    async def get_document(self, doc_id: str, owner_id: Optional[int] = None, include_embedding: bool = False) -> Optional[Dict[str, Any]]:
         """
         Get document data via API.
         
-        [API: GET /internal/documents/{doc_id}]
+        [API: GET /api/documents/{doc_id}]
         
         :param doc_id: Document ID
+        :param owner_id: Owner ID (required for authorization)
         :param include_embedding: Whether to include embedding vector
         :return: Document data dictionary, or None if not found
         """
-        url = f"/documents/{doc_id}"
+        # Extract base URL
+        base_url = _get_storage_base_url()
+        if not base_url:
+            return None
+            
+        url = f"/api/documents/{doc_id}"
+        
+        # Prepare headers
+        headers = {}
+        if owner_id:
+            headers["Authorization"] = f"Bearer user_{owner_id}"
+            
         try:
-            response = await self.client.get(url, timeout=5.0)
-            response.raise_for_status()
-            document = response.json()
-            
-            # Filter embedding if not requested
-            if not include_embedding and "embedding" in document:
-                document.pop("embedding")
-            
-            return document
+            logger.info(f"Getting document via DataStorageService: {base_url}{url}")
+            async with httpx.AsyncClient(base_url=base_url, timeout=10.0) as client:
+                response = await client.get(url, headers=headers)
+                
+                if response.status_code == 404:
+                    logger.warning(f"Document not found: {doc_id}")
+                    return None
+                    
+                response.raise_for_status()
+                document = response.json()
+                
+                # Filter embedding if not requested
+                if not include_embedding and "embedding" in document:
+                    document.pop("embedding")
+                
+                return document
         except httpx.HTTPStatusError as e:
-            if e.response.status_code == 404:
-                logger.warning(f"Document not found: {doc_id}")
-                return None
-            logger.error(f"Failed to get document via API: {e}")
+            logger.error(f"Failed to get document via API: HTTP {e.response.status_code}: {e.response.text[:200]}")
             return None
         except Exception as e:
             logger.error(f"Error getting document via API: {e}")
             return None
     
-    async def get_embedding(self, doc_id: str) -> Optional[List[float]]:
+    async def get_embedding(self, doc_id: str, owner_id: Optional[int] = None) -> Optional[List[float]]:
         """
         Get document embedding vector via API.
         
         :param doc_id: Document ID
+        :param owner_id: Owner ID (required for authorization)
         :return: Embedding vector, or None if not found
         """
-        document = await self.get_document(doc_id, include_embedding=True)
+        document = await self.get_document(doc_id, owner_id=owner_id, include_embedding=True)
         if document:
             return document.get("embedding")
         return None
@@ -954,14 +971,14 @@ async def save_error_document(document_data: Dict[str, Any], error_info: Dict[st
     return await _default_storage.save_error_document(document_data, error_info)
 
 
-async def get_document(doc_id: str, include_embedding: bool = False) -> Optional[Dict[str, Any]]:
+async def get_document(doc_id: str, owner_id: Optional[int] = None, include_embedding: bool = False) -> Optional[Dict[str, Any]]:
     """Convenience function: Get document using default storage instance."""
-    return await _default_storage.get_document(doc_id, include_embedding=include_embedding)
+    return await _default_storage.get_document(doc_id, owner_id=owner_id, include_embedding=include_embedding)
 
 
-async def get_embedding(doc_id: str) -> Optional[List[float]]:
+async def get_embedding(doc_id: str, owner_id: Optional[int] = None) -> Optional[List[float]]:
     """Convenience function: Get embedding using default storage instance."""
-    return await _default_storage.get_embedding(doc_id)
+    return await _default_storage.get_embedding(doc_id, owner_id=owner_id)
 
 
 async def get_all_embeddings(owner_id: Optional[int] = None) -> List[Dict[str, Any]]:

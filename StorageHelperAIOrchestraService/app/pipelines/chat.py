@@ -58,9 +58,42 @@ Respond naturally in the same language as the user.
         context_msg = f"\nSystem Action: {intent_action['message']}"
         if intent_action['action'] == "SEARCH" and intent_action['data'].get('document_ids'):
              document_ids = intent_action['data']['document_ids']
+             documents = intent_action['data'].get('documents', [])
              num_found = len(document_ids)
-             # Explicitly tell AI the exact number of documents found
-             context_msg += f"\nSearch Results: Found exactly {num_found} document(s) (IDs: {document_ids}). You MUST report this exact number to the user, not any other number."
+             
+             context_msg += f"\nSearch Results: Found exactly {num_found} document(s).\n"
+             context_msg += "Here are the details of the found items:\n"
+             
+             for idx, doc in enumerate(documents):
+                 meta = doc.get("metadata", {})
+                 # Try to find product name in various fields
+                 # 1. First check document title (most reliable if set)
+                 product_name = doc.get("title")
+                 
+                 # 2. Check metadata product_name/item_name
+                 if not product_name:
+                     product_name = meta.get("product_name") or meta.get("item_name")
+                 
+                 # 3. Fallback to OCR text if product name is missing
+                 if not product_name:
+                     ocr_text = doc.get("ocr_text", "")
+                     if ocr_text:
+                         # Use first line or first 30 chars of OCR text
+                         product_name = ocr_text.split('\n')[0][:30]
+                     else:
+                         product_name = f"Document #{doc.get('id', 'Unknown')}"
+                 
+                 category = meta.get("category", "Unknown Category")
+                 # Try to find location/storage info
+                 # 1. First check document location_name (from DB relationship)
+                 # 2. Then check metadata storage_condition/location
+                 location = doc.get("location_name") or meta.get("storage_condition") or meta.get("location") or "Unknown Location"
+                 qty = meta.get("quantity") or meta.get("quantity_unit") or "N/A"
+                 expiry = meta.get("expiry_date") or meta.get("expiration_date") or "N/A"
+                 
+                 context_msg += f"{idx+1}. {product_name} [Category: {category}] [Location: {location}] [Qty: {qty}] [Expiry: {expiry}]\n"
+                 
+             context_msg += "\nCRITICAL: You MUST construct your response based ONLY on the above search results. Do NOT invent items not listed here. If the details are generic (e.g. 'Document #123'), just describe what you see."
         
         if intent_action['action'] == "PLAN_COOK_HOME":
             # Add detailed inventory information for recipe suggestions
