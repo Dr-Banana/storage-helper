@@ -386,6 +386,10 @@ def search_documents(
         return [doc.id for doc in documents]
         
     except ValueError as e:
+        # Log the detailed error before raising 400
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.error(f"Search failed with ValueError: {str(e)}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(e)

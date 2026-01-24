@@ -258,20 +258,53 @@ class DocumentService:
             # Search more documents if we're filtering, to ensure enough results after removing duplicates
             search_limit = limit * 3 if exclude_receipts else limit * 2
             
-            documents = query.limit(search_limit).all()
+            # Select Document AND distance
+            query = query.add_columns(DocumentEmbedding.embedding.cosine_distance(embedding).label("distance"))
             
-            # Remove duplicates while preserving order
-            # This handles cases where LEFT JOIN with DocumentCategory might create duplicate Document rows
+            # Search more documents to ensure we have enough candidates to filter from
+            # We fetch more candidates (limit * 10) to avoid missing valid results that might be 
+            # pushed down by noise, then apply the strict threshold filtering in Python.
+            search_limit = limit * 10
+            
+            results = query.limit(search_limit).all()
+            
+            # Process results: remove duplicates, filter by distance threshold, and return Documents
+            # Threshold tuning:
+            # 0.45: Too strict for cross-lingual (missed "Tomato" for "西红柿")
+            # 0.60: Too loose (included "Rice" for "Tomato")
+            # 0.52: Compromise to filter noise while keeping semantic matches
+            DISTANCE_THRESHOLD = 0.52
+            
             seen_ids = set()
             unique_documents = []
-            for doc in documents:
+            
+            # Debug logging for search quality
+            debug_results = []
+            
+            for row in results:
+                # row is a tuple (Document, distance)
+                # IMPORTANT: When using add_columns, row is a Row object.
+                # Accessing by index 0 gets the Document entity.
+                doc = row[0]
+                distance = row[1]
+                
+                # Log top results for debugging
+                if len(debug_results) < 10:
+                    debug_results.append(f"{doc.title} (id={doc.id}, dist={distance:.4f})")
+                
+                # Filter by distance threshold
+                if distance > DISTANCE_THRESHOLD:
+                    continue
+                
                 if doc.id not in seen_ids:
                     seen_ids.add(doc.id)
                     unique_documents.append(doc)
-            documents = unique_documents
+            
+            logger.info(f"Search results (limit={limit}, candidates={len(results)}): {', '.join(debug_results)}")
+            logger.info(f"Filtered results: {len(unique_documents)} docs (threshold={DISTANCE_THRESHOLD})")
             
             # Apply final limit
-            return documents[:limit]
+            return unique_documents[:limit]
             
         except Exception as e:
             raise ValueError(f"Failed to search documents: {str(e)}")
