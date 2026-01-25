@@ -21,7 +21,7 @@ Current Intent: {intent}
 Reasoning: {reasoning}
 
 If the intent is SEARCH: Acknowledge that you are looking for their items or documents.
-If the intent is UPDATE: Acknowledge that you understand they want to update an item. Currently, this performs a search to find the items they want to update.
+If the intent is UPDATE: The system has searched for candidates to update. Present these candidates to the user and ASK FOR CONFIRMATION on which one to update and what values to change. DO NOT update until confirmed.
 If the intent is PLAN_EAT_OUT: Suggest you can help find restaurants or make reservations.
 If the intent is PLAN_COOK_HOME: Offer to generate recipes based on their ACTUAL inventory items. 
   - CRITICAL: Only suggest recipes using ingredients that are ACTUALLY in their inventory.
@@ -102,6 +102,46 @@ Respond naturally in the same language as the user.
                  context_msg += "\nSearch Results: 0 documents found."
                  context_msg += "\nCRITICAL: The search returned NO results. You MUST explicitly state that no items matching the request were found in the inventory."
                  context_msg += "\nDO NOT invent or hallucinate any items. DO NOT say 'Here is what you have' if the list is empty."
+        
+        # Handle UPDATE intent results
+        if intent_action['action'] == "UPDATE":
+            if intent_action['data'].get('document_ids'):
+                 document_ids = intent_action['data']['document_ids']
+                 documents = intent_action['data'].get('documents', [])
+                 num_found = len(document_ids)
+                 changes = intent_action['data'].get('proposed_changes', {})
+                 
+                 context_msg += f"\nUpdate Candidates: Found {num_found} document(s) that might match the update request.\n"
+                 if changes:
+                     context_msg += f"Proposed Changes: {json.dumps(changes)}\n"
+                 
+                 context_msg += "Here are the details of the candidates:\n"
+                 
+                 for idx, doc in enumerate(documents):
+                     meta = doc.get("metadata", {})
+                     product_name = doc.get("title")
+                     if not product_name:
+                         product_name = meta.get("product_name") or meta.get("item_name")
+                     if not product_name:
+                         ocr_text = doc.get("ocr_text", "")
+                         if ocr_text:
+                             product_name = ocr_text.split('\n')[0][:30]
+                         else:
+                             product_name = f"Document #{doc.get('id', 'Unknown')}"
+                     
+                     category = meta.get("category", "Unknown Category")
+                     location = doc.get("location_name") or meta.get("storage_condition") or meta.get("location") or "Unknown Location"
+                     qty = meta.get("quantity") or meta.get("quantity_unit") or "N/A"
+                     expiry = meta.get("expiry_date") or meta.get("expiration_date") or "N/A"
+                     
+                     context_msg += f"{idx+1}. {product_name} [Category: {category}] [Location: {location}] [Qty: {qty}] [Expiry: {expiry}] (ID: {doc.get('id', doc.get('document_id', 'Unknown'))})\n"
+                 
+                 context_msg += "\nCRITICAL: Tell the user to CLICK the 'UPDATE' button on the correct item below to confirm the changes."
+                 context_msg += "\nDO NOT ask for text confirmation if the user can click."
+                 context_msg += "\nSummarize what will be changed based on 'Proposed Changes'."
+            else:
+                 context_msg += "\nUpdate Search Results: 0 documents found."
+                 context_msg += "\nTell the user you couldn't find the item they wanted to update."
         
         if intent_action['action'] == "PLAN_COOK_HOME":
             # Add detailed inventory information for recipe suggestions

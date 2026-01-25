@@ -16,7 +16,59 @@ interface Message {
 }
 
 // 提取消息组件以减少重复渲染
-const MessageItem = memo(({ msg }: { msg: Message }) => {
+const MessageItem = memo(({ msg, setMessages, setIsLoading }: { msg: Message, setMessages: React.Dispatch<React.SetStateAction<Message[]>>, setIsLoading: React.Dispatch<React.SetStateAction<boolean>> }) => {
+    const handleUpdate = async (doc: Document, updates: any) => {
+    try {
+      setIsLoading(true);
+      
+      // Determine what to update based on keys
+      // Common fields: quantity, expiry_date, storage_condition -> metadata
+      // Special fields: location, category -> separate endpoints or direct fields
+      
+      const updatePayload: any = { metadata: {} };
+      
+      // Merge existing metadata
+      if (doc.metadata) {
+        updatePayload.metadata = { ...doc.metadata };
+      }
+      
+      let hasChanges = false;
+      
+      Object.entries(updates).forEach(([key, value]) => {
+        if (key === 'location') {
+           // Skip location text update if it requires ID resolution, 
+           // but we can put it in metadata for reference if needed
+           // For now, let's assume simple metadata updates
+           updatePayload.metadata[key] = value;
+           hasChanges = true;
+        } else if (key === 'category') {
+           // Same for category
+           updatePayload.metadata[key] = value;
+           hasChanges = true;
+        } else {
+           updatePayload.metadata[key] = value;
+           hasChanges = true;
+        }
+      });
+      
+      if (hasChanges) {
+        await documentService.update(doc.id, updatePayload);
+        
+        // Show success message locally
+        setMessages(prev => [...prev, { 
+          role: 'model', 
+          content: `✅ Successfully updated **${doc.title}**.\n\nChanges applied:\n${Object.entries(updates).map(([k, v]) => `- ${k}: ${v}`).join('\n')}` 
+        }]);
+      }
+      
+    } catch (error) {
+      console.error("Update failed", error);
+      setMessages(prev => [...prev, { role: 'model', content: `❌ Failed to update **${doc.title}**. Please try again.` }]);
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
   return (
     <div className={`flex gap-4 animate-slide-up ${msg.role === 'user' ? 'flex-row-reverse' : ''}`}>
       <div className={`flex-shrink-0 w-8 h-8 rounded-lg flex items-center justify-center ${
@@ -43,19 +95,37 @@ const MessageItem = memo(({ msg }: { msg: Message }) => {
         {msg.role === 'model' && msg.documents && msg.documents.length > 0 && (
           <div className="grid grid-cols-1 gap-3 w-full mt-2">
             {msg.documents.map(doc => (
-              <Link 
+              <div 
                 key={doc.id}
-                to={`/documents/${doc.id}`}
-                className="flex items-center gap-4 p-4 bg-white border border-home-primary-100 rounded-2xl hover:border-home-primary-400 hover:shadow-md transition-all group"
+                className="flex items-center gap-4 p-4 bg-white border border-home-primary-100 rounded-2xl hover:border-home-primary-400 hover:shadow-md transition-all group relative overflow-hidden"
               >
-                <div className="w-12 h-12 rounded-xl bg-home-primary-50 flex items-center justify-center text-home-primary-600 group-hover:scale-110 transition-transform">
+                 {/* Link Wrapper for Navigation */}
+                 <Link 
+                  to={`/documents/${doc.id}`}
+                  className="absolute inset-0 z-0"
+                 />
+                 
+                <div className="w-12 h-12 rounded-xl bg-home-primary-50 flex items-center justify-center text-home-primary-600 group-hover:scale-110 transition-transform z-10 relative pointer-events-none">
                   <FileText size={24} />
                 </div>
-                <div className="flex-1 min-w-0">
+                <div className="flex-1 min-w-0 z-10 relative pointer-events-none">
                   <p className="text-sm font-bold text-home-text-dark truncate">{doc.title || `Untitled Document`}</p>
                   <p className="text-xs text-home-text-light">{new Date(doc.created_at).toLocaleDateString(undefined, { dateStyle: 'medium' })}</p>
                 </div>
-              </Link>
+                
+                {msg.action === 'UPDATE' && msg.actionData?.proposed_changes && Object.keys(msg.actionData.proposed_changes).length > 0 ? (
+                  <button
+                    onClick={(e) => {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      handleUpdate(doc, msg.actionData.proposed_changes);
+                    }}
+                    className="z-20 relative px-4 py-2 bg-green-500 hover:bg-green-600 text-white text-xs font-bold rounded-lg shadow-sm transition-colors flex items-center gap-1"
+                  >
+                    UPDATE
+                  </button>
+                ) : null}
+              </div>
             ))}
           </div>
         )}
@@ -103,7 +173,7 @@ const ChatInterface: React.FC = () => {
       })
 
       let documents: Document[] = []
-      if (response.action === 'SEARCH' && response.action_data?.document_ids) {
+      if ((response.action === 'SEARCH' || response.action === 'UPDATE') && response.action_data?.document_ids) {
         // Display all search results (don't limit to 3) to match what AI reports
         const promises = response.action_data.document_ids.map(async (id: number) => {
           try {
@@ -175,7 +245,7 @@ const ChatInterface: React.FC = () => {
       </div>
 
       <div className={`flex-1 overflow-y-auto p-4 sm:p-8 space-y-8 custom-scrollbar ${isFullScreen ? 'max-w-4xl mx-auto w-full' : ''}`}>
-        {messages.map((msg, index) => <MessageItem key={index} msg={msg} />)}
+        {messages.map((msg, index) => <MessageItem key={index} msg={msg} setMessages={setMessages} setIsLoading={setIsLoading} />)}
         {isLoading && (
           <div className="flex gap-4 animate-pulse">
             <div className="w-8 h-8 rounded-lg bg-home-primary-100 flex items-center justify-center text-home-primary-400"><Sparkles size={16} /></div>

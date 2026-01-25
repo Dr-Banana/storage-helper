@@ -2,14 +2,68 @@
 文档语义搜索：query -> embedding -> DataStorageService /api/documents/search
 """
 import logging
+import httpx
 from typing import List, Optional
 
 from app.modules.embedding import EmbeddingGenerator
 from app.storage.pipeline_storage import PipelineStorage
+from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
 RECEIPT_KEYWORDS = ["receipt", "receipts", "小票", "发票", "收据", "receipt document"]
+
+
+async def _extract_search_term(user_input: str) -> Optional[str]:
+    """
+    Use LLM to extract the main object/product name from a complex query.
+    Example: "I have 5 tomato instead of 1" -> "tomato"
+    """
+    try:
+        api_key = settings.GEMINI_LLM_API_KEY
+        model_name = settings.GEMINI_LLM_MODEL
+        api_url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
+        
+        system_instruction = """
+        You are an entity extractor. 
+        Extract the main object/product name from the user's request.
+        Return ONLY the object name (and maybe a few identifying words like brand if present).
+        If the query is already simple (e.g., "tomato"), just return it as is.
+        
+        Examples:
+        "I have 5 tomato instead of 1" -> "tomato"
+        "Update my passport expiry date" -> "passport"
+        "Where is the rice?" -> "rice"
+        "show me receipts" -> "receipts"
+        """
+        
+        payload = {
+            "contents": [{"role": "user", "parts": [{"text": user_input}]}],
+            "systemInstruction": {"parts": [{"text": system_instruction}]},
+            "generationConfig": {
+                "temperature": 0.1,
+                "maxOutputTokens": 50
+            }
+        }
+        
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            response = await client.post(api_url, json=payload)
+            if response.status_code != 200:
+                return None
+                
+            result = response.json()
+            candidates = result.get('candidates', [])
+            if candidates:
+                content = candidates[0].get('content', {}).get('parts', [])[0].get('text', '').strip()
+                content = content.replace('"', '').replace("'", "").strip()
+                # Only use extraction if it's significantly shorter than input (meaning extraction happened)
+                # or if input was long. If input is short, it's likely already a keyword.
+                if len(content) < len(user_input) or len(user_input.split()) > 3:
+                    return content
+            return None
+    except Exception as e:
+        logger.warning(f"Failed to extract search term: {e}")
+        return None
 
 
 async def perform_search(
@@ -27,6 +81,14 @@ async def perform_search(
         if not query_clean:
             logger.warning("perform_search: empty query")
             return []
+
+        # Optimization: Try to extract search term for complex queries
+        # This helps with "I have 5 tomato" -> "tomato" matching
+        if len(query_clean.split()) > 2:
+            extracted = await _extract_search_term(query_clean)
+            if extracted:
+                logger.info(f"Optimized search query: '{query_clean}' -> '{extracted}'")
+                query_clean = extracted
 
         if exclude_receipts is None:
             ql = query_clean.lower()
