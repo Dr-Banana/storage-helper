@@ -4,7 +4,7 @@ UpdateAgent: Agent for handling update intent
 from typing import Dict, Any, List
 import httpx
 from app.agents.base import BaseAgent
-from app.pipelines.search import perform_search
+from app.pipelines.search import perform_search, extract_search_term
 from app.storage.pipeline_storage import PipelineStorage
 from app.core.config import settings
 import asyncio
@@ -36,7 +36,8 @@ class UpdateAgent(BaseAgent):
         Return valid JSON only.
         
         Fields to look for:
-        - quantity (number or string)
+        - quantity (numeric value preferred, e.g., "5", "1.5")
+        - unit (e.g., "lb", "kg", "bottles", "pieces", "box", "bag") - ONLY if explicitly mentioned or changed
         - expiry_date (YYYY-MM-DD or string description)
         - storage_condition (freezer, fridge, pantry, etc.)
         - location (if mentioned)
@@ -44,6 +45,7 @@ class UpdateAgent(BaseAgent):
         
         Examples:
         "I have 5 tomato instead of 1" -> {"quantity": "5"}
+        "I have 5 lbs tomato instead of 1 lb" -> {"quantity": "5", "unit": "lbs"}
         "Update my passport expiry date to 2030-01-01" -> {"expiry_date": "2030-01-01"}
         "Move rice to pantry" -> {"location": "pantry"}
         "This is actually a Fruit" -> {"category": "Fruit"}
@@ -115,7 +117,15 @@ class UpdateAgent(BaseAgent):
         # 2. Extract proposed changes (WHAT to update)
         proposed_changes = await self._extract_update_details(user_input)
         
-        # 3. Perform search (perform_search handles extracting search term internally)
+        # 3. Extract search term explicitly to pass to frontend for item identification
+        # We try to extract essentially all the time to handle "Update X" cases
+        search_term = user_input
+        extracted_term = await extract_search_term(user_input)
+        if extracted_term:
+            search_term = extracted_term
+        
+        # 4. Perform search (perform_search handles extracting search term internally too, 
+        # but we need it here for the response)
         document_ids = await perform_search(
             user_input,
             owner_id,
@@ -144,6 +154,7 @@ class UpdateAgent(BaseAgent):
                 message=f"I found {len(document_ids)} document(s) that might match your update request.",
                 data={
                     "query": user_input,
+                    "search_term": search_term,
                     "document_ids": document_ids,
                     "documents": documents,
                     "proposed_changes": proposed_changes
@@ -155,6 +166,7 @@ class UpdateAgent(BaseAgent):
                 message="I searched for your documents to update but couldn't find anything relevant.",
                 data={
                     "query": user_input,
+                    "search_term": search_term,
                     "document_ids": [],
                     "documents": [],
                     "proposed_changes": proposed_changes

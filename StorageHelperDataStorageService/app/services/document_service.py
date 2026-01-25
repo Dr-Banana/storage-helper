@@ -777,7 +777,7 @@ class DocumentService:
     @staticmethod
     def _create_item_documents(db: Session, receipt_doc: Document, metadata: Dict[str, Any]) -> List[int]:
         """
-        Create child Document records for each item in a receipt.
+        Create or update child Document records for each item in a receipt.
         
         Args:
             db: Database session
@@ -785,7 +785,7 @@ class DocumentService:
             metadata: The extracted metadata containing 'items'
             
         Returns:
-            List of created item document IDs
+            List of item document IDs (created or updated)
         """
         try:
             items_data = metadata.get("items", [])
@@ -801,21 +801,51 @@ class DocumentService:
                 except Exception:
                     logger.warning(f"Failed to parse purchase_date: {purchase_date_str}")
 
-            # Delete existing child documents for this receipt to avoid duplicates on update
-            # We identify them by source_receipt_id in metadata
-            existing_items = db.query(Document).filter(
+            # Fetch existing child documents for this receipt
+            existing_items_query = db.query(Document).filter(
                 Document.owner_id == receipt_doc.owner_id
             ).all()
-            for doc in existing_items:
+            
+            # Map existing items by a unique key (original_text or title) to preserve them
+            existing_items_map = {}
+            for doc in existing_items_query:
                 if doc.doc_metadata and doc.doc_metadata.get("source_receipt_id") == receipt_doc.id:
-                    db.delete(doc)
-            db.flush()
+                    # Key: original_text if available, else title (product name)
+                    key = doc.doc_metadata.get("original_text") or doc.title
+                    if key:
+                        existing_items_map[key] = doc
 
             item_ids = []
-            # For each item, create a new document
+            processed_keys = set()
+
+            # For each item, create or update document
             for item_data in items_data:
                 item_name = item_data.get("product_name") or item_data.get("original_text") or "Unknown Item"
+                original_text = item_data.get("original_text")
                 category_code = item_data.get("category")
+                
+                # Determine match key
+                match_key = original_text or item_name
+                
+                # Check if we have an existing document for this item
+                item_doc = None
+                # Prioritize matching by document_id if provided
+                doc_id = item_data.get("document_id")
+                if doc_id:
+                    # Find doc in existing_items_query by ID
+                    for doc in existing_items_query:
+                        if doc.id == doc_id:
+                            item_doc = doc
+                            processed_keys.add(match_key) # Still mark the key as processed to avoid deletion if key matches
+                            # Also mark key if it was found via ID, to prevent issues if key changed
+                            if doc.title: processed_keys.add(doc.title)
+                            if doc.doc_metadata and doc.doc_metadata.get("original_text"): processed_keys.add(doc.doc_metadata.get("original_text"))
+                            break
+                
+                # Fallback to key matching if not found by ID
+                if not item_doc and match_key in existing_items_map:
+                    item_doc = existing_items_map[match_key]
+                    processed_keys.add(match_key)
                 
                 # 1. Get or create the category for this item
                 category_id = None
@@ -842,7 +872,14 @@ class DocumentService:
                 item_location_name = None
                 storage_suggestion = item_data.get("storage_suggestion")
                 
-                if storage_suggestion and storage_suggestion != "Other":
+                # If explicit location_id provided in item_data (e.g. from UI update), use it
+                if item_data.get("location_id"):
+                     item_location_id = item_data.get("location_id")
+                     # Also try to get name
+                     loc = db.query(StorageLocation).filter(StorageLocation.id == item_location_id).first()
+                     if loc:
+                         item_location_name = loc.name
+                elif storage_suggestion and storage_suggestion != "Other":
                     # Use helper to find or create the location
                     created_id = DocumentService._get_or_create_location_by_name(db, receipt_doc.owner_id, storage_suggestion)
                     if created_id:
@@ -852,51 +889,86 @@ class DocumentService:
                         item_location_name = matched_loc.name if matched_loc else storage_suggestion
                 
                 # Update item_data in the metadata list so it reflects the matched/created location
-                item_data["location_id"] = item_location_id
-                item_data["location_name"] = item_location_name
+                if item_location_id:
+                    item_data["location_id"] = item_location_id
+                if item_location_name:
+                    item_data["location_name"] = item_location_name
 
                 # 3. Calculate expiry
                 expiry_date_str = None
-                shelf_life_days = item_data.get("estimated_shelf_life_days")
-                if shelf_life_days is not None and purchase_date:
-                    from datetime import timedelta
-                    expiry_date = purchase_date + timedelta(days=int(shelf_life_days))
-                    expiry_date_str = expiry_date.strftime("%Y-%m-%d")
+                # If explicit expiry date provided (e.g. from UI), use it
+                if item_data.get("expiry_date"):
+                    expiry_date_str = item_data.get("expiry_date")
+                else:
+                    shelf_life_days = item_data.get("estimated_shelf_life_days")
+                    if shelf_life_days is not None and purchase_date:
+                        from datetime import timedelta
+                        expiry_date = purchase_date + timedelta(days=int(shelf_life_days))
+                        expiry_date_str = expiry_date.strftime("%Y-%m-%d")
 
                 # 4. Prepare metadata
                 item_doc_metadata = {
                     "source_receipt_id": receipt_doc.id,
                     "is_food": item_data.get("is_food", True),
                     "quantity": str(item_data.get("quantity") or "1"),
+                    "unit": item_data.get("unit"), # Include unit
                     "purchase_date": purchase_date_str,
                     "expiry_date": expiry_date_str,
                     "status": "unopened",
-                    "original_text": item_data.get("original_text"),
+                    "original_text": original_text,
                     "suggested_storage": storage_suggestion # Store AI suggestion even if not matched to a location_id
                 }
 
-                # 5. Create the item document
-                item_doc = Document(
-                    title=item_name,
-                    owner_id=receipt_doc.owner_id,
-                    category_id=category_id,
-                    current_location_id=item_location_id,
-                    image_url=receipt_doc.image_url, # Reference the same image
-                    doc_metadata=item_doc_metadata
-                )
-                db.add(item_doc)
-                db.flush()  # Flush to get item_doc.id
-                item_ids.append(item_doc.id)
+                if item_doc:
+                    # Update existing document
+                    item_doc.title = item_name
+                    item_doc.category_id = category_id
+                    item_doc.current_location_id = item_location_id
+                    # Merge metadata
+                    current_meta = dict(item_doc.doc_metadata or {})
+                    current_meta.update(item_doc_metadata)
+                    item_doc.doc_metadata = current_meta
+                    # Note: We do NOT touch embeddings here, preserving existing ones
+                    
+                    db.add(item_doc)
+                    # Flush to ensure item_doc.id is available if needed (though it already should be)
+                    db.flush()
+                    item_ids.append(item_doc.id)
+                    
+                    # Update the item_data in the receipt metadata with the document_id
+                    # This ensures the receipt knows exactly which document corresponds to this item
+                    item_data["document_id"] = item_doc.id
+                else:
+                    # 5. Create new item document
+                    item_doc = Document(
+                        title=item_name,
+                        owner_id=receipt_doc.owner_id,
+                        category_id=category_id,
+                        current_location_id=item_location_id,
+                        image_url=receipt_doc.image_url, # Reference the same image
+                        doc_metadata=item_doc_metadata
+                    )
+                    db.add(item_doc)
+                    db.flush()  # Flush to get item_doc.id
+                    item_ids.append(item_doc.id)
+                    
+                    # Update the item_data in the receipt metadata with the document_id
+                    item_data["document_id"] = item_doc.id
 
-                # 6. 若 caller 在 metadata.items[].embedding 中传入了 768 维向量，则写入 document_embedding（不调 AI，仅用现有 API/DB）
-                emb_raw = item_data.get("embedding")
-                if isinstance(emb_raw, list) and len(emb_raw) == 768:
-                    try:
-                        emb_floats = [float(x) for x in emb_raw]
-                        db.add(DocumentEmbedding(document_id=item_doc.id, embedding=emb_floats))
-                    except (ValueError, TypeError):
-                        logger.warning("Item document_id=%s has invalid embedding, skipping document_embedding", item_doc.id)
+                    # 6. Generate embedding only for NEW items if passed
+                    emb_raw = item_data.get("embedding")
+                    if isinstance(emb_raw, list) and len(emb_raw) == 768:
+                        try:
+                            emb_floats = [float(x) for x in emb_raw]
+                            db.add(DocumentEmbedding(document_id=item_doc.id, embedding=emb_floats))
+                        except (ValueError, TypeError):
+                            logger.warning("Item document_id=%s has invalid embedding, skipping document_embedding", item_doc.id)
             
+            # Delete items that are no longer in the receipt
+            for key, doc in existing_items_map.items():
+                if key not in processed_keys:
+                    db.delete(doc)
+
             # Save updated metadata with location info back to receipt document
             current_metadata = dict(receipt_doc.doc_metadata or {})
             current_metadata["items"] = items_data
@@ -904,11 +976,11 @@ class DocumentService:
             db.add(receipt_doc)
             
             db.flush()
-            items_created = len(item_ids)
-            logger.info(f"Created {items_created} item documents for receipt {receipt_doc.id}: {item_ids}")
+            items_count = len(item_ids)
+            logger.info(f"Processed {items_count} item documents for receipt {receipt_doc.id} (ids: {item_ids})")
             return item_ids
             
         except Exception as e:
-            logger.error(f"Error creating item documents: {e}")
+            logger.error(f"Error creating/updating item documents: {e}", exc_info=True)
             # Non-critical, don't raise
             return 0

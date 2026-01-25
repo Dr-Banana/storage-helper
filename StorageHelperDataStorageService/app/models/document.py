@@ -35,6 +35,9 @@ class Document(Base):
     # Relationship to storage location
     location = relationship("StorageLocation", foreign_keys=[current_location_id])
 
+    # Relationship to document category
+    category = relationship("DocumentCategory", foreign_keys=[category_id])
+
     def __repr__(self):
         return f"<Document(id={self.id}, title='{self.title}', owner_id={self.owner_id}, category_id={self.category_id})>"
 

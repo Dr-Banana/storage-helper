@@ -2,11 +2,12 @@
 Document management routes
 """
 from pydantic import BaseModel
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import text
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import FileResponse
 from typing import List, Annotated, Optional, Dict, Any
+from datetime import datetime, date
 import json
 import os
 import urllib.parse
@@ -19,6 +20,7 @@ from app.models.document import Document
 from app.models.document_page import DocumentPage
 from app.models.document_embedding import DocumentEmbedding
 from app.models.storage_location import StorageLocation
+from app.models.document_category import DocumentCategory
 from app.schemas.document import DocumentSearchRequest
 from app.schemas.location import LocationResponse
 from app.services.document_service import DocumentService
@@ -49,6 +51,123 @@ def _convert_to_accessible_url(file_path: str) -> str:
 # ============================================================
 # File Serving Endpoint
 # ============================================================
+
+def _hydrate_document_metadata(db: Session, document: Document) -> Dict[str, Any]:
+    """
+    Helper function to hydrate document metadata with live data from child items.
+    Used for receipt documents to ensure items list reflects current inventory state.
+    """
+    doc_metadata = document.doc_metadata or {}
+    
+    # Check if this is a receipt with items
+    if "items" in doc_metadata and isinstance(doc_metadata["items"], list):
+        items = doc_metadata["items"]
+        hydrated_items = []
+        
+        # Collect IDs to fetch
+        doc_ids_to_fetch = []
+        for item in items:
+            if item.get("document_id"):
+                doc_ids_to_fetch.append(item.get("document_id"))
+        
+        # Batch fetch child documents if we have IDs
+        child_docs_map = {}
+        if doc_ids_to_fetch:
+            # Use joinedload to prevent N+1 queries and ensure data availability
+            child_docs = db.query(Document).options(
+                joinedload(Document.location),
+                joinedload(Document.category)
+            ).filter(Document.id.in_(doc_ids_to_fetch)).all()
+            for child in child_docs:
+                child_docs_map[child.id] = child
+        
+        # Also fetch by source_receipt_id for fallback/discovery
+        related_docs = db.query(Document).options(
+            joinedload(Document.location),
+            joinedload(Document.category)
+        ).filter(
+            Document.owner_id == document.owner_id,
+            text("metadata->>'source_receipt_id' = :receipt_id")
+        ).params(receipt_id=str(document.id)).all()
+        
+        related_docs_map = {} # Map by original_text or title for fallback
+        for doc in related_docs:
+            key = (doc.doc_metadata or {}).get("original_text") or doc.title
+            if key:
+                related_docs_map[key] = doc
+        
+        for item in items:
+            # 1. Try finding by ID
+            child_doc = None
+            if item.get("document_id"):
+                child_doc = child_docs_map.get(item.get("document_id"))
+            
+            # 2. Fallback: Try finding by matching key (original_text or name)
+            if not child_doc:
+                key = item.get("original_text") or item.get("product_name")
+                if key:
+                    child_doc = related_docs_map.get(key)
+            
+            if child_doc:
+                # Hydrate item with live data
+                hydrated_item = item.copy()
+                
+                # 1. Sync Product Name
+                if child_doc.title:
+                    hydrated_item["product_name"] = child_doc.title
+                
+                # 2. Sync Metadata Fields (Quantity, Unit, Expiry, etc.)
+                if child_doc.doc_metadata:
+                    if "quantity" in child_doc.doc_metadata:
+                        hydrated_item["quantity"] = child_doc.doc_metadata["quantity"]
+                    if "unit" in child_doc.doc_metadata:
+                        hydrated_item["unit"] = child_doc.doc_metadata["unit"]
+                    if "expiry_date" in child_doc.doc_metadata:
+                        expiry_str = child_doc.doc_metadata["expiry_date"]
+                        hydrated_item["expiry_date"] = expiry_str
+                        # Recalculate estimated_shelf_life_days so frontend "Life" column updates
+                        try:
+                            if expiry_str:
+                                # Handle partial dates or simple strings if possible, but standard is YYYY-MM-DD
+                                expiry = datetime.strptime(expiry_str, "%Y-%m-%d").date()
+                                today = date.today()
+                                delta = expiry - today
+                                hydrated_item["estimated_shelf_life_days"] = delta.days
+                        except (ValueError, TypeError):
+                            # If parsing fails, leave existing estimate or None
+                            pass
+                
+                # 3. Sync Location
+                if child_doc.current_location_id:
+                    hydrated_item["location_id"] = child_doc.current_location_id
+                    if child_doc.location:
+                        hydrated_item["location_name"] = child_doc.location.name
+                        # Also update storage_suggestion to reflect actual location name for consistent display
+                        hydrated_item["storage_suggestion"] = child_doc.location.name 
+                else:
+                    # If location removed on item, reflect that
+                    hydrated_item["location_id"] = None
+                    hydrated_item["location_name"] = None
+                
+                # 4. Sync Category
+                if child_doc.category:
+                    # Prefer Code for UI mapping, fallback to Name
+                    hydrated_item["category"] = child_doc.category.code or child_doc.category.name
+                
+                # Ensure document_id is set
+                hydrated_item["document_id"] = child_doc.id
+                
+                hydrated_items.append(hydrated_item)
+            else:
+                hydrated_items.append(item)
+        
+        # Return modified metadata (copy)
+        doc_metadata = dict(doc_metadata)
+        doc_metadata["items"] = hydrated_items
+        return doc_metadata
+    
+    return doc_metadata
+
 
 @router.get("/files", response_class=FileResponse, summary="Serve document files")
 def serve_file(path: str):
@@ -155,6 +274,8 @@ def get_document_pages(
     Authorization: User must own the document (verified by dependency)
     """
     try:
+        # Hydrate receipt items with live data from child documents
+        hydrated_metadata = _hydrate_document_metadata(db, document)
         
         # Get all pages for the document with full details
         pages = db.query(DocumentPage).filter(
@@ -214,7 +335,7 @@ def get_document_pages(
                 "event_id": document.event_id,
                 "current_location_id": document.current_location_id,
                 "location_name": document.location.name if document.location else None,
-                "metadata": document.doc_metadata,
+                "metadata": hydrated_metadata,
                 "image_url": _convert_to_accessible_url(document.image_url) if document.image_url else None,
                 "created_at": document.created_at.isoformat() if document.created_at else None,
                 "updated_at": document.updated_at.isoformat() if document.updated_at else None,
@@ -240,7 +361,8 @@ def get_document_pages(
     description="Retrieve basic metadata for a specific document."
 )
 def get_document_by_id(
-    document: Annotated[Document, Depends(get_document_if_owner)]
+    document: Annotated[Document, Depends(get_document_if_owner)],
+    db: Session = Depends(get_db)
 ):
     """
     Get a specific document's metadata.
@@ -249,6 +371,9 @@ def get_document_by_id(
     
     Authorization: User must own the document (verified by dependency)
     """
+    # Hydrate receipt items with live data from child documents
+    hydrated_metadata = _hydrate_document_metadata(db, document)
+
     return {
         "id": document.id,
         "title": document.title,
@@ -257,7 +382,7 @@ def get_document_by_id(
         "event_id": document.event_id,
         "current_location_id": document.current_location_id,
         "location_name": document.location.name if document.location else None,
-        "metadata": document.doc_metadata,
+        "metadata": hydrated_metadata,
         "image_url": _convert_to_accessible_url(document.image_url) if document.image_url else None,
         "created_at": document.created_at.isoformat() if document.created_at else None,
         "updated_at": document.updated_at.isoformat() if document.updated_at else None,
@@ -440,10 +565,19 @@ def update_document(
             current_metadata.update(update_data.metadata)
             document.doc_metadata = current_metadata
             
-            # Special logic: If this is a receipt and items are updated, we might need to sync items
-            # But for simplicity in this direct update, we just save the metadata.
-            # If the user wants full re-sync, they should use the ingestion pipeline.
-            # For food items, this is exactly what we need.
+            # Special logic: If this is a receipt and items are updated, sync items to child documents
+            if "items" in update_data.metadata:
+                # Check if it is a receipt (by category code or existing source_receipt_id in children)
+                is_receipt = False
+                if document.category_id:
+                     category = db.query(DocumentCategory).filter(DocumentCategory.id == document.category_id).first()
+                     if category and category.code.upper() in ["RECEIPT", "REC"]:
+                         is_receipt = True
+                
+                if is_receipt:
+                    # Sync items (update existing or create new)
+                    # This preserves embeddings of existing items
+                    DocumentService._create_item_documents(db, document, document.doc_metadata)
 
         db.commit()
         db.refresh(document)

@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 RECEIPT_KEYWORDS = ["receipt", "receipts", "小票", "发票", "收据", "receipt document"]
 
 
-async def _extract_search_term(user_input: str) -> Optional[str]:
+async def extract_search_term(user_input: str) -> Optional[str]:
     """
     Use LLM to extract the main object/product name from a complex query.
     Example: "I have 5 tomato instead of 1" -> "tomato"
@@ -85,7 +85,7 @@ async def perform_search(
         # Optimization: Try to extract search term for complex queries
         # This helps with "I have 5 tomato" -> "tomato" matching
         if len(query_clean.split()) > 2:
-            extracted = await _extract_search_term(query_clean)
+            extracted = await extract_search_term(query_clean)
             if extracted:
                 logger.info(f"Optimized search query: '{query_clean}' -> '{extracted}'")
                 query_clean = extracted

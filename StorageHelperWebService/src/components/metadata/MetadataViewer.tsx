@@ -132,6 +132,7 @@ const ReceiptMetadataViewer: React.FC<{
               <th className="px-4 py-2 text-left text-xs font-semibold text-home-text-dark uppercase tracking-wider">Product</th>
               <th className="px-4 py-2 text-left text-xs font-semibold text-home-text-dark uppercase tracking-wider">Category</th>
               <th className="px-4 py-2 text-center text-xs font-semibold text-home-text-dark uppercase tracking-wider">Qty</th>
+              <th className="px-4 py-2 text-center text-xs font-semibold text-home-text-dark uppercase tracking-wider">Unit</th>
               <th className="px-4 py-2 text-left text-xs font-semibold text-home-text-dark uppercase tracking-wider">Storage</th>
               <th className="px-4 py-2 text-center text-xs font-semibold text-home-text-dark uppercase tracking-wider">Life</th>
               {isEditing && (
@@ -191,6 +192,19 @@ const ReceiptMetadataViewer: React.FC<{
                     <span className="text-sm text-home-text-dark">{item.quantity}</span>
                   )}
                 </td>
+                <td className="px-4 py-3 text-center">
+                  {isEditing ? (
+                    <input 
+                      type="text" 
+                      value={item.unit || ''} 
+                      onChange={(e) => handleItemChange(idx, 'unit', e.target.value)}
+                      className="w-12 text-center text-sm border border-home-primary-200 rounded focus:ring-0"
+                      placeholder="pcs"
+                    />
+                  ) : (
+                    <span className="text-sm text-home-text-dark text-opacity-70">{item.unit || '-'}</span>
+                  )}
+                </td>
                 <td className="px-4 py-3">
                   {isEditing ? (
                     <input 
@@ -224,9 +238,16 @@ const ReceiptMetadataViewer: React.FC<{
                       <span className="text-[10px] ml-0.5">d</span>
                     </div>
                   ) : (
-                    <span className={`text-xs font-bold ${item.estimated_shelf_life_days <= 7 ? 'text-home-error-600' : 'text-home-success-600'}`}>
-                      {item.estimated_shelf_life_days}d
-                    </span>
+                    <div className="flex flex-col items-center justify-center">
+                      <span className={`text-xs font-bold ${item.estimated_shelf_life_days <= 7 ? 'text-home-error-600' : 'text-home-success-600'}`}>
+                        {item.estimated_shelf_life_days !== undefined ? `${item.estimated_shelf_life_days}d` : '-'}
+                      </span>
+                      {item.expiry_date && (
+                        <span className="text-[9px] text-home-text-light/70 whitespace-nowrap">
+                          {new Date(item.expiry_date).toLocaleDateString(undefined, { month: 'numeric', day: 'numeric' })}
+                        </span>
+                      )}
+                    </div>
                   )}
                 </td>
                 {isEditing && (

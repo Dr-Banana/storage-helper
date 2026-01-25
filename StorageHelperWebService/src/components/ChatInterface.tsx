@@ -17,7 +17,7 @@ interface Message {
 
 // 提取消息组件以减少重复渲染
 const MessageItem = memo(({ msg, setMessages, setIsLoading }: { msg: Message, setMessages: React.Dispatch<React.SetStateAction<Message[]>>, setIsLoading: React.Dispatch<React.SetStateAction<boolean>> }) => {
-    const handleUpdate = async (doc: Document, updates: any) => {
+    const handleUpdate = async (doc: Document, updates: any, searchTerm?: string) => {
     try {
       setIsLoading(true);
       
@@ -33,31 +33,65 @@ const MessageItem = memo(({ msg, setMessages, setIsLoading }: { msg: Message, se
       }
       
       let hasChanges = false;
-      
-      Object.entries(updates).forEach(([key, value]) => {
-        if (key === 'location') {
-           // Skip location text update if it requires ID resolution, 
-           // but we can put it in metadata for reference if needed
-           // For now, let's assume simple metadata updates
-           updatePayload.metadata[key] = value;
-           hasChanges = true;
-        } else if (key === 'category') {
-           // Same for category
-           updatePayload.metadata[key] = value;
-           hasChanges = true;
-        } else {
-           updatePayload.metadata[key] = value;
-           hasChanges = true;
+      let itemUpdated = false;
+
+      // Special handling for Receipt items (if metadata.items exists)
+      if (doc.metadata?.items && Array.isArray(doc.metadata.items) && searchTerm) {
+        const lowerSearchTerm = searchTerm.toLowerCase();
+        const items = [...doc.metadata.items];
+        
+        // Find the best matching item
+        const itemIndex = items.findIndex((item: any) => {
+          const name = (item.product_name || '').toLowerCase();
+          const orig = (item.original_text || '').toLowerCase();
+          // Bidirectional check to handle partial matches (e.g. "tomato" vs "tomatoes")
+          return (name && (name.includes(lowerSearchTerm) || lowerSearchTerm.includes(name))) || 
+                 (orig && (orig.includes(lowerSearchTerm) || lowerSearchTerm.includes(orig)));
+        });
+
+        if (itemIndex !== -1) {
+          // Update the specific item
+          const currentItem = items[itemIndex];
+          const updatedItem = { ...currentItem };
+          
+          Object.entries(updates).forEach(([key, value]) => {
+             updatedItem[key] = value;
+          });
+          
+          items[itemIndex] = updatedItem;
+          updatePayload.metadata.items = items;
+          hasChanges = true;
+          itemUpdated = true;
+          
+          // Also update top-level metadata if it seems relevant (optional, but maybe safe to skip to avoid confusion)
+          // For now, if we updated an item, we DON'T update the top-level metadata to keep it clean.
         }
-      });
+      }
+
+      // If no item was targeted (or not a receipt), apply updates to top-level metadata
+      if (!itemUpdated) {
+        Object.entries(updates).forEach(([key, value]) => {
+          if (key === 'location') {
+             updatePayload.metadata[key] = value;
+             hasChanges = true;
+          } else if (key === 'category') {
+             updatePayload.metadata[key] = value;
+             hasChanges = true;
+          } else {
+             updatePayload.metadata[key] = value;
+             hasChanges = true;
+          }
+        });
+      }
       
       if (hasChanges) {
         await documentService.update(doc.id, updatePayload);
         
         // Show success message locally
+        const itemPrefix = itemUpdated ? `(Item match: "${searchTerm}") ` : "";
         setMessages(prev => [...prev, { 
           role: 'model', 
-          content: `✅ Successfully updated **${doc.title}**.\n\nChanges applied:\n${Object.entries(updates).map(([k, v]) => `- ${k}: ${v}`).join('\n')}` 
+          content: `✅ Successfully updated **${doc.title}** ${itemPrefix}.\n\nChanges applied:\n${Object.entries(updates).map(([k, v]) => `- ${k}: ${v}`).join('\n')}` 
         }]);
       }
       
@@ -118,7 +152,7 @@ const MessageItem = memo(({ msg, setMessages, setIsLoading }: { msg: Message, se
                     onClick={(e) => {
                       e.preventDefault();
                       e.stopPropagation();
-                      handleUpdate(doc, msg.actionData.proposed_changes);
+                      handleUpdate(doc, msg.actionData.proposed_changes, msg.actionData.search_term);
                     }}
                     className="z-20 relative px-4 py-2 bg-green-500 hover:bg-green-600 text-white text-xs font-bold rounded-lg shadow-sm transition-colors flex items-center gap-1"
                   >

@@ -69,7 +69,8 @@ class ReceiptItem(BaseModel):
     original_text: str = Field(..., description="Raw text from receipt line, e.g., 'KS ORG SPIN'")
     product_name: str = Field(..., description="Full expanded name, e.g., 'Kirkland Signature Organic Spinach'")
     category: str = Field(..., description="General category, e.g., 'Vegetable', 'Meat', 'Household'")
-    quantity: str = Field("1", description="Quantity if detectable, else '1'")
+    quantity: str = Field("1", description="Numeric quantity only, e.g., '1', '2.5'. Extract unit separately.")
+    unit: Optional[str] = Field(None, description="Measurement unit if detected, e.g., 'lb', 'kg', 'oz', 'pack'.")
     is_food: bool = Field(..., description="True if edible/cooking ingredient, False for cleaning/household")
     estimated_shelf_life_days: int = Field(..., description="Estimated days until expiry based on food type. 365 for non-perishables.")
     storage_suggestion: StorageType = Field(..., description="Best place to store this item")
@@ -132,6 +133,7 @@ Store Context: Use the store name (usually at the top) to infer brands and produ
 1. **EXTRACT & DECODE**: Identify every purchased item. Convert cryptic receipt abbreviations into full product names. Extract the `total_payment` amount paid and the `merchant` name.
    - Example: "KS ORG APL" -> "Kirkland Signature Organic Apples"
    - Example: "HKU YUZU" -> "Hakutsuru Yuzu Liqueur"
+   - **QUANTITY & UNIT SPLITTING**: If a line says "1.25 lb Bananas", set quantity="1.25" and unit="lb". Do NOT put "1.25 lb" in quantity.
 
 2. **FILTER NOISE (Crucial)**:
    - IGNORE tax lines (e.g., "CA REDEMP VAL", "CRV", "TAX").
