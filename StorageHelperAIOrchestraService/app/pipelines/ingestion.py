@@ -223,7 +223,7 @@ class IngestionPipeline:
         """
         # Check if vision is enabled
         if not settings.VISION_ENABLE:
-            logger.info("STEP 1B (Vision): Skipped (disabled in configuration)")
+            # logger.info("STEP 1B (Vision): Skipped (disabled in configuration)")
             return True
         
         # Check if we should trigger vision analysis
@@ -235,9 +235,9 @@ class IngestionPipeline:
             threshold = settings.VISION_OCR_CONFIDENCE_THRESHOLD
             
             if ocr_confidence >= threshold:
-                logger.info(
-                    f"STEP 1B (Vision): Skipped (OCR confidence {ocr_confidence:.2f} >= threshold {threshold})"
-                )
+                # logger.info(
+                #     f"STEP 1B (Vision): Skipped (OCR confidence {ocr_confidence:.2f} >= threshold {threshold})"
+                # )
                 return True
             
             logger.info(
@@ -249,7 +249,7 @@ class IngestionPipeline:
         
         try:
             # Run vision analysis
-            logger.info(f"STEP 1B (Vision): Analyzing image with Gemini Vision API...")
+            # logger.info(f"STEP 1B (Vision): Analyzing image with Gemini Vision API...")
             state.vision_result = await self.vision_analyzer.analyze_image(state.image_url)
             
             if state.vision_result and state.vision_result.description:
@@ -272,7 +272,7 @@ class IngestionPipeline:
                     # Update OCR result with merged content
                     # This will be used by downstream steps (cleaning, recommendation, embedding)
                     state.ocr_result.text = merged_text
-                    logger.info("Vision description merged with OCR text for enhanced understanding")
+                    # logger.info("Vision description merged with OCR text for enhanced understanding")
                 
                 state.status = "vision_completed"
                 return True
@@ -297,7 +297,7 @@ class IngestionPipeline:
             logger.error("Cannot clean text without OCR result.")
             return False
         
-        logger.info("STEP 2 (Cleaning): Cleaning and normalizing OCR text...")
+        # logger.info("STEP 2 (Cleaning): Cleaning and normalizing OCR text...")
         
         try:
             # Clean the OCR text using injected text cleaner
@@ -314,11 +314,11 @@ class IngestionPipeline:
             state.cleaning_info = cleaning_info
             state.processing_steps.append("Cleaning")
             
-            logger.info(
-                f"STEP 2 (Cleaning) Complete. "
-                f"Original length: {cleaning_info.get('original_length', 0)}, "
-                f"Cleaned length: {cleaning_info.get('cleaned_length', 0)}"
-            )
+            # logger.info(
+            #     f"STEP 2 (Cleaning) Complete. "
+            #     f"Original length: {cleaning_info.get('original_length', 0)}, "
+            #     f"Cleaned length: {cleaning_info.get('cleaned_length', 0)}"
+            # )
             state.status = "cleaning_completed"
             return True
             
@@ -341,7 +341,7 @@ class IngestionPipeline:
         :param page_number: Page number within document (1-indexed).
         :return: True if upload succeeded, False if upload failed (pipeline continues regardless).
         """
-        logger.info(f"STEP 2B (File Upload): Uploading document file to DataStorageService (page {page_number})...")
+        # logger.info(f"STEP 2B (File Upload): Uploading document file to DataStorageService (page {page_number})...")
         
         try:
             # Upload file only to get image_url
@@ -353,7 +353,7 @@ class IngestionPipeline:
             if image_url:
                 # Store image_url for later use in process step
                 state.file_url = image_url
-                logger.info(f"File uploaded successfully. Image URL: {state.file_url}")
+                # logger.info(f"File uploaded successfully. Image URL: {state.file_url}")
                 state.processing_steps.append("File Upload")
                 return True
             else:
@@ -438,11 +438,10 @@ class IngestionPipeline:
                     except Exception as e:
                         logger.warning("Item embedding gen failed for %r: %s", name, e)
                 
-                if metadata:
-                    logger.info(f"Metadata extracted for page processing: {metadata}")
+                # logger.info(f"Metadata extracted for page processing: {metadata}")
             
             # Process document page with image_url and structured results
-            logger.info(f"Sending JSON data to DataStorageService for processing: document_id={state.document_id}, page_number={page_number}")
+            # logger.info(f"Sending JSON data to DataStorageService for processing: document_id={state.document_id}, page_number={page_number}")
             process_result = await self.pipeline_storage.process_document_page(
                 image_url=state.file_url,
                 owner_id=state.owner_id,
@@ -459,7 +458,7 @@ class IngestionPipeline:
                 returned_document_id = process_result.get("document_id")
                 returned_page_id = process_result.get("page_id")
                 
-                logger.info(f"Process result received: document_id={returned_document_id}, page_id={returned_page_id}")
+                # logger.info(f"Process result received: document_id={returned_document_id}, page_id={returned_page_id}")
                 
                 state.page_id = returned_page_id  # Store page_id from API response
 
@@ -481,7 +480,7 @@ class IngestionPipeline:
                 returned_item_ids = process_result.get("item_ids", [])
                 if returned_item_ids:
                     state.item_ids = returned_item_ids
-                    logger.info(f"Received {len(returned_item_ids)} item IDs for embedding generation: {returned_item_ids}")
+                    # logger.info(f"Received {len(returned_item_ids)} item IDs for embedding generation: {returned_item_ids}")
                 
                 # Update document_id if we got one from the process step
                 # For first page: use returned document_id if we didn't have one
@@ -490,12 +489,12 @@ class IngestionPipeline:
                     if not state.document_id:
                         # First page - use the returned document_id
                         state.document_id = returned_document_id
-                        logger.info(f"Document ID established from process: {state.document_id}")
+                        # logger.info(f"Document ID established from process: {state.document_id}")
                     elif state.document_id != returned_document_id:
                         # This shouldn't happen, but log a warning
                         logger.warning(f"Document ID mismatch: state has {state.document_id}, API returned {returned_document_id}")
                 
-                logger.info(f"Document page processed successfully. Document ID: {state.document_id}, Page ID: {state.page_id}")
+                # logger.info(f"Document page processed successfully. Document ID: {state.document_id}, Page ID: {state.page_id}")
                 state.processing_steps.append("Process Document")
                 return True
             else:
@@ -544,7 +543,7 @@ class IngestionPipeline:
         if len(items_data) != len(state.item_ids):
             logger.warning(f"Mismatch between item IDs count ({len(state.item_ids)}) and items data count ({len(items_data)})")
         
-        logger.info(f"Generating embeddings for {len(state.item_ids)} items...")
+        # logger.info(f"Generating embeddings for {len(state.item_ids)} items...")
         
         # Generate embeddings for each item
         for idx, item_id in enumerate(state.item_ids):
@@ -565,7 +564,7 @@ class IngestionPipeline:
             
             # Generate embedding for the item
             try:
-                logger.info(f"Generating embedding for item {item_id}: '{item_text}'")
+                # logger.info(f"Generating embedding for item {item_id}: '{item_text}'")
                 embedding_result = await self.embedding_generator.generate(item_text.strip())
                 
                 if embedding_result.is_successful and embedding_result.vector and len(embedding_result.vector) == 768:
@@ -576,7 +575,8 @@ class IngestionPipeline:
                         owner_id=state.owner_id
                     )
                     if save_success:
-                        logger.info(f"Embedding saved successfully for item document {item_id}: '{product_name}'")
+                        # logger.info(f"Embedding saved successfully for item document {item_id}: '{product_name}'")
+                        pass
                     else:
                         error_msg = f"Failed to save embedding for item document {item_id}: '{product_name}'"
                         logger.warning(error_msg)
@@ -622,11 +622,11 @@ class IngestionPipeline:
                 suggested_location_id = llm_data.get("location_id")
                 suggested_location_name = llm_data.get("location_name") or llm_data.get("suggested_location_name", "Unknown")
                 category_code = llm_data.get("category_code", "Unknown")
-                logger.info(
-                    f"STEP 3 (Recommendation) Complete. "
-                    f"Category: {category_code}, "
-                    f"Location: {suggested_location_name} (ID: {suggested_location_id})"
-                )
+                # logger.info(
+                #     f"STEP 3 (Recommendation) Complete. "
+                #     f"Category: {category_code}, "
+                #     f"Location: {suggested_location_name} (ID: {suggested_location_id})"
+                # )
                 return True
             else:
                 state.status = "recommendation_failed"
@@ -658,14 +658,14 @@ class IngestionPipeline:
             state.status = "embedding_failed"
             return False
         
-        logger.info("STEP 3 (Embedding): Generating document vector embedding...")
+        # logger.info("STEP 3 (Embedding): Generating document vector embedding...")
         
         try:
             state.embedding_result = await self.embedding_generator.generate(text_to_use)
             
             if state.embedding_result.is_successful:
                 state.processing_steps.append("Embedding")
-                logger.info(f"STEP 3 (Embedding) Complete. Vector dimension: {state.embedding_result.dimension}")
+                # logger.info(f"STEP 3 (Embedding) Complete. Vector dimension: {state.embedding_result.dimension}")
                 return True
             else:
                 state.status = "embedding_failed"
@@ -729,7 +729,8 @@ class IngestionPipeline:
                 # Only set to "completed" if this is not an error document
                 state.status = "completed"
                 if doc_id:
-                    logger.info(f"STEP 4 (Persistence) Complete. Document ID: {doc_id}")
+                    # logger.info(f"STEP 4 (Persistence) Complete. Document ID: {doc_id}")
+                    pass
                 else:
                     logger.warning(f"STEP 4 (Persistence) Complete. No document ID (upload may have failed)")
             
@@ -793,7 +794,7 @@ class IngestionPipeline:
             file_type=file_type
         )
         
-        logger.info(f"Pipeline started for document_id={document_id}, processing {file_type} from: {image_url}")
+        # logger.info(f"Pipeline started for document_id={document_id}, processing {file_type} from: {image_url}")
         await report_progress("Starting pipeline", 0.05)
         
         # Step 1: OCR
@@ -814,7 +815,7 @@ class IngestionPipeline:
         await self.step_upload_file(state, page_number=1)
         
         # Step 3: Recommendation and Embedding
-        await report_progress("AI Recommendation & Embedding", 0.65)
+        await report_progress("AI Classification & Indexing", 0.65)
         recommendation_task = asyncio.create_task(self.step_recommendation(state))
         embedding_task = asyncio.create_task(self.step_embedding(state))
         
@@ -842,7 +843,8 @@ class IngestionPipeline:
                             owner_id=state.owner_id
                         )
                         if save_success:
-                            logger.info(f"Document embedding saved successfully via API for document_id={doc_id}")
+                            # logger.info(f"Document embedding saved successfully via API for document_id={doc_id}")
+                            pass
                         else:
                             error_msg = f"Failed to save document embedding via API for document_id={doc_id}"
                             logger.warning(error_msg)
@@ -857,9 +859,11 @@ class IngestionPipeline:
                 state.embedding_save_error = error_msg
         else:
             if not state.document_id:
-                logger.info("Skipping embedding save: document_id not available")
+                # logger.info("Skipping embedding save: document_id not available")
+                pass
             elif not state.embedding_result or not state.embedding_result.is_successful:
-                logger.info("Skipping embedding save: embedding generation failed")
+                # logger.info("Skipping embedding save: embedding generation failed")
+                pass
 
         # Step 4B: Process document page metadata（step 内已在 process 前为 metadata.items 生成 embedding，DataStorage 在 _create_item_documents 中写入 document_embedding）
         await report_progress("Finalizing document metadata", 0.9)

@@ -6,10 +6,18 @@ import logging
 
 # 配置日志输出
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.WARNING,  # Changed from INFO to WARNING to reduce verbosity
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[logging.StreamHandler()]
 )
+
+# Explicitly set httpx logger to WARNING to suppress HTTP request logs
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+
+# Keep app logs at INFO level if needed, or let them inherit WARNING
+# To keep app specific logs at INFO while silencing libraries:
+logging.getLogger("app").setLevel(logging.INFO)
 
 app = FastAPI(
     title="家用 AI 文件管家 (Orchestra Service)",

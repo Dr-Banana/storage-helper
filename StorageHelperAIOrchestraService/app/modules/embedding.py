@@ -139,7 +139,7 @@ class EmbeddingGenerator:
         for attempt in range(self.max_retries):
             try:
                 async with httpx.AsyncClient(timeout=self.timeout) as client:
-                    logger.info(f"Attempting to generate embedding (Attempt {attempt + 1}/{self.max_retries}). Text length: {len(text)}")
+                    # logger.info(f"Attempting to generate embedding (Attempt {attempt + 1}/{self.max_retries}). Text length: {len(text)}")
                     response = await client.post(self._api_url, headers=headers, json=payload)
                     response.raise_for_status()
                     
@@ -149,7 +149,7 @@ class EmbeddingGenerator:
                     embedding_values = result.get('embedding', {}).get('values')
                     
                     if embedding_values and isinstance(embedding_values, list):
-                        logger.info(f"Embedding successful. Vector dimension: {len(embedding_values)}")
+                        # logger.info(f"Embedding successful. Vector dimension: {len(embedding_values)}")
                         return EmbeddingResult(
                             vector=embedding_values,
                             dimension=len(embedding_values),

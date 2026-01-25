@@ -300,8 +300,8 @@ class DocumentService:
                     seen_ids.add(doc.id)
                     unique_documents.append(doc)
             
-            logger.info(f"Search results (limit={limit}, candidates={len(results)}): {', '.join(debug_results)}")
-            logger.info(f"Filtered results: {len(unique_documents)} docs (threshold={DISTANCE_THRESHOLD})")
+            # logger.info(f"Search results (limit={limit}, candidates={len(results)}): {', '.join(debug_results)}")
+            # logger.info(f"Filtered results: {len(unique_documents)} docs (threshold={DISTANCE_THRESHOLD})")
             
             # Apply final limit
             return unique_documents[:limit]

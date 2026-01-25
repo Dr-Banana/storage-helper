@@ -716,17 +716,17 @@ class PipelineStorage:
         full_url = f"{base_url}{url}"
         
         try:
-            logger.info(f"Searching documents via DataStorageService")
-            logger.info(f"  Base URL: {base_url}")
-            logger.info(f"  Endpoint: {url}")
-            logger.info(f"  Full URL: {full_url}")
-            logger.info(f"  Owner ID: {owner_id}, Top K: {top_k}")
+            # logger.info(f"Searching documents via DataStorageService")
+            # logger.info(f"  Base URL: {base_url}")
+            # logger.info(f"  Endpoint: {url}")
+            # logger.info(f"  Full URL: {full_url}")
+            # logger.info(f"  Owner ID: {owner_id}, Top K: {top_k}")
             
             async with httpx.AsyncClient(base_url=base_url, timeout=30.0) as client:
                 response = await client.post(url, json=payload)
                 response.raise_for_status()
                 result = response.json()
-                logger.info(f"Search completed. Found {len(result)} documents")
+                # logger.info(f"Search completed. Found {len(result)} documents")
                 return result
         except httpx.HTTPStatusError as e:
             error_detail = e.response.text[:500] if e.response.text else "No error details"
@@ -796,7 +796,7 @@ class PipelineStorage:
             headers["Authorization"] = f"Bearer user_{owner_id}"
             
         try:
-            logger.info(f"Getting document via DataStorageService: {base_url}{url}")
+            # logger.info(f"Getting document via DataStorageService: {base_url}{url}")
             async with httpx.AsyncClient(base_url=base_url, timeout=10.0) as client:
                 response = await client.get(url, headers=headers)
                 
