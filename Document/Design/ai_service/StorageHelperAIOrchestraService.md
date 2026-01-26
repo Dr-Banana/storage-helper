@@ -240,6 +240,8 @@ flowchart TD
 | **Embedding Module** | `app/modules/embedding.py` | Vector generation using Gemini API embedContent (text-embedding-004) with retry mechanism |
 | **Pipeline Storage** | `app/storage/pipeline_storage.py` | Unified storage handler for all pipeline output results (API-based, no local files). Handles file uploads to DataStorageService via HTTP API. |
 | **Output Schema** | `app/storage/output_schema.py` | Unified management of pipeline output structure and fields |
+| **Chat Pipeline** | `app/pipelines/chat.py` | 🆕 Main chat orchestration, intent detection, context handling, response generation. Routes to CorrectionPipeline when correction context detected. |
+| **Correction Pipeline** | `app/pipelines/correction.py` | 🆕 Natural language list correction using Gemini LLM with JSON mode. Processes user corrections and returns corrected items with change summary. |
 
 #### Vision Module Implementation Details
 
@@ -497,6 +499,113 @@ Response: {
 - Direct database access for better performance
 - Simplified architecture (search logic in one place)
 - Embeddings already stored in DataStorageService database
+
+### 2.3 Chat and Correction Pipeline
+
+The chat and correction pipeline enables natural language interaction with the AI agent and provides intelligent list correction capabilities.
+
+**API Endpoint**: `POST /api/v1/chat` (AIOrchestraService)
+
+**Request Format:**
+```json
+{
+  "message": "Milk is 1L, not 500ml. The 'Unknown Item' is Lao Gan Ma, 280g",
+  "history": [
+    {"role": "user", "content": "..."},
+    {"role": "model", "content": "..."}
+  ],
+  "owner_id": 1,
+  "context": {
+    "type": "correction",
+    "data": [/* array of items to correct */]
+  }
+}
+```
+
+**Response Format:**
+```json
+{
+  "response": "I've updated the items. Please review the changes and click 'Apply Changes' to confirm.",
+  "intent": "UPDATE",
+  "confidence": 0.95,
+  "reasoning": "User is correcting item quantities and names",
+  "action": "APPLY_CORRECTION",
+  "action_data": {
+    "corrected_items": [/* corrected item array */],
+    "changes_summary": ["Changed 'Milk' quantity from 500ml to 1L", "Renamed 'Unknown Item' to 'Lao Gan Ma'"]
+  }
+}
+```
+
+#### Chat and Correction Pipeline Architecture
+
+```mermaid
+flowchart TD
+    Start([USER ACTION<br/>Click 'Chat to Fix' Button]) --> OpenChat["OPEN CHAT INTERFACE<br/>StorageHelperWebService<br/>src/components/ChatInterface.tsx<br/>─────────────────<br/>• Opens small window chat<br/>  (not fullscreen)<br/>• Sets correction context<br/>• Shows system message:<br/>  'I see you want to correct<br/>  the item list...'<br/>─────────────────<br/>OUTPUT: Chat window opened<br/>with correction context"]
+    
+    OpenChat --> UserInput["USER INPUT<br/>Natural Language Correction<br/>─────────────────<br/>Example:<br/>'Milk is 1L, not 500ml.<br/>The Unknown Item is<br/>Lao Gan Ma, 280g'"]
+    
+    UserInput --> ChatAPI["CHAT API REQUEST<br/>POST /api/v1/chat<br/>app/api/router.py<br/>─────────────────<br/>Request:<br/>• message: string<br/>• history: List[Message]<br/>• owner_id: int<br/>• context: {type: 'correction',<br/>            data: items[]}<br/>─────────────────<br/>OUTPUT: ChatRequest object"]
+    
+    ChatAPI --> ChatPipeline["CHAT PIPELINE<br/>app/pipelines/chat.py<br/>ChatPipeline.run()<br/>─────────────────<br/>STEP 1: Detect Context<br/>• Check if context.type == 'correction'<br/>• If yes: Set is_correction = True<br/>• Bypass standard intent classification<br/>─────────────────<br/>OUTPUT: is_correction flag"]
+    
+    ChatPipeline --> CorrectionCheck{"Correction<br/>Context?"}
+    
+    CorrectionCheck -->|Yes| CorrectionPipeline["CORRECTION PIPELINE<br/>app/pipelines/correction.py<br/>CorrectionPipeline.run()<br/>─────────────────<br/>STEP 2: Process Correction<br/>• Extract items from context.data<br/>• Build prompt with current items<br/>  and user instruction<br/>• Call Gemini LLM API<br/>  - Model: GEMINI_LLM_MODEL<br/>  - Temperature: 0.1<br/>  - JSON mode enabled<br/>• Parse JSON response<br/>• Validate structure<br/>─────────────────<br/>OUTPUT: CorrectionResult<br/>  - corrected_items: List[Item]<br/>  - changes_summary: List[str]"]
+    
+    CorrectionCheck -->|No| IntentClassify["INTENT CLASSIFICATION<br/>app/modules/intent_classifier.py<br/>─────────────────<br/>• Classify user intent<br/>• Route by intent<br/>• Handle other actions<br/>─────────────────<br/>OUTPUT: IntentResult"]
+    
+    CorrectionPipeline --> GenerateResponse["GENERATE RESPONSE<br/>ChatPipeline (Gemini LLM)<br/>─────────────────<br/>STEP 3: Generate Friendly Response<br/>• Include correction result in context<br/>• Generate summary of changes<br/>• Ask user to confirm<br/>• Set action = 'APPLY_CORRECTION'<br/>• Set action_data = correction_result<br/>─────────────────<br/>OUTPUT: ChatResponse<br/>  - response: string<br/>  - action: 'APPLY_CORRECTION'<br/>  - action_data: CorrectionResult"]
+    
+    IntentClassify --> GenerateResponse
+    
+    GenerateResponse --> FrontendPreview["FRONTEND PREVIEW<br/>ChatInterface Component<br/>─────────────────<br/>STEP 4: Display Preview<br/>• Show AI response message<br/>• Display 'Apply Changes' button<br/>• Display 'Cancel' button<br/>• Dispatch 'apply-correction' event<br/>  with previewItems<br/>─────────────────<br/>OUTPUT: Buttons displayed<br/>Event dispatched"]
+    
+    FrontendPreview --> HighlightChanges["HIGHLIGHT CHANGES<br/>MetadataViewer Component<br/>─────────────────<br/>STEP 5: Visual Feedback<br/>• Listen for 'apply-correction' event<br/>• Calculate diffs between<br/>  old and new items<br/>• Apply flashing border highlight<br/>  (ring-2 ring-home-success-500<br/>   animate-pulse)<br/>• Highlight changed fields:<br/>  - product_name<br/>  - quantity, unit<br/>  - category, storage_suggestion<br/>  - estimated_shelf_life_days<br/>─────────────────<br/>OUTPUT: Visual highlights<br/>on changed fields"]
+    
+    HighlightChanges --> UserDecision{"USER DECISION<br/>Apply or Cancel?"}
+    
+    UserDecision -->|Apply| ApplyChanges["APPLY CHANGES<br/>ChatInterface Component<br/>─────────────────<br/>STEP 6A: Apply Correction<br/>• Dispatch 'apply-correction' event<br/>  with correctedItems<br/>• Update message action to<br/>  'APPLY_CORRECTION_COMPLETED'<br/>• Hide buttons<br/>• Show success message:<br/>  'Correction applied successfully!<br/>  Please click Continue and<br/>  Upload to Database...'<br/>─────────────────<br/>OUTPUT: Event dispatched<br/>Buttons hidden"]
+    
+    UserDecision -->|Cancel| CancelChanges["CANCEL CHANGES<br/>ChatInterface Component<br/>─────────────────<br/>STEP 6B: Cancel Correction<br/>• Dispatch 'apply-correction' event<br/>  with action: 'cancel'<br/>• Update message action to<br/>  'APPLY_CORRECTION_CANCELLED'<br/>• Hide buttons<br/>• Show cancellation message<br/>─────────────────<br/>OUTPUT: Event dispatched<br/>Buttons hidden"]
+    
+    ApplyChanges --> UpdateMetadata["UPDATE METADATA<br/>MetadataViewer Component<br/>─────────────────<br/>STEP 7: Apply Changes<br/>• Listen for 'apply-correction' event<br/>• Re-calculate diffs<br/>• Apply highlights<br/>• Call onMetadataChange()<br/>  with corrected items<br/>• Highlights fade after 3 seconds<br/>─────────────────<br/>OUTPUT: Metadata updated<br/>Highlights fade"]
+    
+    CancelChanges --> ClearHighlights["CLEAR HIGHLIGHTS<br/>MetadataViewer Component<br/>─────────────────<br/>STEP 7: Clear Visual Feedback<br/>• Listen for cancel event<br/>• Clear all highlights<br/>• No metadata changes<br/>─────────────────<br/>OUTPUT: Highlights cleared"]
+    
+    UpdateMetadata --> End([CORRECTION COMPLETE<br/>User can now click<br/>'Continue and Upload<br/>to Database'])
+    
+    ClearHighlights --> End
+    
+    style Start fill:#0000
+    style End fill:#0000
+    style CorrectionCheck fill:#0000
+    style UserDecision fill:#0000
+    style CorrectionPipeline fill:#e1f5ff
+    style HighlightChanges fill:#fff4e1
+    style ApplyChanges fill:#e8f5e9
+    style CancelChanges fill:#ffebee
+```
+
+#### Key Design Features
+
+1. **Natural Language Processing**: Users describe corrections in natural language (e.g., "Milk is 1L, not 500ml")
+2. **Context-Aware**: Chat pipeline detects correction context and routes to CorrectionPipeline automatically
+3. **Visual Feedback**: Flashing borders highlight exactly what will change before confirmation
+4. **Non-Destructive**: Cancel option allows users to review changes without applying
+5. **Event-Driven Architecture**: Frontend components communicate via custom events (`open-chat`, `apply-correction`)
+6. **User-Friendly**: Clear success/cancel messages guide users to next steps
+7. **Batch Corrections**: Multiple fields across multiple items can be corrected in one message
+8. **Integration**: Uses existing Home Agent chat dialog (not separate dialog)
+
+#### Module Details
+
+| Module | Location | Responsibility |
+|--------|----------|----------------|
+| **Chat Pipeline** | `app/pipelines/chat.py` | Main chat orchestration, intent detection, context handling, response generation |
+| **Correction Pipeline** | `app/pipelines/correction.py` | Natural language list correction using Gemini LLM with JSON mode |
+| **Chat Interface** | `src/components/ChatInterface.tsx` | Frontend chat UI, button handling, event dispatching |
+| **Metadata Viewer** | `src/components/metadata/MetadataViewer.tsx` | Visual highlighting, change detection, metadata updates |
 
 ---
 
@@ -794,6 +903,119 @@ After user reviews preview results from `/api/v1/ingestion`, this endpoint handl
 - **Batch Support**: Handles multiple pages in single request
 - **Error Handling**: Tracks per-page success/failure status
 - **Embedding Persistence**: Automatically saves embedding if available
+
+---
+
+#### POST `/api/v1/chat`
+**Chat with AI agent for natural language interaction and corrections**
+
+**Purpose:**
+Enables natural language interaction with the Home AI Agent. Supports various intents including search, update, and correction. When correction context is provided, automatically routes to CorrectionPipeline for intelligent list corrections.
+
+**Request (JSON):**
+```json
+{
+  "message": "Milk is 1L, not 500ml. The 'Unknown Item' is Lao Gan Ma, 280g",
+  "history": [
+    {"role": "user", "content": "Previous user message"},
+    {"role": "model", "content": "Previous AI response"}
+  ],
+  "owner_id": 1,
+  "context": {
+    "type": "correction",
+    "data": [
+      {
+        "product_name": "Milk",
+        "quantity": "500",
+        "unit": "ml",
+        "category": "Dairy"
+      },
+      {
+        "product_name": "Unknown Item",
+        "quantity": "1",
+        "unit": "pcs"
+      }
+    ]
+  }
+}
+```
+
+**Request Fields:**
+- `message`: `str` – User's natural language message (required)
+- `history`: `List[Dict[str, str]]` – Conversation history with `role` ("user" or "model") and `content` (optional)
+- `owner_id`: `int` – User ID (required)
+- `context`: `Optional[Dict[str, Any]]` – Optional context for correction mode
+  - `type`: `str` – Context type (e.g., "correction")
+  - `data`: `List[Dict[str, Any]]` – Context data (e.g., items array for correction)
+
+**Response:**
+```json
+{
+  "response": "I've updated the items based on your instructions:\n\n- Changed 'Milk' quantity from 500ml to 1L\n- Renamed 'Unknown Item' to 'Lao Gan Ma' and set quantity to 280g\n\nPlease review the highlighted changes and click 'Apply Changes' to confirm.",
+  "intent": "UPDATE",
+  "confidence": 0.95,
+  "reasoning": "User is correcting item quantities and names in the receipt list",
+  "action": "APPLY_CORRECTION",
+  "action_data": {
+    "corrected_items": [
+      {
+        "product_name": "Milk",
+        "quantity": "1",
+        "unit": "L",
+        "category": "Dairy"
+      },
+      {
+        "product_name": "Lao Gan Ma",
+        "quantity": "280",
+        "unit": "g",
+        "category": "Condiments"
+      }
+    ],
+    "changes_summary": [
+      "Changed 'Milk' quantity from 500ml to 1L",
+      "Renamed 'Unknown Item' to 'Lao Gan Ma' and set quantity to 280g"
+    ]
+  }
+}
+```
+
+**Response Fields:**
+- `response`: `str` – AI-generated natural language response
+- `intent`: `str` – Detected intent (e.g., "SEARCH", "UPDATE", "GENERAL")
+- `confidence`: `float` – Confidence score for intent classification (0.0-1.0)
+- `reasoning`: `Optional[str]` – Explanation of intent classification
+- `action`: `str` – Action type (e.g., "APPLY_CORRECTION", "SEARCH", "UPDATE")
+- `action_data`: `Dict[str, Any]` – Action-specific data
+  - For `APPLY_CORRECTION`: Contains `corrected_items` and `changes_summary`
+
+**Process (Step-by-Step):**
+1. **Context Detection** – ChatPipeline checks if `context.type == "correction"`
+   - If yes: Sets `is_correction = True` and bypasses standard intent classification
+   - If no: Proceeds with normal intent classification
+2. **Correction Processing** (if correction context):
+   - Extracts items from `context.data`
+   - Calls `CorrectionPipeline.run(user_input, items)`
+   - CorrectionPipeline uses Gemini LLM with JSON mode to process corrections
+   - Returns `corrected_items` and `changes_summary`
+3. **Response Generation**:
+   - ChatPipeline generates friendly response using Gemini LLM
+   - Includes correction result summary in context
+   - Sets `action = "APPLY_CORRECTION"` and `action_data = correction_result`
+4. **Return Response** – Returns ChatResponse with all fields
+
+**Key Features:**
+- **Natural Language Processing**: Users describe corrections in natural language
+- **Context-Aware**: Automatically detects correction context and routes appropriately
+- **Batch Corrections**: Can correct multiple items and fields in one message
+- **Visual Feedback**: Frontend highlights changes before user confirms
+- **Error Handling**: Returns original items on error with error message in `changes_summary`
+- **Integration**: Works seamlessly with existing Home Agent chat interface
+
+**Example Use Cases:**
+- **Correction**: "Milk is 1L, not 500ml. The 'Unknown Item' is Lao Gan Ma, 280g"
+- **Search**: "Find all my receipts from last month"
+- **Update**: "Change the location of Document #123 to Pantry"
+- **General**: "What can you help me with?"
 
 ---
 
@@ -1144,6 +1366,78 @@ StorageHelperAIOrchestraService/
       - `app/api/schemas.py`: All field descriptions and docstrings in English
       - `app/pipelines/ingestion.py`: All comments and log messages in English
       - `src/pages/UploadPage.tsx`: All UI text in English
+*   **AI-Powered Natural Language Correction Feature** (January 2026):
+    - **Feature Overview**: Implemented natural language correction workflow for receipt items using LLM
+      - **User Flow**: User sees recognized list → AI dialog opens → User provides natural language corrections → AI processes and highlights changes → User confirms/cancels → Changes applied
+      - **Benefits**: Natural language processing allows batch corrections faster than manual clicking and typing
+    - **Backend Implementation** (`app/pipelines/correction.py`):
+      - **CorrectionPipeline Class**: New pipeline for handling natural language list corrections
+        - Uses Gemini LLM API with JSON mode for structured output
+        - System prompt guides AI to identify items, apply changes, and maintain structure
+        - Returns `corrected_items` array and `changes_summary` list
+        - Error handling: Returns original list on failure with error message
+      - **Chat Pipeline Integration** (`app/pipelines/chat.py`):
+        - Detects correction context from user input
+        - Calls `correction_pipeline.run()` with user input and current items
+        - Sets action to `APPLY_CORRECTION` with correction result data
+        - Provides context to LLM for friendly summary and confirmation prompt
+    - **Frontend Implementation**:
+      - **ChatInterface Component** (`src/components/ChatInterface.tsx`):
+        - **Dialog Integration**: Uses existing Home Agent chat dialog (not separate dialog)
+          - Opens small window chat (not fullscreen) when correction button clicked
+          - Context-aware: Detects correction context and shows appropriate placeholder
+          - System message: "I see you want to correct the item list. Just tell me what needs to be changed!"
+        - **Action Buttons**:
+          - **Apply Changes Button**: Green button with checkmark icon
+            - Dispatches `apply-correction` event with corrected items
+            - Updates message action to `APPLY_CORRECTION_COMPLETED` to hide buttons
+            - Shows success message: "✅ Correction applied successfully! Please click 'Continue and Upload to Database' in the document editor to persist changes."
+          - **Cancel Button**: Red button with X icon
+            - Dispatches `apply-correction` event with `action: 'cancel'` to clear highlights
+            - Updates message action to `APPLY_CORRECTION_CANCELLED` to hide buttons
+            - Shows cancellation message: "❌ Correction cancelled. No changes were applied."
+          - **Button Visibility**: Buttons disappear after user clicks (action state changes)
+        - **Preview Event Handling**: Dispatches preview event when AI returns correction results for highlighting
+      - **MetadataViewer Component** (`src/components/metadata/MetadataViewer.tsx`):
+        - **AI Fix Button**:
+          - Prominent button in Items table header: "Chat to Fix" with Sparkles icon
+          - Gradient purple-to-indigo background with pulsing animation
+          - Helper text: "Change milk to 1 gallon..." (hidden on mobile)
+          - Dispatches `open-chat` event with correction context and items data
+          - Opens small window chat (not fullscreen)
+        - **Visual Feedback System**:
+          - **Pending Changes Highlighting** (Preview State):
+            - Listens for `apply-correction` event with `previewItems`
+            - Calculates diffs between old and new items
+            - Shows **flashing border** (ring-2 ring-home-success-500) with pulsing animation on changed fields
+            - Highlights persist until user confirms or cancels
+          - **Applied Changes Highlighting** (Apply State):
+            - Listens for `apply-correction` event with `correctedItems`
+            - Re-calculates diffs and applies highlights
+            - Updates metadata with corrected items via `onMetadataChange`
+            - Highlights fade after 3 seconds
+          - **Cancel Handling**: Clears all highlights when cancel event received
+        - **Highlight Implementation**:
+          - `getHighlightClass()` function applies CSS classes to changed fields
+          - Classes: `ring-2 ring-home-success-500 bg-home-success-50 transition-all duration-500 animate-pulse`
+          - Applied to: `product_name`, `category`, `quantity`, `unit`, `storage_suggestion`, `estimated_shelf_life_days`
+    - **Event-Driven Architecture**:
+      - **Custom Events**:
+        - `open-chat`: Opens chat with optional context and message
+        - `apply-correction`: Carries correction data (previewItems, correctedItems, or cancel action)
+      - **Event Flow**:
+        1. User clicks "Chat to Fix" → `open-chat` event → ChatInterface opens with context
+        2. User sends correction → Backend processes → Returns `APPLY_CORRECTION` action
+        3. ChatInterface dispatches `apply-correction` with `previewItems` → MetadataViewer highlights changes
+        4. User clicks "Apply Changes" → ChatInterface dispatches `apply-correction` with `correctedItems` → MetadataViewer applies changes
+        5. User clicks "Cancel" → ChatInterface dispatches `apply-correction` with `action: 'cancel'` → MetadataViewer clears highlights
+    - **Key Features**:
+      - **Natural Language Processing**: Users can describe corrections naturally (e.g., "Milk is 1L, not 500ml. The 'Unknown Item' is Lao Gan Ma, 280g")
+      - **Batch Corrections**: Multiple fields across multiple items can be corrected in one message
+      - **Visual Feedback**: Color-coded flashing borders show exactly what will change
+      - **Non-Destructive**: Cancel option allows users to review before applying
+      - **Context Preservation**: Correction context persists across chat messages
+      - **User-Friendly**: Clear success/cancel messages guide user to next steps
 *   **Pending Work**: 
     - Feedback handler implementation (endpoint exists, storage logic removed, needs API integration)
     - Comprehensive test suite (unit and integration tests)

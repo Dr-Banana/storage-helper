@@ -461,7 +461,8 @@ export const ingestionService = {
   chat: async (request: { 
     message: string; 
     history: { role: string; content: string }[]; 
-    owner_id: number 
+    owner_id: number;
+    context?: any;
   }): Promise<{
     response: string;
     intent: string;
@@ -471,6 +472,21 @@ export const ingestionService = {
     action_data: any;
   }> => {
     const response = await aiOrchestraClient.post('/chat', request)
+    return response.data
+  },
+
+  /**
+   * Correct a list of items using AI
+   * POST /api/v1/correction (AIOrchestraService)
+   */
+  correctList: async (request: {
+    user_input: string;
+    items: any[];
+  }): Promise<{
+    corrected_items: any[];
+    changes_summary: string[];
+  }> => {
+    const response = await aiOrchestraClient.post('/correction', request)
     return response.data
   },
 }

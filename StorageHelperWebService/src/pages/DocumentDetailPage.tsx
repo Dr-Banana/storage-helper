@@ -76,6 +76,37 @@ const DocumentDetailPage = () => {
   }
 
   useEffect(() => {
+    // Listen for global document update events
+    const handleDocumentUpdated = () => {
+      // Reload document data
+      if (id && userId) {
+        const loadDocument = async () => {
+          try {
+            const pagesData = await documentService.getPages(parseInt(id))
+            const finalDoc = pagesData.document || {
+              id: parseInt(id),
+              title: `Document #${id}`,
+              owner_id: userId,
+              created_at: new Date().toISOString(),
+              updated_at: new Date().toISOString(),
+            }
+            setDocument(finalDoc)
+            // Reload metadata-dependent state
+            if (finalDoc.category_id) setSelectedCategoryId(finalDoc.category_id)
+            if (finalDoc.current_location_id) setSelectedLocationId(finalDoc.current_location_id)
+          } catch (error) {
+            console.error('Failed to reload document:', error)
+          }
+        }
+        loadDocument()
+      }
+    }
+
+    window.addEventListener('document-updated', handleDocumentUpdated)
+    return () => window.removeEventListener('document-updated', handleDocumentUpdated)
+  }, [id, userId])
+
+  useEffect(() => {
     const loadDocument = async () => {
       if (!id || !userId) return
       try {

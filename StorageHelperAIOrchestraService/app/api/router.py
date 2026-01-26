@@ -14,9 +14,10 @@ from app.api.schemas import (
     IngestConfirmRequest, IngestConfirmResponse,
     SearchRequest, SearchResponse,
     CategoryConfigResponse, CategoryTypeInfo,
-    ChatRequest, ChatResponse
+    ChatRequest, ChatResponse,
+    CorrectionRequest, CorrectionResponse
 )
-from app.pipelines import ingestion, feedback, chat
+from app.pipelines import ingestion, feedback, chat, correction
 from app.pipelines.search import perform_search
 from app.modules.embedding import EmbeddingGenerator
 from app.storage.pipeline_storage import PipelineStorage

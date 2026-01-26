@@ -1,5 +1,5 @@
-import React from 'react';
-import { Trash2 } from 'lucide-react';
+import React, { useState, useEffect } from 'react';
+import { Trash2, Sparkles } from 'lucide-react';
 
 interface MetadataViewerProps {
   metadata: Record<string, any>;
@@ -45,7 +45,72 @@ const ReceiptMetadataViewer: React.FC<{
   onMetadataChange?: (newMetadata: any) => void;
 }> = ({ metadata, isEditing, onMetadataChange }) => {
   const items = metadata.items || [];
+  const [highlightedItems, setHighlightedItems] = useState<{ [index: number]: string[] }>({});
   
+  // Listen for AI correction events from ChatInterface
+  useEffect(() => {
+    const handleCorrection = (e: any) => {
+        // Handle "preview" event to show pending changes
+        if (e.detail?.previewItems) {
+            const previewItems = e.detail.previewItems;
+            const highlights: { [index: number]: string[] } = {};
+            
+            previewItems.forEach((newItem: any, index: number) => {
+                const oldItem = items[index];
+                if (!oldItem) return;
+                
+                const changedKeys: string[] = [];
+                Object.keys(newItem).forEach(key => {
+                    if (JSON.stringify(newItem[key]) !== JSON.stringify(oldItem[key])) {
+                        changedKeys.push(key);
+                    }
+                });
+                
+                if (changedKeys.length > 0) {
+                    highlights[index] = changedKeys;
+                }
+            });
+            setHighlightedItems(highlights);
+            return;
+        }
+
+        // Handle "cancel" event to clear highlights
+        if (e.detail?.action === 'cancel') {
+            setHighlightedItems({});
+            return;
+        }
+
+        // Handle "apply" event (existing logic)
+        if (onMetadataChange && e.detail?.correctedItems) {
+            const newItems = e.detail.correctedItems;
+            
+            // Re-calculate diffs to ensure highlights persist during application
+            const highlights: { [index: number]: string[] } = {};
+            newItems.forEach((newItem: any, index: number) => {
+                const oldItem = items[index];
+                if (!oldItem) return;
+                const changedKeys: string[] = [];
+                Object.keys(newItem).forEach(key => {
+                    if (JSON.stringify(newItem[key]) !== JSON.stringify(oldItem[key])) {
+                        changedKeys.push(key);
+                    }
+                });
+                if (changedKeys.length > 0) highlights[index] = changedKeys;
+            });
+            
+            setHighlightedItems(highlights);
+            onMetadataChange({ ...metadata, items: newItems });
+            
+            setTimeout(() => {
+                setHighlightedItems({});
+            }, 3000);
+        }
+    };
+    
+    window.addEventListener('apply-correction', handleCorrection);
+    return () => window.removeEventListener('apply-correction', handleCorrection);
+  }, [metadata, onMetadataChange, items]);
+
   const handleHeaderChange = (key: string, value: any) => {
     if (onMetadataChange) {
       onMetadataChange({ ...metadata, [key]: value });
@@ -65,6 +130,24 @@ const ReceiptMetadataViewer: React.FC<{
       const newItems = items.filter((_: any, i: number) => i !== index);
       onMetadataChange({ ...metadata, items: newItems });
     }
+  };
+
+  const openAiChat = () => {
+    window.dispatchEvent(new CustomEvent('open-chat', { 
+        detail: { 
+            context: {
+                type: 'correction',
+                data: items
+            }
+        } 
+    }));
+  };
+
+  const getHighlightClass = (index: number, key: string) => {
+    if (highlightedItems[index]?.includes(key)) {
+        return "ring-2 ring-home-success-500 bg-home-success-50 transition-all duration-500 animate-pulse";
+    }
+    return "";
   };
 
   return (
@@ -124,6 +207,25 @@ const ReceiptMetadataViewer: React.FC<{
         )}
       </div>
 
+      {/* Items Table Header & Actions */}
+      <div className="flex justify-between items-center mb-2">
+        <h3 className="text-sm font-bold text-home-text-dark">Items ({items.length})</h3>
+        {isEditing && (
+          <div className="flex items-center gap-3 bg-purple-50/50 p-1.5 rounded-xl border border-purple-100">
+             <span className="text-[10px] text-purple-600/70 font-medium italic hidden md:block px-2">
+                "Change milk to 1 gallon..."
+             </span>
+             <button 
+                onClick={openAiChat}
+                className="text-xs font-bold text-white bg-gradient-to-r from-purple-500 to-indigo-600 hover:from-purple-600 hover:to-indigo-700 px-3 py-1.5 rounded-lg shadow-sm hover:shadow-md transition-all flex items-center gap-1.5"
+             >
+                <Sparkles size={14} className="animate-pulse" />
+                Chat to Fix
+             </button>
+          </div>
+        )}
+      </div>
+
       {/* Items Table */}
       <div className="overflow-x-auto rounded-home border border-home-primary-200">
         <table className="min-w-full divide-y divide-home-primary-200">
@@ -150,7 +252,7 @@ const ReceiptMetadataViewer: React.FC<{
                         type="text" 
                         value={item.product_name || ''} 
                         onChange={(e) => handleItemChange(idx, 'product_name', e.target.value)}
-                        className="w-full text-sm font-medium border-b border-dashed border-home-primary-200 p-0 focus:ring-0 mb-1"
+                        className={`w-full text-sm font-medium border-b border-dashed border-home-primary-200 p-0 focus:ring-0 mb-1 ${getHighlightClass(idx, 'product_name')}`}
                       />
                       <input 
                         type="text" 
@@ -172,7 +274,7 @@ const ReceiptMetadataViewer: React.FC<{
                       type="text" 
                       value={item.category || ''} 
                       onChange={(e) => handleItemChange(idx, 'category', e.target.value)}
-                      className="w-full text-xs font-medium border border-home-primary-200 rounded px-1 focus:ring-0"
+                      className={`w-full text-xs font-medium border border-home-primary-200 rounded px-1 focus:ring-0 ${getHighlightClass(idx, 'category')}`}
                     />
                   ) : (
                     <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-home-secondary-100 text-home-secondary-800">
@@ -186,7 +288,7 @@ const ReceiptMetadataViewer: React.FC<{
                       type="text" 
                       value={item.quantity || ''} 
                       onChange={(e) => handleItemChange(idx, 'quantity', e.target.value)}
-                      className="w-12 text-center text-sm border border-home-primary-200 rounded focus:ring-0"
+                      className={`w-12 text-center text-sm border border-home-primary-200 rounded focus:ring-0 ${getHighlightClass(idx, 'quantity')}`}
                     />
                   ) : (
                     <span className="text-sm text-home-text-dark">{item.quantity}</span>
@@ -198,7 +300,7 @@ const ReceiptMetadataViewer: React.FC<{
                       type="text" 
                       value={item.unit || ''} 
                       onChange={(e) => handleItemChange(idx, 'unit', e.target.value)}
-                      className="w-12 text-center text-sm border border-home-primary-200 rounded focus:ring-0"
+                      className={`w-12 text-center text-sm border border-home-primary-200 rounded focus:ring-0 ${getHighlightClass(idx, 'unit')}`}
                       placeholder="pcs"
                     />
                   ) : (
@@ -211,7 +313,7 @@ const ReceiptMetadataViewer: React.FC<{
                       type="text" 
                       value={item.storage_suggestion || ''} 
                       onChange={(e) => handleItemChange(idx, 'storage_suggestion', e.target.value)}
-                      className="w-full text-sm font-medium border border-home-primary-200 rounded px-1 focus:ring-0"
+                      className={`w-full text-sm font-medium border border-home-primary-200 rounded px-1 focus:ring-0 ${getHighlightClass(idx, 'storage_suggestion')}`}
                     />
                   ) : (
                     <div className="flex flex-col">
@@ -233,7 +335,7 @@ const ReceiptMetadataViewer: React.FC<{
                         type="number" 
                         value={item.estimated_shelf_life_days || 0} 
                         onChange={(e) => handleItemChange(idx, 'estimated_shelf_life_days', parseInt(e.target.value))}
-                        className="w-12 text-center text-xs border border-home-primary-200 rounded focus:ring-0"
+                        className={`w-12 text-center text-xs border border-home-primary-200 rounded focus:ring-0 ${getHighlightClass(idx, 'estimated_shelf_life_days')}`}
                       />
                       <span className="text-[10px] ml-0.5">d</span>
                     </div>
@@ -310,4 +412,3 @@ const GenericMetadataViewer: React.FC<{
 };
 
 export default MetadataViewer;
-

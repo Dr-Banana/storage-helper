@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, memo } from 'react'
-import { X, Send, Minimize2, Maximize2, FileText, Sparkles, User, BrainCircuit } from 'lucide-react'
+import { X, Send, Minimize2, Maximize2, FileText, Sparkles, User, BrainCircuit, Check } from 'lucide-react'
 import { Link } from 'react-router-dom'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -15,8 +15,16 @@ interface Message {
   documents?: Document[]
 }
 
+// Define props interface
+interface MessageItemProps {
+  msg: Message;
+  index: number;
+  setMessages: React.Dispatch<React.SetStateAction<Message[]>>;
+  setIsLoading: React.Dispatch<React.SetStateAction<boolean>>;
+}
+
 // 提取消息组件以减少重复渲染
-const MessageItem = memo(({ msg, setMessages, setIsLoading }: { msg: Message, setMessages: React.Dispatch<React.SetStateAction<Message[]>>, setIsLoading: React.Dispatch<React.SetStateAction<boolean>> }) => {
+const MessageItem = memo(({ msg, index, setMessages, setIsLoading }: MessageItemProps) => {
     const handleUpdate = async (doc: Document, updates: any, searchTerm?: string) => {
     try {
       setIsLoading(true);
@@ -93,6 +101,9 @@ const MessageItem = memo(({ msg, setMessages, setIsLoading }: { msg: Message, se
           role: 'model', 
           content: `✅ Successfully updated **${doc.title}** ${itemPrefix}.\n\nChanges applied:\n${Object.entries(updates).map(([k, v]) => `- ${k}: ${v}`).join('\n')}` 
         }]);
+
+        // Dispatch global update event to refresh other components
+        window.dispatchEvent(new Event('document-updated'));
       }
       
     } catch (error) {
@@ -101,6 +112,49 @@ const MessageItem = memo(({ msg, setMessages, setIsLoading }: { msg: Message, se
     } finally {
       setIsLoading(false);
     }
+  };
+
+  const handleApplyCorrection = (correctedItems: any[]) => {
+    // Dispatch event for external listeners (MetadataViewer)
+    const event = new CustomEvent('apply-correction', { 
+        detail: { correctedItems } 
+    });
+    window.dispatchEvent(event);
+    
+    // Hide buttons by updating message
+    setMessages(prev => {
+        const newMessages = [...prev];
+        // We use a type assertion or just accept that action is string | undefined
+        // But to hide buttons we can set action to something else or remove actionData
+        newMessages[index] = { ...newMessages[index], action: 'APPLY_CORRECTION_COMPLETED' }; 
+        return newMessages;
+    });
+
+    // Add success message
+    setMessages(prev => [...prev, {
+        role: 'model',
+        content: '✅ Correction applied successfully! Please click "Continue and Upload to Database" in the document editor to persist changes.'
+    }]);
+  };
+
+  const handleCancelCorrection = () => {
+    // Dispatch event for external listeners (MetadataViewer) to clear highlights
+    window.dispatchEvent(new CustomEvent('apply-correction', { 
+        detail: { action: 'cancel' } 
+    }));
+
+    // Hide buttons by updating message
+    setMessages(prev => {
+        const newMessages = [...prev];
+        newMessages[index] = { ...newMessages[index], action: 'APPLY_CORRECTION_CANCELLED' }; 
+        return newMessages;
+    });
+
+    // Add cancelled message
+    setMessages(prev => [...prev, {
+        role: 'model',
+        content: '❌ Correction cancelled. No changes were applied.'
+    }]);
   };
 
   return (
@@ -125,6 +179,26 @@ const MessageItem = memo(({ msg, setMessages, setIsLoading }: { msg: Message, se
             </div>
           )}
         </div>
+
+        {/* Action Buttons for Correction */}
+        {msg.role === 'model' && msg.action === 'APPLY_CORRECTION' && msg.actionData?.corrected_items && (
+             <div className="mt-2 flex gap-2">
+                 <button
+                    onClick={() => handleApplyCorrection(msg.actionData.corrected_items)}
+                    className="px-4 py-2 bg-green-600 text-white rounded-xl shadow-sm hover:bg-green-700 transition-colors flex items-center gap-2 font-bold text-sm w-fit"
+                 >
+                    <Check size={16} />
+                    Apply Changes
+                 </button>
+                 <button
+                    onClick={() => handleCancelCorrection()}
+                    className="px-4 py-2 bg-red-100 text-red-600 rounded-xl shadow-sm hover:bg-red-200 transition-colors flex items-center gap-2 font-bold text-sm w-fit"
+                 >
+                    <X size={16} />
+                    Cancel
+                 </button>
+             </div>
+        )}
 
         {msg.role === 'model' && msg.documents && msg.documents.length > 0 && (
           <div className="grid grid-cols-1 gap-3 w-full mt-2">
@@ -180,6 +254,7 @@ const ChatInterface: React.FC = () => {
   ])
   const [isLoading, setIsLoading] = useState(false)
   const [input, setInput] = useState('')
+  const [activeContext, setActiveContext] = useState<any>(null)
   const messagesEndRef = useRef<HTMLDivElement>(null)
 
   const scrollToBottom = () => {
@@ -190,8 +265,9 @@ const ChatInterface: React.FC = () => {
     if (isOpen) scrollToBottom()
   }, [messages, isOpen, isFullScreen, isLoading])
 
-  const handleSend = async (overrideInput?: string) => {
+  const handleSend = async (overrideInput?: string, overrideContext?: any) => {
     const messageToSend = overrideInput || input.trim()
+    const contextToSend = overrideContext || activeContext
     if (!messageToSend || !userId || isLoading) return
 
     if (!overrideInput) setInput('')
@@ -203,8 +279,15 @@ const ChatInterface: React.FC = () => {
       const response = await ingestionService.chat({
         message: messageToSend,
         history: history,
-        owner_id: userId
+        owner_id: userId,
+        context: contextToSend // Pass active context (e.g. correction items)
       })
+
+      // Reset active context after it has been used once for correction, 
+      // or keep it if we want persistent context? 
+      // For correction flow, better to keep it until explicitly cleared or user navigates away?
+      // Actually, if we want multi-turn correction, we should keep it.
+      // But for now, let's keep it simple: context persists until ChatInterface is closed or new context set.
 
       let documents: Document[] = []
       if ((response.action === 'SEARCH' || response.action === 'UPDATE') && response.action_data?.document_ids) {
@@ -227,6 +310,13 @@ const ChatInterface: React.FC = () => {
           .filter((d: Document | undefined): d is Document => d !== null && d !== undefined)
       }
 
+      // Add preview items to message for highlighting
+      if (response.action === 'APPLY_CORRECTION' && response.action_data?.corrected_items) {
+          window.dispatchEvent(new CustomEvent('apply-correction', { 
+              detail: { previewItems: response.action_data.corrected_items } 
+          }));
+      }
+
       setMessages(prev => [...prev, { 
         role: 'model', content: response.response, intent: response.intent,
         action: response.action, actionData: response.action_data, documents: documents
@@ -241,19 +331,33 @@ const ChatInterface: React.FC = () => {
   useEffect(() => {
     const handleOpenChat = (e: any) => {
       setIsOpen(true)
-      setIsFullScreen(true)
+      setIsFullScreen(false)
+      
+      // Set context if provided
+      if (e.detail?.context) {
+          setActiveContext(e.detail.context);
+          // Add a system message to indicate context is active
+          if (e.detail.context.type === 'correction') {
+             setMessages(prev => [...prev, { 
+                 role: 'model', 
+                 content: 'I see you want to correct the item list. Just tell me what needs to be changed!' 
+             }]);
+          }
+      }
+
       if (e.detail?.message) {
-        setTimeout(() => handleSend(e.detail.message), 100)
+        // Pass context explicitly to handleSend to avoid closure staleness issues
+        setTimeout(() => handleSend(e.detail.message, e.detail.context), 100)
       }
     }
     window.addEventListener('open-chat', handleOpenChat)
     return () => window.removeEventListener('open-chat', handleOpenChat)
-  }, [userId, messages, isLoading]) // 保证 handleSend 里的闭包是最新的
+  }, [userId, messages, isLoading, activeContext]) // 保证 handleSend 里的闭包是最新的
 
   if (!isOpen) {
     return (
       <button
-        onClick={() => { setIsOpen(true); setIsFullScreen(false); }}
+        onClick={() => { setIsOpen(true); setIsFullScreen(false); setActiveContext(null); }}
         className="fixed bottom-6 right-6 w-16 h-16 bg-gradient-to-tr from-home-primary-600 to-home-primary-400 text-white rounded-2xl shadow-home-xl flex items-center justify-center hover:scale-110 transition-all z-50 group overflow-hidden"
       >
         <div className="absolute inset-0 bg-white/20 translate-y-full group-hover:translate-y-0 transition-transform duration-300" />
@@ -269,17 +373,22 @@ const ChatInterface: React.FC = () => {
           <div className="w-10 h-10 rounded-xl bg-gradient-to-tr from-home-primary-600 to-home-primary-400 flex items-center justify-center text-white shadow-lg shadow-home-primary-200"><BrainCircuit size={22} /></div>
           <div>
             <h2 className="font-bold text-home-text-dark tracking-tight">Home Agent</h2>
-            <div className="flex items-center gap-1.5"><div className="w-2 h-2 bg-green-500 rounded-full animate-pulse" /><span className="text-[10px] uppercase font-bold text-home-text-light tracking-widest">Active</span></div>
+            <div className="flex items-center gap-1.5">
+                <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse" />
+                <span className="text-[10px] uppercase font-bold text-home-text-light tracking-widest">
+                    {activeContext ? 'Context Active' : 'Active'}
+                </span>
+            </div>
           </div>
         </div>
         <div className="flex items-center gap-2">
           <button onClick={() => setIsFullScreen(!isFullScreen)} className="p-2 hover:bg-home-background-dark rounded-xl transition-colors text-home-text-light">{isFullScreen ? <Minimize2 size={20} /> : <Maximize2 size={20} />}</button>
-          <button onClick={() => setIsOpen(false)} className="p-2 hover:bg-red-50 hover:text-red-500 rounded-xl transition-colors text-home-text-light"><X size={20} /></button>
+          <button onClick={() => { setIsOpen(false); setActiveContext(null); }} className="p-2 hover:bg-red-50 hover:text-red-500 rounded-xl transition-colors text-home-text-light"><X size={20} /></button>
         </div>
       </div>
 
       <div className={`flex-1 overflow-y-auto p-4 sm:p-8 space-y-8 custom-scrollbar ${isFullScreen ? 'max-w-4xl mx-auto w-full' : ''}`}>
-        {messages.map((msg, index) => <MessageItem key={index} msg={msg} setMessages={setMessages} setIsLoading={setIsLoading} />)}
+        {messages.map((msg, index) => <MessageItem key={index} index={index} msg={msg} setMessages={setMessages} setIsLoading={setIsLoading} />)}
         {isLoading && (
           <div className="flex gap-4 animate-pulse">
             <div className="w-8 h-8 rounded-lg bg-home-primary-100 flex items-center justify-center text-home-primary-400"><Sparkles size={16} /></div>
@@ -302,7 +411,7 @@ const ChatInterface: React.FC = () => {
             type="text"
             value={input}
             onChange={(e) => setInput(e.target.value)}
-            placeholder="Type your command..."
+            placeholder={activeContext ? "Type your correction..." : "Type your command..."}
             className="flex-1 px-4 py-3 bg-transparent outline-none text-home-text-dark placeholder:text-home-text-light/60 font-medium"
             disabled={isLoading}
             autoFocus

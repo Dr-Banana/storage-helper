@@ -203,6 +203,7 @@ class ChatRequest(BaseModel):
     message: str = Field(..., description="User's current input message")
     history: List[ChatMessage] = Field(default_factory=list, description="Previous messages in the conversation")
     owner_id: int = Field(..., description="User ID associated with the chat")
+    context: Optional[Dict[str, Any]] = Field(None, description="Optional context data (e.g. current document items for correction)")
 
 class ChatResponse(BaseModel):
     """Response from AI chat agent"""
@@ -212,3 +213,18 @@ class ChatResponse(BaseModel):
     reasoning: Optional[str] = Field(None, description="AI's reasoning for intent classification")
     action: str = Field(..., description="The action to perform (SEARCH, GENERAL, etc.)")
     action_data: Dict[str, Any] = Field(default_factory=dict, description="Metadata for the action")
+
+
+# ==========================================
+# 6. List Correction (Natural Language Edit)
+# ==========================================
+
+class CorrectionRequest(BaseModel):
+    """Request for AI list correction"""
+    user_input: str = Field(..., description="User's natural language correction instruction")
+    items: List[Dict[str, Any]] = Field(..., description="The current list of items to be corrected")
+
+class CorrectionResponse(BaseModel):
+    """Response for AI list correction"""
+    corrected_items: List[Dict[str, Any]] = Field(..., description="The corrected list of items")
+    changes_summary: List[str] = Field(..., description="List of changes made in human readable format")

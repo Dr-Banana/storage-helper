@@ -37,15 +37,23 @@ Respond naturally in the same language as the user.
         self.api_key = api_key or settings.GEMINI_LLM_API_KEY
         self.api_url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model_name}:generateContent?key={self.api_key}"
 
-    async def run(self, user_input: str, owner_id: int, history: List[Dict[str, str]] = None) -> Dict[str, Any]:
+    async def run(self, user_input: str, owner_id: int, history: List[Dict[str, str]] = None, context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """
         Runs the chat pipeline: Classify intent -> Route/Mock Action -> Generate response.
         """
-        # 1. Classify intent
-        intent_result = await intent_classifier.classify(user_input)
+        # 0. Check for context-based intent (e.g. Correction)
+        # If we have explicit correction context, we bypass standard intent classification
+        is_correction = False
+        if context and context.get("type") == "correction" and context.get("data"):
+            intent_result = type('obj', (object,), {'intent': Intent.UPDATE, 'reasoning': 'User is correcting items based on provided context', 'confidence': 1.0})
+            intent_action = {'action': 'CORRECTION_MODE', 'data': {}, 'message': 'Processing correction...'}
+            is_correction = True
+        else:
+            # 1. Classify intent
+            intent_result = await intent_classifier.classify(user_input)
 
-        # 2. Get intent-specific mock action/data
-        intent_action = await route_by_intent(intent_result.intent, user_input, owner_id)
+            # 2. Get intent-specific mock action/data
+            intent_action = await route_by_intent(intent_result.intent, user_input, owner_id)
 
         # 3. Generate response using Gemini
         # We include the detected intent and mock action in the prompt to guide the AI's response
@@ -56,7 +64,23 @@ Respond naturally in the same language as the user.
         
         # Add context about the specific action we're taking
         context_msg = f"\nSystem Action: {intent_action['message']}"
-        
+
+        # Handle CORRECTION_MODE
+        if is_correction:
+             from app.pipelines.correction import correction_pipeline
+             items = context.get("data", [])
+             correction_result = await correction_pipeline.run(user_input, items)
+             
+             context_msg += f"\n\nCONTEXT: The user is viewing a list of {len(items)} items and wants to CORRECT them."
+             context_msg += f"\nCURRENT LIST JSON: {json.dumps(items, indent=2)}"
+             context_msg += f"\n\nCORRECTION RESULT: {json.dumps(correction_result, indent=2)}"
+             context_msg += "\n\nCRITICAL: You have processed the correction."
+             context_msg += "\n1. Summarize the changes you made in a friendly way."
+             context_msg += "\n2. Ask the user to confirm by clicking the 'Apply Changes' button."
+             
+             intent_action['action'] = "APPLY_CORRECTION"
+             intent_action['data'] = correction_result
+
         # Handle SEARCH intent results
         if intent_action['action'] == "SEARCH":
             if intent_action['data'].get('document_ids'):
