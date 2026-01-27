@@ -216,6 +216,35 @@ export const userService = {
   },
 
   /**
+   * Erase all user data (DANGER ZONE)
+   * DELETE /api/users/{user_id}/erase-all-data
+   * 
+   * Permanently deletes all user data including:
+   * - All documents and their files from storage
+   * - All storage locations and their images
+   * - All document categories
+   * - All schedules
+   * - The user account itself
+   * 
+   * WARNING: This action is irreversible!
+   */
+  eraseAllData: async (id: number): Promise<{
+    status: string
+    message: string
+    statistics: {
+      documents_deleted: number
+      files_deleted: number
+      locations_deleted: number
+      location_images_deleted: number
+      categories_deleted: number
+      schedules_deleted: number
+    }
+  }> => {
+    const response = await apiClient.delete(`/users/${id}/erase-all-data`)
+    return response.data
+  },
+
+  /**
    * Get all documents for a user
    * GET /api/users/{user_id}/documents
    */

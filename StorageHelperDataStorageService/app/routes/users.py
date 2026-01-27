@@ -189,6 +189,51 @@ def delete_user(user_id: int, db: Session = Depends(get_db)):
         )
 
 
+@router.delete(
+    "/{user_id}/erase-all-data",
+    status_code=status.HTTP_200_OK,
+    summary="Erase all user data",
+    description="DANGER ZONE: Permanently delete all data for a user including documents, files, locations, categories, and the user account itself. This action cannot be undone."
+)
+def erase_all_user_data(user_id: int, db: Session = Depends(get_db)):
+    """
+    DANGER ZONE: Erase all data for a user
+    
+    This endpoint permanently deletes:
+    - All documents and their files from storage
+    - All storage locations and their images
+    - All document categories
+    - All schedules
+    - The user account itself
+    
+    **WARNING**: This action is irreversible!
+    
+    - **user_id**: The user's ID
+    """
+    try:
+        stats = UserService.erase_all_user_data(db, user_id)
+        return {
+            "status": "success",
+            "message": f"All data for user {user_id} has been permanently deleted",
+            "statistics": stats
+        }
+    except ValueError as e:
+        if "not found" in str(e):
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=str(e)
+            )
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e)
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to erase user data: {str(e)}"
+        )
+
+
 @router.get(
     "/{user_id}/documents",
     response_model=dict,

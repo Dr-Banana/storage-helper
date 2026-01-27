@@ -1,11 +1,18 @@
 """
 User business logic service
 """
+import logging
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
 
 from app.models.user import User
+from app.models.document import Document
+from app.models.document_page import DocumentPage
+from app.models.storage_location import StorageLocation
 from app.schemas.user import UserCreate, UserUpdate
+from app.integrations.storage_client import StorageClient
+
+logger = logging.getLogger(__name__)
 
 
 class UserService:
@@ -137,3 +144,95 @@ class UserService:
         except Exception as e:
             db.rollback()
             raise ValueError(f"Failed to delete user: {str(e)}")
+    
+    @staticmethod
+    def erase_all_user_data(db: Session, user_id: int) -> dict:
+        """
+        Erase all data for a user, including:
+        - All documents and their files from storage
+        - All storage locations and their images
+        - All document categories
+        - All schedules
+        - Finally, the user account itself
+        
+        Args:
+            db: Database session
+            user_id: User ID
+            
+        Returns:
+            Dictionary with deletion statistics
+            
+        Raises:
+            ValueError: If user not found or deletion fails
+        """
+        try:
+            user = UserService.get_user_by_id(db, user_id)
+            
+            if not user:
+                raise ValueError(f"User with ID {user_id} not found")
+            
+            stats = {
+                "documents_deleted": 0,
+                "files_deleted": 0,
+                "locations_deleted": 0,
+                "location_images_deleted": 0,
+                "categories_deleted": 0,
+                "schedules_deleted": 0
+            }
+            
+            # 1. Delete all documents and their files from storage
+            documents = db.query(Document).filter(Document.owner_id == user_id).all()
+            stats["documents_deleted"] = len(documents)
+            
+            for document in documents:
+                # Get all page image URLs
+                pages = db.query(DocumentPage).filter(DocumentPage.document_id == document.id).all()
+                image_urls = [page.image_url for page in pages if page.image_url]
+                
+                # Include document thumbnail if different
+                if document.image_url and document.image_url not in image_urls:
+                    image_urls.append(document.image_url)
+                
+                # Delete files from storage
+                for url in image_urls:
+                    try:
+                        if StorageClient.delete_image(url):
+                            stats["files_deleted"] += 1
+                    except Exception as e:
+                        logger.warning(f"Failed to delete file from storage: {url}. Error: {e}")
+            
+            # 2. Delete all storage location images
+            locations = db.query(StorageLocation).filter(StorageLocation.user_id == user_id).all()
+            stats["locations_deleted"] = len(locations)
+            
+            for location in locations:
+                if location.photo_url:
+                    try:
+                        if StorageClient.delete_image(location.photo_url):
+                            stats["location_images_deleted"] += 1
+                    except Exception as e:
+                        logger.warning(f"Failed to delete location image: {location.photo_url}. Error: {e}")
+            
+            # 3. Count categories and schedules (will be cascade deleted)
+            from app.models.document_category import DocumentCategory
+            from app.models.schedule import Schedule
+            
+            categories = db.query(DocumentCategory).filter(DocumentCategory.user_id == user_id).all()
+            stats["categories_deleted"] = len(categories)
+            
+            schedules = db.query(Schedule).filter(Schedule.user_id == user_id).all()
+            stats["schedules_deleted"] = len(schedules)
+            
+            # 4. Delete the user (cascade will handle documents, locations, categories, schedules)
+            db.delete(user)
+            db.commit()
+            
+            logger.info(f"Successfully erased all data for user {user_id}. Stats: {stats}")
+            return stats
+            
+        except ValueError:
+            raise
+        except Exception as e:
+            db.rollback()
+            logger.error(f"Failed to erase user data: {e}")
+            raise ValueError(f"Failed to erase user data: {str(e)}")
