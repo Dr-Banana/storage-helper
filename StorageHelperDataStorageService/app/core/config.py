@@ -77,6 +77,9 @@ class Settings(BaseSettings):
     # Logging
     LOG_LEVEL: str = "INFO"
     
+    # Google OAuth
+    GOOGLE_CLIENT_ID: Optional[str] = None
+    
     # Pydantic Configuration
     model_config = SettingsConfigDict(
         env_file=get_env_file(), 

@@ -12,8 +12,10 @@ from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-# Load environment variables from .env.local
-load_dotenv(".env.local")
+# Load environment variables from .env.local (only if exists, for local development)
+# Use override=False to ensure system environment variables (from Render) take precedence
+if os.path.exists(".env.local"):
+    load_dotenv(".env.local", override=False)
 
 from app.core.config import settings
 from app.core.database import engine, Base
@@ -29,16 +31,22 @@ from app.models import (
 logging.basicConfig(level=settings.LOG_LEVEL)
 logger = logging.getLogger(__name__)
 
+# Log if .env.local was loaded (for local development)
+if os.path.exists(".env.local"):
+    logger.info("Loaded .env.local for local development")
+
 # Create all tables
 Base.metadata.create_all(bind=engine)
 
 # Initialize Google OAuth service with client ID from environment
-google_client_id = os.getenv("GOOGLE_CLIENT_ID")
+# Try multiple sources: system env, then settings
+google_client_id = os.getenv("GOOGLE_CLIENT_ID") or getattr(settings, "GOOGLE_CLIENT_ID", None)
 if google_client_id:
     GoogleAuthService.set_client_id(google_client_id)
-    logger.info("Google OAuth configured")
+    logger.info(f"Google OAuth configured with Client ID: {google_client_id[:20]}...")
 else:
-    logger.warning("GOOGLE_CLIENT_ID not set - Google OAuth will not work")
+    logger.error("GOOGLE_CLIENT_ID not set - Google OAuth will not work")
+    logger.error("Please set GOOGLE_CLIENT_ID environment variable in Render dashboard or .env file")
 
 # Initialize FastAPI app
 app = FastAPI(
