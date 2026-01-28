@@ -12,12 +12,16 @@ from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-# Load environment variables from .env.local (only if exists, for local development)
-# Use override=False to ensure system environment variables (from Render) take precedence
-if os.path.exists(".env.local"):
-    load_dotenv(".env.local", override=False)
-
+# IMPORTANT: Load settings FIRST to get APP_ENV, then conditionally load .env.local
+# This ensures APP_ENV from environment or .env.{APP_ENV} takes precedence
 from app.core.config import settings
+
+# Only load .env.local if APP_ENV is explicitly set to "local"
+# This prevents .env.local from overriding preprod/prod configurations
+if settings.APP_ENV == "local" and os.path.exists(".env.local"):
+    load_dotenv(".env.local", override=False)
+    logger = logging.getLogger(__name__)
+    logger.info("Loaded .env.local for local development")
 from app.core.database import engine, Base
 from app.routes import users, public_api, documents, location_images, google_auth, auth, schedule
 from app.services.google_auth_service import GoogleAuthService
@@ -31,9 +35,19 @@ from app.models import (
 logging.basicConfig(level=settings.LOG_LEVEL)
 logger = logging.getLogger(__name__)
 
-# Log if .env.local was loaded (for local development)
-if os.path.exists(".env.local"):
-    logger.info("Loaded .env.local for local development")
+# Log current environment configuration
+logger.info(f"Running in {settings.APP_ENV.upper()} mode")
+logger.info(f"APP_ENV from environment: {os.getenv('APP_ENV', 'NOT SET')}")
+logger.info(f"APP_ENV from settings: {settings.APP_ENV}")
+if settings.APP_ENV in ("preprod", "prod"):
+    logger.info(f"Storage: Supabase ({settings.SUPABASE_URL or 'Not configured'})")
+    logger.info(f"Supabase Bucket: {settings.SUPABASE_BUCKET}")
+    logger.info(f"Supabase Key: {'configured' if settings.SUPABASE_KEY else 'NOT configured'}")
+    logger.info(f"Database: {settings.DATABASE_URL.split('@')[-1] if '@' in settings.DATABASE_URL else 'Local'}")
+    if not settings.SUPABASE_URL or not settings.SUPABASE_KEY:
+        logger.error("WARNING: APP_ENV is preprod/prod but Supabase is not configured! Will use local storage.")
+else:
+    logger.info(f"Storage: Local filesystem ({settings.STORAGE_LOCAL_PATH})")
 
 # Create all tables
 Base.metadata.create_all(bind=engine)

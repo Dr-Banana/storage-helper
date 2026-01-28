@@ -127,7 +127,8 @@ class EmbeddingGenerator:
                     }
                 ]
             },
-            "taskType": self.task_type
+            "taskType": self.task_type,
+            "outputDimensionality": 768  # Force 768 dimensions for DB compatibility
         }
         
         headers = {'Content-Type': 'application/json'}
@@ -149,6 +150,11 @@ class EmbeddingGenerator:
                     embedding_values = result.get('embedding', {}).get('values')
                     
                     if embedding_values and isinstance(embedding_values, list):
+                        # Force truncation if API ignored outputDimensionality
+                        if len(embedding_values) > 768:
+                            logger.warning(f"Embedding API returned {len(embedding_values)} dimensions despite outputDimensionality=768 request. Truncating to 768.")
+                            embedding_values = embedding_values[:768]
+                            
                         # logger.info(f"Embedding successful. Vector dimension: {len(embedding_values)}")
                         return EmbeddingResult(
                             vector=embedding_values,

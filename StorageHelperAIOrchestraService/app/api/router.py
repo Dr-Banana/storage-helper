@@ -138,7 +138,11 @@ async def process_document_stream(
                     preview_mode=True,
                     on_progress=on_progress
                 )
-                logger.info(f"Pipeline completed with status: {result.get('status', 'unknown')}")
+                status = result.get('status', 'unknown')
+                logger.info(f"Pipeline completed with status: {status}, successful_pages: {result.get('successful_pages', 0)}, failed_pages: {result.get('failed_pages', 0)}")
+                # Log key fields for debugging
+                logger.info(f"Result keys: {list(result.keys())}, has recommendation: {'recommendation' in result and result.get('recommendation') is not None}")
+                logger.debug(f"Full pipeline result: {json.dumps(result, default=str)[:500]}...")  # Log first 500 chars
                 await queue.put({"type": "result", "data": result})
             except Exception as e:
                 logger.error(f"Stream ingestion failed: {e}", exc_info=True)

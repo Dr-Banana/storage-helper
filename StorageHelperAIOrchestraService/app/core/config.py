@@ -125,7 +125,7 @@ class Settings(BaseSettings):
     GEMINI_EMBEDDING_API_KEY: str = ""  # Gemini API key for embedding generation
     GEMINI_LLM_API_KEY: str = ""  # Gemini API key for LLM (recommendation)
     GEMINI_METADATA_API_KEY: str = ""  # Gemini API key for metadata extraction (can reuse GEMINI_LLM_API_KEY if not set separately)
-    GEMINI_EMBEDDING_MODEL: str = "text-embedding-004"  # Embedding model name
+    GEMINI_EMBEDDING_MODEL: str = "text-embedding-004"  # Embedding model name (legacy, consider updating to gemini-embedding-001)
     GEMINI_LLM_MODEL: str = "gemini-2.5-flash-preview-09-2025"  # LLM model name
     GEMINI_METADATA_MODEL: str = "gemini-2.5-flash-preview-09-2025"  # Model for metadata extraction
     

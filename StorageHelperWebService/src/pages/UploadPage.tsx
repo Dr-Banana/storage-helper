@@ -138,15 +138,50 @@ const UploadPage = () => {
             const jsonStr = line.replace('data: ', '').trim()
             try {
               const event = JSON.parse(jsonStr)
+              console.log('SSE event received:', { type: event.type, hasData: !!event.data })
               
               if (event.type === 'progress') {
                 setCurrentStep(event.step)
                 setWorkflowProgress(Math.round(event.progress * 100))
               } else if (event.type === 'result') {
                 const result = event.data
+                console.log('Received ingestion result:', { 
+                  status: result?.status, 
+                  statusType: typeof result?.status,
+                  document_id: result?.document_id, 
+                  total_pages: result?.total_pages,
+                  successful_pages: result?.successful_pages,
+                  failed_pages: result?.failed_pages,
+                  has_recommendation: !!result?.recommendation,
+                  recommendation: result?.recommendation,
+                  embedding_save_error: result?.embedding_save_error,
+                  recommendation_error: result?.recommendation_error,
+                  fullResult: result
+                })
+                
+                if (!result) {
+                  console.error('Result data is null or undefined')
+                  setUploadError('Ingestion failed: No result data received')
+                  continue
+                }
+                
                 setIngestionResult(result)
                 
-                if (result.status === 'success' || result.status === 'partial_success') {
+                // Check status - allow success, partial_success, or even failed if we have successful pages and recommendation
+                const status = result.status
+                const isSuccess = status === 'success' || status === 'partial_success'
+                const hasSuccessfulPages = (result.successful_pages || 0) > 0
+                const hasRecommendation = !!result.recommendation
+                
+                console.log('Status check:', { 
+                  status, 
+                  isSuccess, 
+                  hasSuccessfulPages, 
+                  hasRecommendation,
+                  willShowConfirmation: isSuccess || (hasSuccessfulPages && hasRecommendation)
+                })
+                
+                if (isSuccess || (hasSuccessfulPages && hasRecommendation)) {
                   setWorkflowProgress(100)
                   setCurrentStep('Complete!')
                   const rec = result.recommendation || {}
@@ -159,13 +194,23 @@ const UploadPage = () => {
                   categoryService.getByUserId(userId).then(res => setCategories(res.categories || []))
                   setShowConfirmation(true)
                 } else {
-                  setUploadError(`Ingestion failed: ${result.status}`)
+                  console.error('Ingestion failed - conditions not met:', { 
+                    status, 
+                    isSuccess, 
+                    hasSuccessfulPages, 
+                    hasRecommendation,
+                    result 
+                  })
+                  setUploadError(`Ingestion failed: ${status || 'unknown status'}`)
                 }
               } else if (event.type === 'error') {
+                console.error('SSE error event:', event.message)
                 throw new Error(event.message)
+              } else {
+                console.warn('Unknown SSE event type:', event.type)
               }
             } catch (e) {
-              console.error('Error parsing SSE event:', e)
+              console.error('Error parsing SSE event:', e, 'Raw line:', jsonStr.substring(0, 200))
             }
           }
         }

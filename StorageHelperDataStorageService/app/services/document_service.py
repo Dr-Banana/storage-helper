@@ -417,6 +417,7 @@ class DocumentService:
         """
         try:
             # Upload image file to storage
+            logger.info(f"Uploading file to storage: filename={filename}, owner_id={owner_id}")
             image_url = StorageClient.upload_image(
                 file_content=file_content,
                 filename=filename,
@@ -424,6 +425,7 @@ class DocumentService:
             )
             
             logger.info(f"File uploaded to storage. URL: {image_url}")
+            logger.info(f"URL type: {'Supabase' if image_url.startswith('http') else 'Local'}")
             return image_url
             
         except Exception as e:

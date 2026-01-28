@@ -79,10 +79,19 @@ class StorageClient:
             unique_filename = f"{uuid.uuid4()}{file_ext}"
             full_path = f"{folder}/{unique_filename}"
 
+            # Log current environment and storage decision
+            logger.info(f"Storage decision: APP_ENV={settings.APP_ENV}, SUPABASE_URL={'configured' if settings.SUPABASE_URL else 'not configured'}")
+            
             # Use Supabase for both prod and preprod environments
             if settings.APP_ENV in ("prod", "preprod"):
+                if not settings.SUPABASE_URL or not settings.SUPABASE_KEY:
+                    logger.warning(f"APP_ENV is '{settings.APP_ENV}' but Supabase is not configured. Falling back to local storage.")
+                    logger.warning(f"SUPABASE_URL: {settings.SUPABASE_URL}, SUPABASE_KEY: {'configured' if settings.SUPABASE_KEY else 'not configured'}")
+                    return cls._upload_to_local(file_content, full_path)
+                logger.info(f"Using Supabase storage for APP_ENV={settings.APP_ENV}")
                 return cls._upload_to_supabase(file_content, full_path)
             else:
+                logger.info(f"Using local storage for APP_ENV={settings.APP_ENV}")
                 return cls._upload_to_local(file_content, full_path)
                 
         except Exception as e:
@@ -92,12 +101,14 @@ class StorageClient:
     @classmethod
     def _upload_to_supabase(cls, file_content: BytesIO, full_path: str) -> str:
         """Upload to Supabase Storage"""
+        logger.info(f"Uploading to Supabase: bucket={settings.SUPABASE_BUCKET}, path={full_path}")
         client = cls.get_supabase_client()
         bucket = settings.SUPABASE_BUCKET
         
         # Ensure we're at the beginning of the buffer
         file_content.seek(0)
         content_bytes = file_content.read()
+        logger.debug(f"File size: {len(content_bytes)} bytes")
         
         # Upload
         res = client.storage.from_(bucket).upload(
@@ -109,11 +120,13 @@ class StorageClient:
         # Return the public URL
         # res looks like {'path': '...'} or raises an error
         public_url = client.storage.from_(bucket).get_public_url(full_path)
+        logger.info(f"Successfully uploaded to Supabase. Public URL: {public_url}")
         return public_url
 
     @classmethod
     def _upload_to_local(cls, file_content: BytesIO, full_path: str) -> str:
         """Upload to local filesystem"""
+        logger.info(f"Uploading to local storage: path={full_path}")
         storage_dir = settings.STORAGE_LOCAL_PATH
         os.makedirs(os.path.join(storage_dir, os.path.dirname(full_path)), exist_ok=True)
         
@@ -123,7 +136,9 @@ class StorageClient:
             f.write(file_content.getvalue())
         
         # Return absolute file path
-        return os.path.abspath(local_file_path)
+        abs_path = os.path.abspath(local_file_path)
+        logger.info(f"Successfully uploaded to local storage. Path: {abs_path}")
+        return abs_path
     
     @classmethod
     def delete_image(cls, image_url: str) -> bool:

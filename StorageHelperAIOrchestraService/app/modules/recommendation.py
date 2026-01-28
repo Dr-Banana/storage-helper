@@ -259,12 +259,54 @@ class RecommendationGenerator:
             return best_location.get("id")
         return locations[0].get("id")
 
+    def _ensure_user_exists(self, user_id: int, base_url: str) -> bool:
+        """
+        Ensure user exists in DataStorageService, create if not exists.
+        
+        Note: This method attempts to create a user, but the user ID in the database
+        is auto-generated. We cannot directly create a user with a specific ID.
+        This is a limitation - we can only check if user exists and log a warning.
+        """
+        try:
+            # Try to get user first
+            url = f"{base_url}/api/users/{user_id}"
+            auth_token = f"user_{user_id}"
+            headers = {
+                "Authorization": f"Bearer {auth_token}",
+                "Content-Type": "application/json"
+            }
+            
+            with httpx.Client(timeout=10.0) as client:
+                response = client.get(url, headers=headers)
+                if response.status_code == 200:
+                    logger.debug(f"User {user_id} already exists")
+                    return True
+                
+                # User doesn't exist
+                if response.status_code == 404:
+                    logger.warning(f"User {user_id} not found in DataStorageService database")
+                    logger.warning(f"This usually means the user was created in a different database (e.g., local vs Supabase)")
+                    logger.warning(f"Please ensure you're using the correct database for preprod mode (Supabase)")
+                    # Note: We cannot create a user with a specific ID - IDs are auto-generated
+                    # The user needs to be created through Google OAuth login first
+                    return False
+                
+                return False
+        except Exception as e:
+            logger.error(f"Error checking if user exists: {e}")
+            return False
+
     def save_category_to_api(self, user_id: int, code: str, name: str, description: str, classification: Optional[str] = None) -> Optional[Dict[str, Any]]:
         """Save a new category to API for a specific user."""
         try:
             # Extract base URL from STORAGE_SERVICE_URL
             base_url = _get_storage_base_url()
             if not base_url:
+                return None
+            
+            # Ensure user exists before creating category
+            if not self._ensure_user_exists(user_id, base_url):
+                logger.error(f"Cannot create category for user {user_id}: user does not exist and could not be created")
                 return None
             
             # Call API to create category
@@ -311,6 +353,26 @@ class RecommendationGenerator:
                 for cat in categories:
                     if cat.get("code", "").upper() == code.upper():
                         return cat
+            elif e.response.status_code == 404:
+                # User not found - try to create user and retry once
+                error_text = e.response.text[:200]
+                logger.warning(f"User {user_id} not found when creating category: {error_text}")
+                if self._ensure_user_exists(user_id, base_url):
+                    # Retry once after creating user
+                    logger.info(f"Retrying category creation for user {user_id} after user creation")
+                    try:
+                        with httpx.Client(timeout=10.0) as client:
+                            response = client.post(url, json=payload, headers=headers)
+                            response.raise_for_status()
+                            logger.info(f"Successfully saved category '{code}' ({name}) for user {user_id} after user creation")
+                            return {
+                                "code": code,
+                                "name": name,
+                                "description": description,
+                                "classification": classification
+                            }
+                    except Exception as retry_e:
+                        logger.error(f"Failed to create category after user creation: {retry_e}")
             else:
                 logger.error(f"HTTP {e.response.status_code}: {e.response.text[:200]}")
             return None

@@ -52,8 +52,9 @@ def get_env_file() -> Optional[str]:
 class Settings(BaseSettings):
     """Application settings using Pydantic Settings"""
     
-    # Environment
-    APP_ENV: str = "local"
+    # Environment - read from environment variable first, then from .env file
+    # This ensures APP_ENV from environment takes precedence
+    APP_ENV: str = os.getenv("APP_ENV", "local")
     
     # Database
     DATABASE_URL: str = os.getenv(
