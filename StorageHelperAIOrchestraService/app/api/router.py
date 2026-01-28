@@ -35,6 +35,7 @@ async def get_current_user_id_ai(
 ) -> int:
     """Extract user ID from Authorization header"""
     if not authorization:
+        logger.warning("Missing authorization header in request")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Missing authorization header"
@@ -43,18 +44,25 @@ async def get_current_user_id_ai(
     try:
         parts = authorization.split()
         if len(parts) != 2 or parts[0].lower() != "bearer":
+            logger.warning(f"Invalid authorization format: {authorization[:20]}...")
             raise ValueError("Invalid format")
         
         credentials = parts[1]
         if not credentials.startswith("user_"):
+            logger.warning(f"Invalid credentials format: {credentials[:20]}...")
             raise ValueError("Invalid credentials format")
         
         user_id = int(credentials.split("_")[1])
         if user_id <= 0:
+            logger.warning(f"Invalid user ID: {user_id}")
             raise ValueError("Invalid user ID")
         
+        logger.debug(f"Authenticated user_id: {user_id}")
         return user_id
+    except HTTPException:
+        raise
     except Exception as e:
+        logger.error(f"Authentication failed: {e}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail=f"Invalid authorization token"
@@ -74,8 +82,11 @@ async def process_document_stream(
     
     Authorization: owner_id must match current user
     """
+    logger.info(f"Received ingestion/stream request: owner_id={owner_id}, current_user_id={current_user_id}, files_count={len(files)}")
+    
     # Verify owner_id matches current user
     if owner_id != current_user_id:
+        logger.warning(f"Owner ID mismatch: owner_id={owner_id}, current_user_id={current_user_id}")
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Cannot upload documents for other users"
@@ -97,6 +108,7 @@ async def process_document_stream(
         with open(temp_file_path, "wb") as f:
             f.write(file_content)
         file_paths.append(temp_file_path)
+        logger.info(f"Saved uploaded file {filename} to temporary path: {temp_file_path}")
 
     # Normalize IDs
     normalized_document_id = None
@@ -117,6 +129,7 @@ async def process_document_stream(
         # Run the pipeline in a separate task
         async def run_pipeline():
             try:
+                logger.info(f"Starting unified ingestion pipeline: {len(file_paths)} file(s), owner_id={owner_id}, document_id={normalized_document_id}")
                 result = await run_unified_ingestion_pipeline(
                     file_urls=file_paths,
                     owner_id=owner_id,
@@ -125,6 +138,7 @@ async def process_document_stream(
                     preview_mode=True,
                     on_progress=on_progress
                 )
+                logger.info(f"Pipeline completed with status: {result.get('status', 'unknown')}")
                 await queue.put({"type": "result", "data": result})
             except Exception as e:
                 logger.error(f"Stream ingestion failed: {e}", exc_info=True)

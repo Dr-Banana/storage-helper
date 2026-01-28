@@ -38,12 +38,10 @@ def google_login(
     """
     import logging
     logger = logging.getLogger(__name__)
-    logger.info(f"Google login attempt with token (first 20 chars): {request.token[:20] if request.token else 'None'}...")
     
     try:
         # Authenticate user with Google token
         auth_result = GoogleAuthService.authenticate_user(db, request.token)
-        logger.info(f"Authentication successful for user: {auth_result['email']}")
         
         # Generate auth token (simplified format: "user_<id>")
         # In production, this should be a proper JWT token

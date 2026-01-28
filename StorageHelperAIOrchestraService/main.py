@@ -18,6 +18,9 @@ logging.getLogger("httpcore").setLevel(logging.WARNING)
 # Keep app logs at INFO level if needed, or let them inherit WARNING
 # To keep app specific logs at INFO while silencing libraries:
 logging.getLogger("app").setLevel(logging.INFO)
+# Ensure API router logs are visible
+logging.getLogger("app.api").setLevel(logging.INFO)
+logging.getLogger("app.pipelines").setLevel(logging.INFO)
 
 app = FastAPI(
     title="家用 AI 文件管家 (Orchestra Service)",

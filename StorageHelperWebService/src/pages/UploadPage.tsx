@@ -93,12 +93,21 @@ const UploadPage = () => {
       formData.append('owner_id', userId.toString())
 
       // Use native fetch for streaming SSE
-      const apiUrl = import.meta.env.VITE_API_URL || 'http://localhost:8888'
+      // Use VITE_AI_ORCHESTRA_URL if set, otherwise use proxy path
+      const aiOrchestraUrl = import.meta.env.VITE_AI_ORCHESTRA_URL || '/ai-orchestra'
+      // If it's a full URL (starts with http), use it directly; otherwise it's a proxy path
+      // For full URL: VITE_AI_ORCHESTRA_URL already includes /api/v1, so append /ingestion/stream
+      // For proxy path: /ai-orchestra will be rewritten to /api/v1 by vite proxy
+      const endpoint = aiOrchestraUrl.startsWith('http') 
+        ? `${aiOrchestraUrl}/ingestion/stream` 
+        : `${aiOrchestraUrl}/ingestion/stream`
       
       // Get auth token
       const authToken = localStorage.getItem('authToken')
       
-      const response = await fetch(`${apiUrl}/api/v1/ingestion/stream`, {
+      console.log('Upload request:', { endpoint, aiOrchestraUrl, authToken: authToken ? 'present' : 'missing' })
+      
+      const response = await fetch(endpoint, {
         method: 'POST',
         body: formData,
         headers: authToken ? {
