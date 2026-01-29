@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Trash2, Sparkles } from 'lucide-react';
+import { Trash2, Sparkles, Plus } from 'lucide-react';
 
 interface MetadataViewerProps {
   metadata: Record<string, any>;
@@ -61,6 +61,8 @@ const ReceiptMetadataViewer: React.FC<{
   const items = metadata.items || [];
   const [highlightedItems, setHighlightedItems] = useState<{ [index: number]: string[] }>({});
   const [previewItems, setPreviewItems] = useState<any[] | null>(null);
+
+  const displayItems = previewItems || items;
   
   // Listen for AI correction events from ChatInterface
   useEffect(() => {
@@ -73,8 +75,6 @@ const ReceiptMetadataViewer: React.FC<{
             
             previewItemsData.forEach((newItem: any, index: number) => {
                 const oldItem = items[index];
-                if (!oldItem) return;
-                
                 const changedKeys: string[] = [];
                 
                 // Normalize values for comparison (handle enum objects, null, undefined, strings)
@@ -100,6 +100,18 @@ const ReceiptMetadataViewer: React.FC<{
                     }
                     return val;
                 };
+
+                if (!oldItem) {
+                    // This is a NEW item. Highlight all its relevant display keys
+                    Object.keys(newItem).forEach(key => {
+                        const val = normalizeValue(newItem[key]);
+                        if (val !== null && val !== undefined && val !== '') {
+                            changedKeys.push(key);
+                        }
+                    });
+                    if (changedKeys.length > 0) highlights[index] = changedKeys;
+                    return;
+                }
                 
                 // Check all keys in newItem
                 Object.keys(newItem).forEach(key => {
@@ -160,7 +172,6 @@ const ReceiptMetadataViewer: React.FC<{
             const highlights: { [index: number]: string[] } = {};
             newItems.forEach((newItem: any, index: number) => {
                 const oldItem = items[index];
-                if (!oldItem) return;
                 const changedKeys: string[] = [];
                 
                 // Normalize function for comparison
@@ -186,6 +197,18 @@ const ReceiptMetadataViewer: React.FC<{
                     }
                     return val;
                 };
+
+                if (!oldItem) {
+                    // New item added via AI
+                    Object.keys(newItem).forEach(key => {
+                        const val = normalizeValue(newItem[key]);
+                        if (val !== null && val !== undefined && val !== '') {
+                            changedKeys.push(key);
+                        }
+                    });
+                    if (changedKeys.length > 0) highlights[index] = changedKeys;
+                    return;
+                }
                 
                 Object.keys(newItem).forEach(key => {
                     const normalizedNew = normalizeValue(newItem[key]);
@@ -197,10 +220,24 @@ const ReceiptMetadataViewer: React.FC<{
                 
                 // Also check keys in oldItem that might not be in newItem
                 Object.keys(oldItem).forEach(key => {
-                    if (!(key in newItem) && oldItem[key] !== null && oldItem[key] !== undefined) {
-                        changedKeys.push(key);
+                    if (!(key in newItem)) {
+                        const normalizedOld = normalizeValue(oldItem[key]);
+                        if (normalizedOld !== null && normalizedOld !== undefined && normalizedOld !== '') {
+                            changedKeys.push(key);
+                        }
                     }
                 });
+                
+                // Consistency fix: Include the storage_suggestion check in apply logic too
+                if ('storage_suggestion' in oldItem || 'storage_suggestion' in newItem) {
+                    const oldStorage = normalizeValue(oldItem.storage_suggestion);
+                    const newStorage = normalizeValue(newItem.storage_suggestion);
+                    if (JSON.stringify(oldStorage) !== JSON.stringify(newStorage)) {
+                        if (!changedKeys.includes('storage_suggestion')) {
+                            changedKeys.push('storage_suggestion');
+                        }
+                    }
+                }
                 
                 if (changedKeys.length > 0) highlights[index] = changedKeys;
             });
@@ -264,6 +301,39 @@ const ReceiptMetadataViewer: React.FC<{
     }
   };
 
+  const handleAddItem = () => {
+    if (onMetadataChange) {
+      const newItem = {
+        product_name: '',
+        category: '',
+        quantity: 1,
+        unit: 'pcs',
+        storage_suggestion: '',
+        estimated_shelf_life_days: 7,
+        original_text: 'Manually added'
+      };
+      const newItems = [...items, newItem];
+      const newIndex = newItems.length - 1;
+      
+      onMetadataChange({ ...metadata, items: newItems });
+      
+      // Trigger highlight for the new item
+      setHighlightedItems(prev => ({
+        ...prev,
+        [newIndex]: Object.keys(newItem)
+      }));
+      
+      // Clear highlight after 3s
+      setTimeout(() => {
+        setHighlightedItems(prev => {
+          const next = { ...prev };
+          delete next[newIndex];
+          return next;
+        });
+      }, 3000);
+    }
+  };
+
   const openAiChat = () => {
     // Always use the latest items from metadata, not the closure value
     const currentItems = metadata.items || [];
@@ -314,7 +384,11 @@ const ReceiptMetadataViewer: React.FC<{
     }
     const oldItem = items[index];
     const newItem = previewItems[index];
-    if (!oldItem || !newItem) return null;
+    if (!newItem) return null;
+    
+    if (!oldItem) {
+      return `New item added via AI`;
+    }
     
     const oldVal = formatValue(oldItem[key], 15);
     const newVal = formatValue(newItem[key], 15);
@@ -383,7 +457,7 @@ const ReceiptMetadataViewer: React.FC<{
 
       {/* Items Table Header & Actions */}
       <div className="flex justify-between items-center mb-2">
-        <h3 className="text-sm font-bold text-home-text-dark">Items ({items.length})</h3>
+        <h3 className="text-sm font-bold text-home-text-dark">Items ({displayItems.length})</h3>
         {isEditing && (
           <div className="flex items-center gap-3 bg-purple-50/50 p-1.5 rounded-xl border border-purple-100">
              <span className="text-[10px] text-purple-600/70 font-medium italic hidden md:block px-2">
@@ -417,7 +491,7 @@ const ReceiptMetadataViewer: React.FC<{
             </tr>
           </thead>
           <tbody className="bg-white divide-y divide-home-primary-100">
-            {items.map((item: any, idx: number) => (
+            {displayItems.map((item: any, idx: number) => (
               <tr key={idx} className="hover:bg-home-primary-50/50 transition-colors">
                 <td className="px-4 py-3">
                   {isEditing ? (
@@ -427,6 +501,7 @@ const ReceiptMetadataViewer: React.FC<{
                         value={item.product_name || ''} 
                         onChange={(e) => handleItemChange(idx, 'product_name', e.target.value)}
                         className={`w-full text-sm font-medium border-b border-dashed border-home-primary-200 p-0 focus:ring-0 ${getHighlightClass(idx, 'product_name')}`}
+                        disabled={!!previewItems}
                       />
                       {getChangePreview(idx, 'product_name') && (
                         <span className="text-[10px] text-home-success-600 font-medium italic">
@@ -438,6 +513,7 @@ const ReceiptMetadataViewer: React.FC<{
                         value={item.original_text || ''} 
                         onChange={(e) => handleItemChange(idx, 'original_text', e.target.value)}
                         className="w-full text-[10px] text-home-text-light border-none p-0 focus:ring-0 bg-transparent"
+                        disabled={!!previewItems}
                       />
                     </div>
                   ) : (
@@ -455,6 +531,7 @@ const ReceiptMetadataViewer: React.FC<{
                         value={item.category || ''} 
                         onChange={(e) => handleItemChange(idx, 'category', e.target.value)}
                         className={`w-full text-xs font-medium border border-home-primary-200 rounded px-1 focus:ring-0 ${getHighlightClass(idx, 'category')}`}
+                        disabled={!!previewItems}
                       />
                       {getChangePreview(idx, 'category') && (
                         <span className="text-[10px] text-home-success-600 font-medium italic">
@@ -476,6 +553,7 @@ const ReceiptMetadataViewer: React.FC<{
                         value={item.quantity || ''} 
                         onChange={(e) => handleItemChange(idx, 'quantity', e.target.value)}
                         className={`w-12 text-center text-sm border border-home-primary-200 rounded focus:ring-0 ${getHighlightClass(idx, 'quantity')}`}
+                        disabled={!!previewItems}
                       />
                       {getChangePreview(idx, 'quantity') && (
                         <span className="text-[10px] text-home-success-600 font-medium italic">
@@ -496,6 +574,7 @@ const ReceiptMetadataViewer: React.FC<{
                         onChange={(e) => handleItemChange(idx, 'unit', e.target.value)}
                         className={`w-12 text-center text-sm border border-home-primary-200 rounded focus:ring-0 ${getHighlightClass(idx, 'unit')}`}
                         placeholder="pcs"
+                        disabled={!!previewItems}
                       />
                       {getChangePreview(idx, 'unit') && (
                         <span className="text-[10px] text-home-success-600 font-medium italic">
@@ -515,6 +594,7 @@ const ReceiptMetadataViewer: React.FC<{
                         value={item.storage_suggestion || ''} 
                         onChange={(e) => handleItemChange(idx, 'storage_suggestion', e.target.value)}
                         className={`w-full text-sm font-medium border border-home-primary-200 rounded px-1 focus:ring-0 ${getHighlightClass(idx, 'storage_suggestion')}`}
+                        disabled={!!previewItems}
                       />
                       {getChangePreview(idx, 'storage_suggestion') && (
                         <span className="text-[10px] text-home-success-600 font-medium italic">
@@ -544,6 +624,7 @@ const ReceiptMetadataViewer: React.FC<{
                           value={item.estimated_shelf_life_days || 0} 
                           onChange={(e) => handleItemChange(idx, 'estimated_shelf_life_days', parseInt(e.target.value))}
                           className={`w-12 text-center text-xs border border-home-primary-200 rounded focus:ring-0 ${getHighlightClass(idx, 'estimated_shelf_life_days')}`}
+                          disabled={!!previewItems}
                         />
                         <span className="text-[10px] ml-0.5">d</span>
                       </div>
@@ -572,6 +653,7 @@ const ReceiptMetadataViewer: React.FC<{
                       onClick={() => handleItemDelete(idx)}
                       className="p-1.5 hover:bg-red-50 text-red-500 hover:text-red-700 rounded transition-colors"
                       title="Delete item"
+                      disabled={!!previewItems}
                     >
                       <Trash2 size={16} />
                     </button>
@@ -581,6 +663,17 @@ const ReceiptMetadataViewer: React.FC<{
             ))}
           </tbody>
         </table>
+        {isEditing && !previewItems && (
+          <div className="p-3 bg-home-primary-50/50 flex justify-center border-t border-home-primary-100">
+            <button
+              onClick={handleAddItem}
+              className="flex items-center gap-2 px-4 py-2 bg-white border border-home-primary-300 rounded-xl text-sm font-bold text-home-primary-600 hover:bg-home-primary-50 hover:border-home-primary-400 transition-all shadow-sm active:scale-95"
+            >
+              <Plus size={16} />
+              Add New Item
+            </button>
+          </div>
+        )}
       </div>
     </div>
   );
@@ -594,6 +687,7 @@ const GenericMetadataViewer: React.FC<{
   isEditing: boolean;
   onMetadataChange?: (newMetadata: Record<string, any>) => void;
 }> = ({ metadata, isEditing, onMetadataChange }) => {
+  const [highlightedKeys, setHighlightedKeys] = useState<string[]>([]);
   const filteredEntries = Object.entries(metadata).filter(([key]) => key !== 'items');
 
   const handleChange = (key: string, value: any) => {
@@ -602,25 +696,102 @@ const GenericMetadataViewer: React.FC<{
     }
   };
 
+  const handleAddField = () => {
+    if (onMetadataChange) {
+      const baseName = `new_field_${filteredEntries.length + 1}`;
+      let newKey = baseName;
+      let suffix = 1;
+      
+      // Prevent collision with existing keys
+      while (newKey in metadata) {
+        newKey = `${baseName}_${suffix}`;
+        suffix++;
+      }
+
+      onMetadataChange({ ...metadata, [newKey]: '' });
+      
+      // Trigger highlight for the new field
+      setHighlightedKeys(prev => [...prev, newKey]);
+      setTimeout(() => {
+        setHighlightedKeys(prev => prev.filter(k => k !== newKey));
+      }, 3000);
+    }
+  };
+
+  const getHighlightClass = (key: string) => {
+    if (highlightedKeys.includes(key)) {
+      return "ring-2 ring-home-success-500 bg-home-success-50 transition-all duration-500 animate-pulse";
+    }
+    return "";
+  };
+
   return (
-    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-      {filteredEntries.map(([key, value]) => (
-        <div key={key} className="flex flex-col p-2 bg-white rounded border border-home-primary-100 shadow-sm">
-          <span className="text-[10px] text-home-text-light font-medium uppercase tracking-tight">{key.replace(/_/g, ' ')}</span>
-          {isEditing ? (
-            <input 
-              type="text" 
-              value={typeof value === 'object' ? JSON.stringify(value) : String(value)} 
-              onChange={(e) => handleChange(key, e.target.value)}
-              className="w-full text-sm text-home-text-dark font-semibold border-none p-0 focus:ring-0 bg-transparent"
-            />
-          ) : (
-            <span className="text-sm text-home-text-dark font-semibold">
-              {typeof value === 'object' ? JSON.stringify(value) : String(value)}
-            </span>
-          )}
+    <div className="space-y-4">
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+        {filteredEntries.map(([key, value], idx) => (
+          <div key={idx} className={`flex flex-col p-2 bg-white rounded border border-home-primary-100 shadow-sm ${getHighlightClass(key)}`}>
+            {isEditing ? (
+              <input 
+                type="text"
+                value={key.replace(/_/g, ' ')}
+                onChange={(e) => {
+                  // Use symmetric 1-to-1 replacement to preserve consecutive underscores
+                  let newKey = e.target.value.replace(/ /g, '_');
+                  
+                  // Prevent using reserved 'items' key which crashes ReceiptMetadataViewer
+                  if (newKey === 'items') newKey = 'items_metadata';
+                  
+                  if (newKey === key) return;
+                  
+                  const newMetadata: Record<string, any> = {};
+                  // Preserve key order and prevent data loss on collision
+                  Object.keys(metadata).forEach(k => {
+                    if (k === key) {
+                      newMetadata[newKey] = metadata[k];
+                    } else if (k === newKey) {
+                      // Collision! Rename existing key to avoid loss
+                      let suffix = 1;
+                      while (`${k}_${suffix}` in metadata || `${k}_${suffix}` in newMetadata) {
+                        suffix++;
+                      }
+                      newMetadata[`${k}_${suffix}`] = metadata[k];
+                    } else {
+                      newMetadata[k] = metadata[k];
+                    }
+                  });
+                  onMetadataChange?.(newMetadata);
+                }}
+                className="text-[10px] text-home-text-light font-medium uppercase tracking-tight border-none p-0 focus:ring-0 bg-transparent"
+              />
+            ) : (
+              <span className="text-[10px] text-home-text-light font-medium uppercase tracking-tight">{key.replace(/_/g, ' ')}</span>
+            )}
+            {isEditing ? (
+              <input 
+                type="text" 
+                value={typeof value === 'object' ? JSON.stringify(value) : String(value)} 
+                onChange={(e) => handleChange(key, e.target.value)}
+                className="w-full text-sm text-home-text-dark font-semibold border-none p-0 focus:ring-0 bg-transparent"
+              />
+            ) : (
+              <span className="text-sm text-home-text-dark font-semibold">
+                {typeof value === 'object' ? JSON.stringify(value) : String(value)}
+              </span>
+            )}
+          </div>
+        ))}
+      </div>
+      {isEditing && (
+        <div className="flex justify-center">
+          <button
+            onClick={handleAddField}
+            className="flex items-center gap-2 px-4 py-2 bg-white border border-home-primary-300 rounded-xl text-sm font-bold text-home-primary-600 hover:bg-home-primary-50 hover:border-home-primary-400 transition-all shadow-sm active:scale-95"
+          >
+            <Plus size={16} />
+            Add New Field
+          </button>
         </div>
-      ))}
+      )}
     </div>
   );
 };

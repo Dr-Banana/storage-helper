@@ -29,11 +29,12 @@ RULES:
    - Using vision understanding to understand context if available
 3. Apply the requested changes (correct typos, update quantities, fill in missing fields, rename items).
 4. Do NOT delete items unless explicitly asked to "remove" or "delete" them.
-5. Do NOT add new items unless explicitly asked.
+5. ADD new items if the user explicitly asks to "add" something or mentions an item that is missing from the current list.
 6. If the user says "The unknown item is X", find the item with "Unknown" or generic name and update it.
-7. Maintain the original structure and keys of the JSON objects. Only update values.
-8. Return the FULL corrected list.
-9. Provide a summary of changes made, including which item was changed and what was changed.
+7. Maintain the original structure and keys of the JSON objects.
+8. When adding new items, try to infer fields like 'category', 'unit', and 'estimated_shelf_life_days' based on the product name and common knowledge.
+9. Return the FULL corrected list (including newly added items).
+10. Provide a summary of changes made, including which item was changed or added.
 
 OUTPUT FORMAT:
 Return a valid JSON object with two keys:

@@ -340,7 +340,7 @@ const ChatInterface: React.FC = () => {
           if (e.detail.context.type === 'correction') {
              setMessages(prev => [...prev, { 
                  role: 'model', 
-                 content: 'I see you want to correct the item list. Just tell me what needs to be changed!' 
+                 content: 'I see you want to correct the item list. Just tell me what needs to be changed or if I should add any missing items!' 
              }]);
           }
       }

@@ -22,6 +22,7 @@ Reasoning: {reasoning}
 
 If the intent is SEARCH: Acknowledge that you are looking for their items or documents.
 If the intent is UPDATE: The system has searched for candidates to update. Present these candidates to the user and ASK FOR CONFIRMATION on which one to update and what values to change. DO NOT update until confirmed.
+If the intent is CORRECTION_MODE (user is viewing a list): You can help them FIX existing items or ADD missing items to the list.
 If the intent is PLAN_EAT_OUT: Suggest you can help find restaurants or make reservations.
 If the intent is PLAN_COOK_HOME: Offer to generate recipes based on their ACTUAL inventory items. 
   - CRITICAL: Only suggest recipes using ingredients that are ACTUALLY in their inventory.
