@@ -654,7 +654,7 @@ class RecommendationGenerator:
                         fields=target_fields,
                         llm_metadata={}
                     )
-                    print(f"DEBUG: Extracted metadata for {final_category_code}: {extracted_metadata}")
+                    # logger.debug(f"Extracted metadata for {final_category_code}: {extracted_metadata}")
                     
                     # 3. Match locations for individual items if it's a receipt
                     if final_category_code.upper() in ["RECEIPT", "REC"] and "items" in extracted_metadata and locations:

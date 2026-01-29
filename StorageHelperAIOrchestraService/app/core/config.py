@@ -66,23 +66,18 @@ def get_env_file() -> Optional[str]:
     # For prod mode, prioritize /etc/secrets/ directory
     if app_env == "prod":
         if os.path.exists(render_secret_path):
-            logger.info(f"✓ Loading prod configuration from {render_secret_path}")
             return render_secret_path
         elif os.path.exists(env_file):
-            logger.info(f"✓ Loading prod configuration from local file {env_file}")
             return env_file
         else:
-            logger.info(f"Note: {env_file} not found in root or /etc/secrets/. Relying on system environment variables.")
             return None
     
     # For other modes (local, preprod), check local file first
     if os.path.exists(env_file):
-        logger.info(f"✓ Loading {app_env} configuration from {env_file}")
         return env_file
     
     # Fallback to /etc/secrets/ for other environments
     if os.path.exists(render_secret_path):
-        logger.info(f"✓ Loading {app_env} configuration from {render_secret_path}")
         return render_secret_path
     
     # In local/preprod, we still require the file
@@ -150,29 +145,8 @@ class Settings(BaseSettings):
     
     def log_config_summary(self):
         """Log configuration summary with sensitive values masked."""
-        current_env = os.getenv("APP_ENV", "unknown")
-        
-        logger.info("=" * 70)
-        logger.info(f"Configuration Summary (Environment: {current_env})")
-        logger.info("=" * 70)
-        logger.info(f"Storage Service URL: {self.STORAGE_SERVICE_URL}")
-        logger.info(f"Embedding API Key: {mask_sensitive_value(self.GEMINI_EMBEDDING_API_KEY)}")
-        logger.info(f"LLM API Key: {mask_sensitive_value(self.GEMINI_LLM_API_KEY)}")
-        logger.info(f"Embedding Model: {self.GEMINI_EMBEDDING_MODEL}")
-        logger.info(f"LLM Model: {self.GEMINI_LLM_MODEL}")
-        logger.info(f"Metadata Model: {self.GEMINI_METADATA_MODEL}")
-        logger.info(f"Metadata API Key: {mask_sensitive_value(self.GEMINI_METADATA_API_KEY or self.GEMINI_LLM_API_KEY)}")
-        logger.info(f"Tesseract Language: {self.TESSERACT_LANG}")
-        logger.info(f"OCR Preprocessing: {'Enabled' if self.OCR_ENABLE_PREPROCESSING else 'Disabled'}")
-        logger.info(f"Vision Enhancement: {'Enabled' if self.VISION_ENABLE else 'Disabled'}")
-        if self.VISION_ENABLE:
-            logger.info(f"Vision Model: {self.VISION_MODEL}")
-            logger.info(f"Vision Auto-trigger: {'Yes' if self.VISION_AUTO_TRIGGER_ON_LOW_OCR else 'No'} (threshold: {self.VISION_OCR_CONFIDENCE_THRESHOLD})")
-        logger.info("=" * 70)
+        pass
 
 
 # Initialize settings singleton
 settings = Settings()
-
-# Log configuration summary (with masked sensitive values)
-settings.log_config_summary()

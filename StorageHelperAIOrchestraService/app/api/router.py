@@ -82,16 +82,6 @@ async def process_document_stream(
     
     Authorization: owner_id must match current user
     """
-    logger.info(f"Received ingestion/stream request: owner_id={owner_id}, current_user_id={current_user_id}, files_count={len(files)}")
-    
-    # Verify owner_id matches current user
-    if owner_id != current_user_id:
-        logger.warning(f"Owner ID mismatch: owner_id={owner_id}, current_user_id={current_user_id}")
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Cannot upload documents for other users"
-        )
-    
     from app.pipelines.ingestion import run_unified_ingestion_pipeline
     
     temp_files = []
@@ -108,7 +98,6 @@ async def process_document_stream(
         with open(temp_file_path, "wb") as f:
             f.write(file_content)
         file_paths.append(temp_file_path)
-        logger.info(f"Saved uploaded file {filename} to temporary path: {temp_file_path}")
 
     # Normalize IDs
     normalized_document_id = None
@@ -123,13 +112,11 @@ async def process_document_stream(
         
         # Progress callback that puts messages into the queue
         async def on_progress(step: str, progress: float):
-            logger.info(f"Stream progress update: {step} ({progress*100}%)")
             await queue.put({"type": "progress", "step": step, "progress": progress})
 
         # Run the pipeline in a separate task
         async def run_pipeline():
             try:
-                logger.info(f"Starting unified ingestion pipeline: {len(file_paths)} file(s), owner_id={owner_id}, document_id={normalized_document_id}")
                 result = await run_unified_ingestion_pipeline(
                     file_urls=file_paths,
                     owner_id=owner_id,
@@ -138,11 +125,6 @@ async def process_document_stream(
                     preview_mode=True,
                     on_progress=on_progress
                 )
-                status = result.get('status', 'unknown')
-                logger.info(f"Pipeline completed with status: {status}, successful_pages: {result.get('successful_pages', 0)}, failed_pages: {result.get('failed_pages', 0)}")
-                # Log key fields for debugging
-                logger.info(f"Result keys: {list(result.keys())}, has recommendation: {'recommendation' in result and result.get('recommendation') is not None}")
-                logger.debug(f"Full pipeline result: {json.dumps(result, default=str)[:500]}...")  # Log first 500 chars
                 await queue.put({"type": "result", "data": result})
             except Exception as e:
                 logger.error(f"Stream ingestion failed: {e}", exc_info=True)
@@ -363,8 +345,6 @@ async def confirm_and_upload_document(
     from app.pipelines.ingestion import IngestionPipeline
     from app.modules.embedding import EmbeddingResult
     
-    logger.info(f"Confirming and uploading document for owner_id={request.owner_id}, document_id={request.document_id}")
-    
     pipeline = IngestionPipeline()
     page_results = []
     successful_pages = 0
@@ -578,10 +558,6 @@ async def search_documents(request: SearchRequest):
     返回按相似度排序的 document_ids。无意图分类、无对话生成。
     """
     try:
-        logger.info(
-            "Pure search (no LLM): query=%r len=%d owner_id=%d top_k=%d",
-            request.query, len((request.query or "").strip()), request.owner_id, request.top_k,
-        )
         document_ids = await perform_search(
             request.query,
             request.owner_id,
