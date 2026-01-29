@@ -669,11 +669,12 @@ async def chat_with_agent(request: ChatRequest):
             for msg in request.history
         ]
         
-        # Run the chat pipeline
+        # Run the chat pipeline with context if provided
         result = await chat.chat_pipeline.run(
             user_input=request.message,
             owner_id=request.owner_id,
-            history=history_dicts
+            history=history_dicts,
+            context=request.context
         )
         
         return ChatResponse(

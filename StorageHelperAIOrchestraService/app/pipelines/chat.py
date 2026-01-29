@@ -69,10 +69,19 @@ Respond naturally in the same language as the user.
         if is_correction:
              from app.pipelines.correction import correction_pipeline
              items = context.get("data", [])
-             correction_result = await correction_pipeline.run(user_input, items)
+             # Extract metadata from context if available
+             metadata = context.get("metadata", {})
+             
+             # Call correction pipeline with metadata
+             correction_result = await correction_pipeline.run(user_input, items, metadata if metadata else None)
              
              context_msg += f"\n\nCONTEXT: The user is viewing a list of {len(items)} items and wants to CORRECT them."
              context_msg += f"\nCURRENT LIST JSON: {json.dumps(items, indent=2)}"
+             if metadata:
+                 if metadata.get("ocr_text"):
+                     context_msg += f"\nORIGINAL OCR TEXT AVAILABLE: {len(metadata.get('ocr_text', ''))} characters"
+                 if metadata.get("vision_understanding"):
+                     context_msg += "\nVISION UNDERSTANDING AVAILABLE: Yes"
              context_msg += f"\n\nCORRECTION RESULT: {json.dumps(correction_result, indent=2)}"
              context_msg += "\n\nCRITICAL: You have processed the correction."
              context_msg += "\n1. Summarize the changes you made in a friendly way."

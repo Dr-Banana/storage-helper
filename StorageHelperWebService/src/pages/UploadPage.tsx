@@ -475,6 +475,12 @@ const UploadPage = () => {
                     metadata={ingestionResult.recommendation.metadata} 
                     categoryCode={ingestionResult.recommendation.category_code}
                     isEditing={true}
+                    ingestionMetadata={{
+                      ocr_text: ingestionResult.page_results?.[0]?.ocr_text,
+                      vision_understanding: ingestionResult.vision_understanding,
+                      cleaned_text: ingestionResult.extracted_text,
+                      page_results: ingestionResult.page_results
+                    }}
                     onMetadataChange={(newMetadata) => {
                       setIngestionResult({
                         ...ingestionResult,

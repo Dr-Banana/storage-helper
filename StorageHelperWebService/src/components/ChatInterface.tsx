@@ -350,8 +350,20 @@ const ChatInterface: React.FC = () => {
         setTimeout(() => handleSend(e.detail.message, e.detail.context), 100)
       }
     }
+    
+    const handleUpdateCorrectionContext = (e: any) => {
+      // Update activeContext when correction is applied
+      if (e.detail?.context && activeContext?.type === 'correction') {
+        setActiveContext(e.detail.context);
+      }
+    }
+    
     window.addEventListener('open-chat', handleOpenChat)
-    return () => window.removeEventListener('open-chat', handleOpenChat)
+    window.addEventListener('update-correction-context', handleUpdateCorrectionContext)
+    return () => {
+      window.removeEventListener('open-chat', handleOpenChat)
+      window.removeEventListener('update-correction-context', handleUpdateCorrectionContext)
+    }
   }, [userId, messages, isLoading, activeContext]) // 保证 handleSend 里的闭包是最新的
 
   if (!isOpen) {
