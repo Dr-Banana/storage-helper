@@ -36,6 +36,7 @@ def _get_storage_base_url() -> Optional[str]:
     Extract base URL from STORAGE_SERVICE_URL configuration.
     Handles various URL formats:
     - http://localhost:8000/internal -> http://localhost:8000
+    - http://localhost:8000/api/v1 -> http://localhost:8000
     - https://xxx.onrender.com -> https://xxx.onrender.com
     - https://xxx.onrender.com/internal -> https://xxx.onrender.com
     
@@ -44,9 +45,11 @@ def _get_storage_base_url() -> Optional[str]:
     """
     storage_url = settings.STORAGE_SERVICE_URL.rstrip("/")
     
-    # Remove /internal suffix if present
+    # Remove /internal or /api/v1 suffix if present
     if storage_url.endswith("/internal"):
         base_url = storage_url[:-9]  # Remove "/internal"
+    elif storage_url.endswith("/api/v1"):
+        base_url = storage_url[:-7]  # Remove "/api/v1"
     else:
         base_url = storage_url
     
