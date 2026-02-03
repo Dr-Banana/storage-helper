@@ -30,6 +30,8 @@ const DocumentsPage = () => {
   const [viewMode, setViewMode] = useState<'grid' | 'list'>('grid')
   const [filterType, setFilterType] = useState<'all' | 'receipt' | 'food'>('all')
   const [expandedDocs, setExpandedDocs] = useState<Record<number, boolean>>({})
+  const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set())
+  const [isSelectMode, setIsSelectMode] = useState(false)
 
   useEffect(() => {
     const loadDocuments = async () => {
@@ -110,10 +112,43 @@ const DocumentsPage = () => {
     try {
       await documentService.delete(docId)
       setDocuments(prevDocs => prevDocs.filter(doc => doc.id !== docId))
+      setSelectedIds(prev => { const next = new Set(prev); next.delete(docId); return next })
     } catch (error) {
       console.error('Failed to delete document:', error)
       alert('Failed to delete document. Please try again.')
     }
+  }
+
+  const toggleSelect = (e: React.MouseEvent, id: number) => {
+    e.preventDefault()
+    e.stopPropagation()
+    setSelectedIds(prev => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }
+
+  const handleDeleteSelected = async () => {
+    if (selectedIds.size === 0) return
+    if (!window.confirm(`Are you sure you want to delete ${selectedIds.size} document(s)? This action cannot be undone.`)) {
+      return
+    }
+    const ids = Array.from(selectedIds)
+    const results = await Promise.allSettled(ids.map(id => documentService.delete(id)))
+    const failed = results.filter(r => r.status === 'rejected').length
+    setDocuments(prev => prev.filter(doc => !selectedIds.has(doc.id)))
+    setSelectedIds(new Set())
+    setIsSelectMode(false)
+    if (failed > 0) {
+      alert(`Deleted ${ids.length - failed} document(s). Failed to delete ${failed} document(s).`)
+    }
+  }
+
+  const exitSelectMode = () => {
+    setIsSelectMode(false)
+    setSelectedIds(new Set())
   }
 
   const getExpiryStatus = (expiryDate?: string) => {
@@ -232,6 +267,66 @@ const DocumentsPage = () => {
         </div>
       </div>
 
+      {/* Multi-select: entry button or toolbar */}
+      {!loading && filteredDocuments.length > 0 && (
+        <div className="mb-4 min-h-9 flex items-center">
+          {!isSelectMode ? (
+            <button
+              type="button"
+              onClick={() => setIsSelectMode(true)}
+              className="text-sm text-home-primary-600 hover:text-home-primary-700 font-medium"
+            >
+              Select multiple
+            </button>
+          ) : (
+            <div className="flex flex-wrap items-center gap-3 text-sm">
+              <button
+                type="button"
+                onClick={exitSelectMode}
+                className="text-home-text-light hover:text-home-text-dark"
+              >
+                Cancel
+              </button>
+              <label className="flex items-center gap-1.5 cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  checked={filteredDocuments.length > 0 && filteredDocuments.every(d => selectedIds.has(d.id))}
+                  onChange={() => {
+                    if (filteredDocuments.every(d => selectedIds.has(d.id))) {
+                      setSelectedIds(new Set())
+                    } else {
+                      setSelectedIds(new Set(filteredDocuments.map(d => d.id)))
+                    }
+                  }}
+                  onClick={e => e.stopPropagation()}
+                  className="w-3.5 h-3.5 rounded border-home-primary-300 text-home-primary-600 focus:ring-home-primary-500"
+                />
+                <span className="text-home-text-dark">All</span>
+              </label>
+              {selectedIds.size > 0 && (
+                <>
+                  <span className="text-home-text-light">{selectedIds.size} selected</span>
+                  <button
+                    type="button"
+                    onClick={handleDeleteSelected}
+                    className="text-red-600 hover:text-red-700 font-medium"
+                  >
+                    Delete
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setSelectedIds(new Set())}
+                    className="text-home-text-light hover:text-home-text-dark"
+                  >
+                    Clear
+                  </button>
+                </>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+
       {/* Document list */}
       {loading ? (
         <div className="text-center py-20">
@@ -263,8 +358,22 @@ const DocumentsPage = () => {
               <div key={doc.id} className="flex flex-col">
                 <Link
                   to={`/documents/${doc.id}`}
-                  className={`group bg-white rounded-2xl border ${hasChildren ? 'border-home-primary-200' : 'border-home-primary-100'} shadow-sm hover:shadow-home-lg transition-all duration-300 overflow-hidden flex flex-col relative min-h-[320px]`}
+                  className={`group bg-white rounded-2xl border ${hasChildren ? 'border-home-primary-200' : 'border-home-primary-100'} shadow-sm hover:shadow-home-lg transition-all duration-300 overflow-hidden flex flex-col relative min-h-[320px] ${isSelectMode && selectedIds.has(doc.id) ? 'ring-1 ring-home-primary-400 ring-offset-1' : ''}`}
                 >
+                  {isSelectMode && (
+                    <label
+                      className="absolute top-3 left-3 z-20 flex items-center justify-center w-6 h-6 rounded border border-home-primary-200/80 bg-white/80 cursor-pointer hover:border-home-primary-400/90 transition-colors"
+                      onClick={(e) => toggleSelect(e, doc.id)}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={selectedIds.has(doc.id)}
+                        onChange={() => {}}
+                        onClick={(e) => e.stopPropagation()}
+                        className="w-3.5 h-3.5 rounded border-home-primary-300 text-home-primary-600 focus:ring-0 pointer-events-none"
+                      />
+                    </label>
+                  )}
                   {/* Delete button (hover only) */}
                   <button
                     onClick={(e) => handleDelete(e, doc.id)}
@@ -358,11 +467,25 @@ const DocumentsPage = () => {
                 {hasChildren && isExpanded && (
                   <div className="mt-2 bg-home-primary-50/30 rounded-xl border border-home-primary-100 overflow-hidden divide-y divide-home-primary-100 max-h-[400px] overflow-y-auto">
                     {doc.children.map((child) => (
-                      <Link 
-                        key={child.id} 
-                        to={`/documents/${child.id}`}
-                        className="flex items-center gap-3 p-2 hover:bg-white transition-colors group/child"
-                      >
+                      <div key={child.id} className="flex items-center gap-3 p-2 hover:bg-white transition-colors group/child">
+                        {isSelectMode && (
+                          <label
+                            className="flex-shrink-0 flex items-center justify-center w-6 h-6 cursor-pointer rounded border border-home-primary-200/80 hover:border-home-primary-400/90 transition-colors"
+                            onClick={(e) => toggleSelect(e, child.id)}
+                          >
+                            <input
+                              type="checkbox"
+                              checked={selectedIds.has(child.id)}
+                              onChange={() => {}}
+                              onClick={(e) => e.stopPropagation()}
+                              className="w-3.5 h-3.5 rounded border-home-primary-300 text-home-primary-600 focus:ring-0 pointer-events-none"
+                            />
+                          </label>
+                        )}
+                        <Link 
+                          to={`/documents/${child.id}`}
+                          className="flex-1 flex items-center gap-3 min-w-0"
+                        >
                         <div className="w-8 h-8 rounded-lg bg-home-background-dark overflow-hidden flex-shrink-0 flex items-center justify-center">
                           {child.image_url ? (
                             <img src={child.image_url} className="w-full h-full object-cover" />
@@ -379,7 +502,8 @@ const DocumentsPage = () => {
                           </p>
                         </div>
                         <ChevronRight size={12} className="text-home-primary-300 group-hover/child:text-home-primary-500 flex-shrink-0" />
-                      </Link>
+                        </Link>
+                      </div>
                     ))}
                   </div>
                 )}
@@ -399,7 +523,21 @@ const DocumentsPage = () => {
               
               return (
                 <div key={doc.id} className="flex flex-col">
-                  <div className="flex items-center gap-4 p-4 hover:bg-home-primary-50 transition-colors group relative">
+                  <div className={`flex items-center gap-4 p-4 hover:bg-home-primary-50 transition-colors group relative ${isSelectMode && selectedIds.has(doc.id) ? 'bg-home-primary-50/50' : ''}`}>
+                    {isSelectMode && (
+                      <label
+                        className="flex-shrink-0 flex items-center justify-center w-7 h-7 cursor-pointer rounded border border-home-primary-200/80 hover:border-home-primary-400/90 transition-colors"
+                        onClick={(e) => toggleSelect(e, doc.id)}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={selectedIds.has(doc.id)}
+                          onChange={() => {}}
+                          onClick={(e) => e.stopPropagation()}
+                          className="w-3.5 h-3.5 rounded border-home-primary-300 text-home-primary-600 focus:ring-0 pointer-events-none"
+                        />
+                      </label>
+                    )}
                     <Link
                       to={`/documents/${doc.id}`}
                       className="flex-1 flex items-center gap-4 min-w-0"
@@ -462,11 +600,28 @@ const DocumentsPage = () => {
                   {hasChildren && isExpanded && (
                     <div className="bg-home-background-light/50 border-t border-home-primary-50">
                       {doc.children.map((child) => (
-                        <Link
+                        <div
                           key={child.id}
-                          to={`/documents/${child.id}`}
-                          className="flex items-center gap-4 p-3 pl-12 hover:bg-home-primary-50/50 transition-colors group/child"
+                          className={`flex items-center gap-4 p-3 pl-12 hover:bg-home-primary-50/50 transition-colors group/child ${isSelectMode && selectedIds.has(child.id) ? 'bg-home-primary-50/30' : ''}`}
                         >
+                          {isSelectMode && (
+                            <label
+                              className="flex-shrink-0 flex items-center justify-center w-6 h-6 cursor-pointer -ml-8 rounded border border-home-primary-200/80 hover:border-home-primary-400/90 transition-colors"
+                              onClick={(e) => toggleSelect(e, child.id)}
+                            >
+                              <input
+                                type="checkbox"
+                                checked={selectedIds.has(child.id)}
+                                onChange={() => {}}
+                                onClick={(e) => e.stopPropagation()}
+                                className="w-3.5 h-3.5 rounded border-home-primary-300 text-home-primary-600 focus:ring-0 pointer-events-none"
+                              />
+                            </label>
+                          )}
+                          <Link
+                            to={`/documents/${child.id}`}
+                            className="flex-1 flex items-center gap-4 min-w-0"
+                          >
                           <div className="w-8 h-8 rounded-lg bg-home-background-dark overflow-hidden flex-shrink-0 flex items-center justify-center">
                             {child.image_url ? (
                               <img src={child.image_url} className="w-full h-full object-cover" />
@@ -489,7 +644,8 @@ const DocumentsPage = () => {
                             </div>
                             <ChevronRight size={16} className="text-home-primary-200 group-hover/child:text-home-primary-400" />
                           </div>
-                        </Link>
+                          </Link>
+                        </div>
                       ))}
                     </div>
                   )}
