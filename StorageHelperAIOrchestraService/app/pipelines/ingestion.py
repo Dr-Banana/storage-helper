@@ -957,13 +957,16 @@ async def run_unified_ingestion_pipeline(
             file_type_for_task = detected_type
 
             # Upload original file once, all pages share the same image_url
+            # In preview mode, upload to tmp/ folder (can be cleaned up if not confirmed)
             file_image_url: Optional[str] = None
             upload_error: Optional[str] = None
             try:
-                logger.info(f"Uploading original file for unified ingestion: {file_url}")
+                upload_mode = "temporary (preview)" if preview_mode else "permanent"
+                logger.info(f"Uploading original file for unified ingestion ({upload_mode}): {file_url}")
                 file_image_url = await pipeline.pipeline_storage.upload_file_only(
                     file_path=file_url,
-                    owner_id=owner_id
+                    owner_id=owner_id,
+                    is_temporary=preview_mode
                 )
                 if not file_image_url:
                     upload_error = "File upload to DataStorageService failed"
@@ -986,6 +989,7 @@ async def run_unified_ingestion_pipeline(
                     temp_files.append(temp_dir)
                     
                     # For PDF, upload first page as preview image
+                    # In preview mode, upload to tmp/ folder (can be cleaned up if not confirmed)
                     first_page_image_url: Optional[str] = None
                     if pdf_result.pages:
                         try:
@@ -994,9 +998,12 @@ async def run_unified_ingestion_pipeline(
                             first_page_image.save(first_page_temp, "PNG")
                             
                             # Upload first page as preview
+                            upload_mode = "temporary (preview)" if preview_mode else "permanent"
+                            logger.info(f"Uploading PDF first page as preview ({upload_mode})")
                             first_page_image_url = await pipeline.pipeline_storage.upload_file_only(
                                 file_path=first_page_temp,
-                                owner_id=owner_id
+                                owner_id=owner_id,
+                                is_temporary=preview_mode
                             )
                             logger.info(f"PDF first page uploaded as preview: {first_page_image_url}")
                         except Exception as e:

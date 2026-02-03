@@ -11,12 +11,15 @@
 3. **Search Support**: Store document embeddings for semantic search queries
 4. **User Management**: Multi-user support with proper data isolation
 5. **Feedback Collection**: Record user feedback for continuous system improvement
+6. **File Storage Management**: Handle document file storage with temporary/permanent lifecycle management
 
 **Technology Stack:**
-- **Database**: MySQL 8.0+
-- **Framework**: FastAPI (Python) or similar REST framework
-- **ORM**: SQLAlchemy (if using Python)
-- **File Storage**: Local or cloud-based storage for images and documents
+- **Database**: PostgreSQL (with pgvector extension for embeddings)
+- **Framework**: FastAPI (Python)
+- **ORM**: SQLAlchemy
+- **File Storage**: 
+  - Local filesystem (development: `./tmp`)
+  - Supabase Storage (production/preprod: cloud-based with S3-compatible API)
 
 ---
 
@@ -250,7 +253,274 @@ document (1) ──→ (N) feedback_message
 
 ---
 
-## 3. API Interface Contract
+## 3. File Storage Strategy
+
+### 3.1 Storage Backend Selection
+
+The service supports two storage backends based on environment:
+
+| Environment | Storage Backend | Configuration |
+|-------------|----------------|---------------|
+| **Local (dev)** | Local filesystem | `APP_ENV=local`, `STORAGE_LOCAL_PATH=./tmp` |
+| **Preprod/Prod** | Supabase Storage (Cloud) | `APP_ENV=prod/preprod`, `SUPABASE_URL`, `SUPABASE_KEY`, `SUPABASE_BUCKET` |
+
+**Code Location**: `app/integrations/storage_client.py`
+
+```python
+if settings.APP_ENV in ("prod", "preprod"):
+    return cls._upload_to_supabase(file_content, full_path)
+else:
+    return cls._upload_to_local(file_content, full_path)
+```
+
+---
+
+### 3.2 Temporary File Management
+
+To prevent storage waste from abandoned uploads, the service implements a two-stage file lifecycle:
+
+#### Preview Stage (Temporary Storage)
+When users upload files for AI processing but haven't confirmed:
+- Files are stored in **temporary folders** with `tmp/` prefix
+- These files can be automatically cleaned up if not confirmed within retention period (default: 7 days)
+
+#### Confirm Stage (Permanent Storage)
+When users confirm and save to database:
+- Files are automatically **moved from temporary to permanent storage**
+- The `tmp/` prefix is removed from the path
+- Database records are created with permanent file paths
+
+---
+
+### 3.3 File Path Structure
+
+#### Local Environment (APP_ENV=local)
+
+```
+./tmp/                                    # STORAGE_LOCAL_PATH
+├── tmp/                                  # Temporary files root
+│   └── documents/
+│       └── {user_id}/
+│           └── pages/
+│               └── {uuid}.jpg           # Preview uploads (7 days TTL)
+└── documents/                            # Permanent files root
+    └── {user_id}/
+        └── pages/
+            └── {uuid}.jpg               # Confirmed uploads (persistent)
+```
+
+**File Path Examples:**
+- Temporary: `E:\storage-helper\StorageHelperDataStorageService\tmp\tmp\documents\1\pages\abc-123.jpg`
+- Permanent: `E:\storage-helper\StorageHelperDataStorageService\tmp\documents\1\pages\abc-123.jpg`
+
+#### Production Environment (APP_ENV=prod/preprod)
+
+```
+Supabase Bucket: "documents"
+├── tmp/                                  # Temporary files root
+│   └── documents/
+│       └── {user_id}/
+│           └── pages/
+│               └── {uuid}.jpg           # Preview uploads (7 days TTL)
+└── documents/                            # Permanent files root
+    └── {user_id}/
+        └── pages/
+            └── {uuid}.jpg               # Confirmed uploads (persistent)
+```
+
+**URL Examples:**
+- Temporary: `https://xxx.supabase.co/storage/v1/object/public/documents/tmp/documents/1/pages/abc-123.jpg`
+- Permanent: `https://xxx.supabase.co/storage/v1/object/public/documents/documents/1/pages/abc-123.jpg`
+
+---
+
+### 3.4 Temporary File Cleanup Service
+
+#### Current Implementation
+**Script Location**: `scripts/cleanup_temp_files.py`
+
+**Features:**
+- Deletes temporary files older than configurable threshold (default: 7 days)
+- Supports both local filesystem and Supabase Storage
+- Auto-detects environment based on `APP_ENV`
+
+**Usage:**
+```bash
+# Clean up files older than 7 days (default)
+python scripts/cleanup_temp_files.py
+
+# Custom threshold
+python scripts/cleanup_temp_files.py --days 3
+```
+
+**Scheduled Execution (Recommended):**
+```bash
+# Cron job (Linux/Mac) - Daily at 2 AM
+0 2 * * * cd /path/to/service && python scripts/cleanup_temp_files.py
+
+# Task Scheduler (Windows) - Daily at 2 AM
+# Create task with action: python scripts\cleanup_temp_files.py
+
+# Docker/Kubernetes CronJob
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: storage-cleanup
+spec:
+  schedule: "0 2 * * *"
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          containers:
+          - name: cleanup
+            image: storage-service:latest
+            command: ["python", "scripts/cleanup_temp_files.py"]
+```
+
+---
+
+### 3.5 Future Enhancement: Dedicated Cleanup Service
+
+#### Design Considerations for Future Service
+
+**Option 1: Microservice Approach**
+- Create standalone `StorageHelperCleanupService`
+- Runs as scheduled job (cron/k8s CronJob)
+- Communicates with DataStorageService via API
+
+**Option 2: Internal Background Task**
+- Integrate cleanup as FastAPI background task
+- Use APScheduler or similar scheduler
+- Runs within DataStorageService process
+
+**Recommended Architecture (Option 1):**
+
+```
+┌──────────────────────────────────┐
+│  StorageHelperCleanupService     │
+│  (Dedicated microservice)        │
+│                                  │
+│  - Scheduled execution           │
+│  - Cleanup temp files            │
+│  - Cleanup orphaned files        │
+│  - Generate cleanup reports      │
+│  - Send notifications            │
+└──────────────────────────────────┘
+         │
+         │ REST API / Direct Storage Access
+         ↓
+┌──────────────────────────────────┐
+│  Storage Backend                 │
+│  - Supabase Storage (prod)       │
+│  - Local filesystem (dev)        │
+└──────────────────────────────────┘
+         │
+         │ Query metadata
+         ↓
+┌──────────────────────────────────┐
+│  StorageHelperDataStorageService │
+│  (Database queries)              │
+└──────────────────────────────────┘
+```
+
+**Key Features for Future Service:**
+1. **Smart Cleanup**
+   - Check if files are referenced in database before deletion
+   - Detect orphaned files (storage exists but no DB record)
+   - Handle failed uploads (incomplete records)
+
+2. **Monitoring & Reporting**
+   - Track cleanup metrics (files deleted, space reclaimed)
+   - Alert on anomalies (sudden spike in temp files)
+   - Generate periodic reports
+
+3. **Configurable Policies**
+   - Per-user retention policies
+   - Different TTL for different file types
+   - Grace period for new uploads
+
+4. **Garbage Collection**
+   - Find and remove orphaned files (no DB reference)
+   - Clean up database records with missing files
+   - Reconcile storage and database state
+
+**API Endpoints for Cleanup Service:**
+```
+POST /api/v1/cleanup/run
+  - Trigger manual cleanup
+  - Input: { "retention_days": 7, "dry_run": false }
+
+GET /api/v1/cleanup/status
+  - Get last cleanup status
+  - Output: { "last_run": "2025-01-01T02:00:00Z", "files_deleted": 42, "space_reclaimed_mb": 125 }
+
+POST /api/v1/cleanup/reconcile
+  - Reconcile storage and database
+  - Find orphaned files and missing files
+```
+
+**Database Tables for Cleanup Service:**
+```sql
+CREATE TABLE cleanup_history (
+    id INT PRIMARY KEY AUTO_INCREMENT,
+    cleanup_type VARCHAR(50),        -- "temporary", "orphaned", "manual"
+    files_scanned INT,
+    files_deleted INT,
+    space_reclaimed_bytes BIGINT,
+    retention_days INT,
+    started_at TIMESTAMP,
+    completed_at TIMESTAMP,
+    status VARCHAR(20),              -- "success", "failed", "partial"
+    error_message TEXT
+);
+
+CREATE TABLE orphaned_files (
+    id INT PRIMARY KEY AUTO_INCREMENT,
+    file_path TEXT,
+    file_size_bytes BIGINT,
+    detected_at TIMESTAMP,
+    resolved_at TIMESTAMP,
+    resolution_action VARCHAR(50)    -- "deleted", "restored", "ignored"
+);
+```
+
+**Environment Variables for Cleanup Service:**
+```env
+# Storage access
+APP_ENV=prod
+SUPABASE_URL=...
+SUPABASE_KEY=...
+SUPABASE_BUCKET=documents
+
+# Cleanup policies
+CLEANUP_RETENTION_DAYS=7
+CLEANUP_SCHEDULE="0 2 * * *"
+CLEANUP_DRY_RUN=false
+
+# DataStorage API (for metadata queries)
+STORAGE_SERVICE_URL=http://storage-service:8000
+
+# Monitoring
+CLEANUP_ALERT_THRESHOLD_MB=1000
+CLEANUP_REPORT_EMAIL=admin@example.com
+```
+
+**Implementation Checklist for Future Service:**
+- [ ] Create new microservice repository
+- [ ] Implement storage backend connectors (Supabase + Local)
+- [ ] Add database query integration with DataStorageService
+- [ ] Implement cleanup policies and scheduling
+- [ ] Add orphaned file detection
+- [ ] Implement monitoring and alerting
+- [ ] Add API endpoints for manual operations
+- [ ] Create dashboard for cleanup metrics
+- [ ] Write comprehensive tests
+- [ ] Document deployment procedures
+
+---
+
+## 4. API Interface Contract
 
 ### 3.1 Document Operations
 
@@ -437,26 +707,38 @@ Output:
 
 ---
 
-## 4. Implementation Checklist
+## 5. Implementation Checklist
 
-- [ ] Database schema creation and initialization
-- [ ] FastAPI application setup
-- [ ] User management endpoints
-- [ ] Document CRUD operations
-- [ ] Category management
-- [ ] Location hierarchy support
-- [ ] Embedding storage and retrieval
-- [ ] Feedback collection
-- [ ] Multi-user isolation and authentication
-- [ ] API documentation (OpenAPI/Swagger)
-- [ ] Database migration scripts
-- [ ] Error handling and validation
-- [ ] Logging and monitoring
-- [ ] Unit and integration tests
+### Core Features
+- [x] Database schema creation and initialization
+- [x] FastAPI application setup
+- [x] User management endpoints
+- [x] Document CRUD operations
+- [x] Category management
+- [x] Location hierarchy support
+- [x] Embedding storage and retrieval
+- [x] Feedback collection
+- [x] Multi-user isolation and authentication
+- [x] API documentation (OpenAPI/Swagger)
+- [x] Database migration scripts
+- [x] Error handling and validation
+- [x] Logging and monitoring
+- [x] Unit and integration tests
+
+### File Storage Features
+- [x] Storage backend abstraction (local + Supabase)
+- [x] Temporary file upload (preview mode)
+- [x] File lifecycle management (temp → permanent)
+- [x] Automatic file movement on confirm
+- [x] Cleanup script for temporary files
+- [ ] Scheduled cleanup job (cron/systemd)
+- [ ] Orphaned file detection
+- [ ] Storage metrics and monitoring
+- [ ] Dedicated cleanup microservice (future)
 
 ---
 
-## 5. Design Principles
+## 6. Design Principles
 
 1. **Data Integrity**: Foreign key constraints enforce referential integrity
 2. **Multi-user Safety**: All operations must filter by `owner_id`
@@ -470,8 +752,9 @@ Output:
 
 ---
 
-## 6. Future Enhancements
+## 7. Future Enhancements
 
+### Data & API Enhancements
 - [ ] Tag-based organization (separate from categories)
 - [ ] Sharing/permission system for documents and locations
 - [ ] Bulk operations (update multiple documents)
@@ -479,3 +762,12 @@ Output:
 - [ ] Archival/soft delete for historical documents
 - [ ] Audit logs for all data modifications
 - [ ] Backup and recovery procedures
+
+### File Storage Enhancements
+- [ ] Dedicated cleanup microservice (see Section 3.5)
+- [ ] Storage quota management per user
+- [ ] Intelligent file compression
+- [ ] CDN integration for faster file access
+- [ ] File versioning support
+- [ ] Automated backup to secondary storage
+- [ ] Storage analytics dashboard

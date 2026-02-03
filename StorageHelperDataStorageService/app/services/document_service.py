@@ -396,7 +396,8 @@ class DocumentService:
     def upload_file_only(
         file_content: BytesIO,
         filename: str,
-        owner_id: int
+        owner_id: int,
+        is_temporary: bool = False
     ) -> str:
         """
         Upload file to storage and return image_url (no database operations)
@@ -408,6 +409,7 @@ class DocumentService:
             file_content: Image file content (BytesIO)
             filename: Original filename
             owner_id: Document owner user ID (for folder organization)
+            is_temporary: If True, upload to tmp/ folder for preview (can be deleted if not confirmed)
             
         Returns:
             image_url of the uploaded file
@@ -417,15 +419,17 @@ class DocumentService:
         """
         try:
             # Upload image file to storage
-            logger.info(f"Uploading file to storage: filename={filename}, owner_id={owner_id}")
+            upload_type = "temporary (preview)" if is_temporary else "permanent"
+            logger.info(f"Uploading file to storage ({upload_type}): filename={filename}, owner_id={owner_id}")
             image_url = StorageClient.upload_image(
                 file_content=file_content,
                 filename=filename,
-                folder=f"documents/{owner_id}/pages"
+                folder=f"documents/{owner_id}/pages",
+                is_temporary=is_temporary
             )
             
             logger.info(f"File uploaded to storage. URL: {image_url}")
-            logger.info(f"URL type: {'Supabase' if image_url.startswith('http') else 'Local'}")
+            logger.info(f"URL type: {'Supabase' if image_url.startswith('http') else 'Local'}, temporary={is_temporary}")
             return image_url
             
         except Exception as e:
@@ -484,7 +488,7 @@ class DocumentService:
         
         Args:
             db: Database session
-            image_url: URL of already-uploaded image file
+            image_url: URL of already-uploaded image file (may be temporary)
             owner_id: Document owner user ID
             page_number: Page number within document
             ocr_text: Optional extracted OCR text for this page
@@ -500,6 +504,32 @@ class DocumentService:
             ValueError: If operation fails
         """
         try:
+            # Check if image is temporary (in tmp/ folder) and move to permanent storage
+            is_temporary = False
+            if image_url:
+                # Normalize path separators for cross-platform compatibility
+                normalized_url = image_url.replace("\\", "/")
+                
+                # Check if URL contains tmp/ prefix (for both Supabase and local storage)
+                # For local storage, check for double "tmp" pattern: /tmp/tmp/ (avoids false positives with STORAGE_LOCAL_PATH=./tmp)
+                # For Supabase URLs, check for /tmp/documents/ pattern
+                # For relative paths, check if it starts with tmp/
+                if (
+                    normalized_url.startswith("tmp/") or  # Relative path starting with tmp/
+                    "/tmp/tmp/" in normalized_url or      # Local: ./tmp/tmp/documents/... (temporary)
+                    ("/tmp/documents/" in normalized_url and normalized_url.startswith("http"))  # Supabase: .../tmp/documents/... (temporary)
+                ):
+                    is_temporary = True
+                    logger.info(f"Detected temporary image, moving to permanent storage: {image_url}")
+                    try:
+                        permanent_url = StorageClient.move_from_temp(image_url)
+                        logger.info(f"Successfully moved to permanent storage: {permanent_url}")
+                        image_url = permanent_url
+                    except Exception as e:
+                        logger.error(f"Failed to move temporary image to permanent storage: {e}")
+                        # Continue with temporary URL - better than failing completely
+                        logger.warning(f"Continuing with temporary URL: {image_url}")
+            
             # Verify user exists
             user = db.query(User).filter(User.id == owner_id).first()
             if not user:

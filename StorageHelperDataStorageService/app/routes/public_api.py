@@ -31,17 +31,24 @@ router = APIRouter(prefix="/api/v1", tags=["public-api"])
     Returns image_url for later use in /documents/process endpoint.
     
     No database operations - purely file storage.
+    
+    Supports temporary upload mode for preview workflows:
+    - If is_temporary=true, file is uploaded to tmp/ folder
+    - These files can be automatically cleaned up if not confirmed within a week
+    - When confirmed via /documents/process, they are moved to permanent storage
     """
 )
 def upload_document_image(
     file: UploadFile = File(..., description="Document page image file"),
     owner_id: int = Form(..., description="Document owner user ID"),
+    is_temporary: bool = Form(False, description="If true, upload to tmp/ folder for preview (can be cleaned up later)"),
 ):
     """
     Upload document page image to storage.
     
     - **file**: Document page image file (required)
     - **owner_id**: Document owner user ID (required)
+    - **is_temporary**: If true, upload to tmp/ folder for preview (default: false)
     
     Returns image_url for use in /documents/process endpoint
     """
@@ -53,12 +60,14 @@ def upload_document_image(
         image_url = DocumentService.upload_file_only(
             file_content=file_content,
             filename=file.filename,
-            owner_id=owner_id
+            owner_id=owner_id,
+            is_temporary=is_temporary
         )
         
         return {
             "image_url": image_url,
-            "filename": file.filename
+            "filename": file.filename,
+            "is_temporary": is_temporary
         }
         
     except ValueError as e:

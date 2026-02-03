@@ -257,10 +257,19 @@ class PipelineStorage:
     async def upload_file_only(
         self,
         file_path: str,
-        owner_id: int
+        owner_id: int,
+        is_temporary: bool = False
     ) -> Optional[str]:
         """
         Upload document file to DataStorageService and get image_url.
+        
+        Args:
+            file_path: Local file path to upload
+            owner_id: Document owner user ID
+            is_temporary: If True, upload to tmp/ folder for preview (can be cleaned up later)
+        
+        Returns:
+            Image URL of uploaded file, or None if upload failed
         """
         # Build the full endpoint URL safely
         endpoint_path = "/documents/upload"
@@ -279,7 +288,8 @@ class PipelineStorage:
         full_url = f"{base_url}{api_prefix}{endpoint_path}"
         
         try:
-            logger.info(f"Uploading file to DataStorageService: {full_url}")
+            upload_mode = "temporary (preview)" if is_temporary else "permanent"
+            logger.info(f"Uploading file to DataStorageService ({upload_mode}): {full_url}")
             
             # Read file content
             file_content = await self._read_file_content(file_path)
@@ -289,7 +299,7 @@ class PipelineStorage:
             
             # Determine filename from path
             filename = Path(file_path).name if file_path else "document"
-            logger.info(f"  Filename: {filename}")
+            logger.info(f"  Filename: {filename}, temporary: {is_temporary}")
             
             # Prepare multipart form data for upload
             files = {
@@ -297,7 +307,8 @@ class PipelineStorage:
             }
             # FastAPI Form fields expect string values, which are then converted to the declared type
             upload_data = {
-                "owner_id": str(owner_id)
+                "owner_id": str(owner_id),
+                "is_temporary": "true" if is_temporary else "false"
             }
             
             async with httpx.AsyncClient(base_url=base_url, timeout=30.0) as client:
