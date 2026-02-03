@@ -1,9 +1,10 @@
-version: '3.8'
-
 services:
   postgres:
     image: pgvector/pgvector:pg16
-    container_name: storage-helper-db
+    container_name: storage-helper-db-${APP_ENV:-local}
+    # Only start postgres in LOCAL mode (has profile 'local')
+    profiles:
+      - local
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: root
@@ -12,7 +13,7 @@ services:
       - "5432:5432"
     volumes:
       - ./schema.sql:/docker-entrypoint-initdb.d/schema.sql
-      - postgres_data:/var/lib/postgresql/data
+      - postgres_data_${APP_ENV:-local}:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]
       interval: 10s
@@ -25,38 +26,37 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: storage-helper-api
+    container_name: storage-helper-api-${APP_ENV:-local}
     ports:
       - "8000:8000"
-    # Load environment variables from files if they exist
-    # Docker uses the first value found, so preprod overrides local if both exist
     env_file:
-      - .env.local
-      - .env.preprod
-      - .env.prod
+      # Load the appropriate .env file based on APP_ENV
+      - .env.${APP_ENV:-local}
     environment:
-      # Allow overriding via shell environment variables
+      # APP_ENV is passed from shell (local or preprod)
       - APP_ENV=${APP_ENV:-local}
-      # Default fallbacks if not in .env files
-      - DATABASE_URL=${DATABASE_URL:-postgresql://postgres:root@postgres:5432/storage_helper}
-      - STORAGE_LOCAL_PATH=${STORAGE_LOCAL_PATH:-./tmp}
-      - LOG_LEVEL=${LOG_LEVEL:-INFO}
       - API_HOST=0.0.0.0
       - API_PORT=8000
       - API_RELOAD=false
     volumes:
       - ./app:/app/app
       - ./tmp:/app/tmp
+      # Mount .env file so config.py can verify its existence (optional for DataStorage, but good practice)
+      - ./.env.${APP_ENV:-local}:/app/.env.${APP_ENV:-local}:ro
+    # Only depend on postgres in LOCAL mode
     depends_on:
       postgres:
         condition: service_healthy
+        required: false
     networks:
       - storage-network
     command: uvicorn main:app --host 0.0.0.0 --port 8000
 
 volumes:
-  postgres_data:
+  postgres_data_local:
+  postgres_data_preprod:
 
 networks:
   storage-network:
     driver: bridge
+    name: storagehelperdatastorageservice_storage-network-${APP_ENV:-local}

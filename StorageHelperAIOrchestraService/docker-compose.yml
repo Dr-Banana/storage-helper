@@ -1,26 +1,33 @@
-version: '3.8'
-
 services:
   ai-orchestra-service:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: storage-helper-ai-orchestra
+    container_name: storage-helper-ai-orchestra-${APP_ENV:-local}
     ports:
       - "8888:8888"
     environment:
-      # 必须设置的环境变量（使用 local 环境，会读取 .env.local 文件）
-      - APP_ENV=local
+      # APP_ENV is passed from shell (local or preprod)
+      - APP_ENV=${APP_ENV:-local}
+    env_file:
+      # Load the appropriate .env file based on APP_ENV
+      - .env.${APP_ENV:-local}
     volumes:
       - ./app:/app/app
-      # 挂载临时文件目录（可选，用于持久化）
       - ./tmp:/app/tmp
-      # 挂载 .env.local 配置文件
-      - ./.env.local:/app/.env.local:ro
+      # Mount .env file so config.py can verify its existence
+      - ./.env.${APP_ENV:-local}:/app/.env.${APP_ENV:-local}:ro
     restart: unless-stopped
+    networks:
+      - storage-network
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8888/').read()"]
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 40s
+
+networks:
+  storage-network:
+    external: true
+    name: storagehelperdatastorageservice_storage-network-${APP_ENV:-local}
