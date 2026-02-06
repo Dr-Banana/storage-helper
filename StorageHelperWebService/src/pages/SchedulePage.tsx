@@ -1,5 +1,5 @@
-import React, { useState, useEffect, useCallback } from 'react';
-import { Calendar, Plus, Clock, MapPin, Edit2, Trash2, CheckCircle2, Circle, ChevronLeft, ChevronRight } from 'lucide-react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
+import { Calendar, Plus, Clock, MapPin, Edit2, Trash2, CheckCircle2, Circle, ChevronLeft, ChevronRight, Utensils, ShoppingBag } from 'lucide-react';
 import ScheduleService, { Schedule, CreateScheduleRequest } from '../api/scheduleService';
 import clsx from 'clsx';
 
@@ -13,11 +13,24 @@ const SchedulePage: React.FC = () => {
   const [showModal, setShowModal] = useState(false);
   const [editingSchedule, setEditingSchedule] = useState<Schedule | null>(null);
   const [filterStatus, setFilterStatus] = useState<string>('all');
+  const fetchSchedulesRef = useRef<(silent?: boolean) => Promise<void>>();
+  const isInitialLoadRef = useRef(true);
+  const lastFetchTimeRef = useRef<number>(0);
 
   // Fetch schedules for the selected month
-  const fetchSchedules = useCallback(async () => {
-    setLoading(true);
+  const fetchSchedules = useCallback(async (silent: boolean = false) => {
+    // Debounce: prevent multiple requests within 1 second
+    const now = Date.now();
+    if (now - lastFetchTimeRef.current < 1000) {
+      return;
+    }
+    lastFetchTimeRef.current = now;
+
+    if (!silent) {
+      setLoading(true);
+    }
     setError(null);
+    
     try {
       const year = selectedMonth.getFullYear();
       const month = selectedMonth.getMonth();
@@ -28,18 +41,59 @@ const SchedulePage: React.FC = () => {
         startDate.toISOString(),
         endDate.toISOString()
       );
-      setSchedules(data);
+      
+      // Only update if data actually changed (avoid unnecessary re-renders)
+      setSchedules(prevSchedules => {
+        if (JSON.stringify(prevSchedules) === JSON.stringify(data)) {
+          return prevSchedules;
+        }
+        return data;
+      });
     } catch (err) {
       setError('Failed to fetch schedules');
       console.error(err);
     } finally {
-      setLoading(false);
+      if (!silent) {
+        setLoading(false);
+      }
     }
   }, [selectedMonth]);
 
+  // Update ref whenever fetchSchedules changes
   useEffect(() => {
-    fetchSchedules();
+    fetchSchedulesRef.current = fetchSchedules;
   }, [fetchSchedules]);
+
+  // Initial fetch on mount and when selectedMonth changes
+  useEffect(() => {
+    if (isInitialLoadRef.current) {
+      fetchSchedules(false); // Show loading on first load
+      isInitialLoadRef.current = false;
+    } else {
+      fetchSchedules(false); // Show loading when changing months
+    }
+  }, [fetchSchedules]);
+
+  // Listen for real-time schedule updates (set up once on mount)
+  useEffect(() => {
+    const handleScheduleUpdate = () => {
+      console.log('[SchedulePage] Received schedule-updated event, refreshing silently...');
+      fetchSchedulesRef.current?.(true); // Silent refresh
+    };
+
+    window.addEventListener('schedule-updated', handleScheduleUpdate);
+    
+    // Auto-refresh every 60 seconds (silent) to catch updates from other tabs/devices
+    const autoRefreshInterval = setInterval(() => {
+      console.log('[SchedulePage] Auto-refresh (60s interval, silent)');
+      fetchSchedulesRef.current?.(true); // Silent refresh
+    }, 60000);
+
+    return () => {
+      window.removeEventListener('schedule-updated', handleScheduleUpdate);
+      clearInterval(autoRefreshInterval);
+    };
+  }, []); // Empty deps - only run once on mount
 
   // Filter schedules by status
   useEffect(() => {
@@ -53,7 +107,7 @@ const SchedulePage: React.FC = () => {
   const handleCreateSchedule = async (formData: CreateScheduleRequest) => {
     try {
       await ScheduleService.createSchedule(formData);
-      await fetchSchedules();
+      await fetchSchedules(true); // Silent refresh
       setShowModal(false);
       setEditingSchedule(null);
     } catch (err) {
@@ -65,7 +119,7 @@ const SchedulePage: React.FC = () => {
   const handleUpdateSchedule = async (id: number, formData: CreateScheduleRequest) => {
     try {
       await ScheduleService.updateSchedule(id, formData);
-      await fetchSchedules();
+      await fetchSchedules(true); // Silent refresh
       setShowModal(false);
       setEditingSchedule(null);
     } catch (err) {
@@ -78,7 +132,7 @@ const SchedulePage: React.FC = () => {
     if (!window.confirm('Are you sure you want to delete this schedule?')) return;
     try {
       await ScheduleService.deleteSchedule(id);
-      await fetchSchedules();
+      await fetchSchedules(true); // Silent refresh
     } catch (err) {
       setError('Failed to delete schedule');
       console.error(err);
@@ -89,7 +143,7 @@ const SchedulePage: React.FC = () => {
     const newStatus = schedule.status === 'completed' ? 'pending' : 'completed';
     try {
       await ScheduleService.updateScheduleStatus(schedule.id, newStatus);
-      await fetchSchedules();
+      await fetchSchedules(true); // Silent refresh
     } catch (err) {
       setError('Failed to update status');
       console.error(err);
@@ -173,28 +227,47 @@ const SchedulePage: React.FC = () => {
           </div>
         </div>
 
-        {/* Schedules List */}
-        {loading ? (
-          <div className="bg-white rounded-xl shadow-md border border-gray-100 p-12 text-center">
-            <div className="animate-spin text-indigo-600 mb-4 flex justify-center">
-              <Calendar size={48} />
-            </div>
-            <p className="text-gray-600 font-medium">Loading schedules...</p>
-          </div>
-        ) : (
-          <div>
-            {filteredSchedules.length === 0 ? (
-              <div className="bg-white rounded-xl shadow-md border border-gray-100 p-12 text-center">
-                <Calendar size={48} className="mx-auto text-gray-300 mb-4" />
-                <p className="text-gray-600 text-lg font-medium">No schedules found</p>
-                <p className="text-gray-500 text-sm mt-2">
-                  {filterStatus !== 'all'
-                    ? `No ${filterStatus} schedules in ${monthYear}`
-                    : 'Create your first schedule to get started'}
-                </p>
+        {/* Schedules List Container with Overlay */}
+        <div className="relative min-h-[400px]">
+          
+          {/* Loading Overlay - covers content without unmounting */}
+          {loading && (
+            <div className={clsx(
+              "absolute inset-0 z-20 flex flex-col items-center justify-center rounded-xl transition-all duration-300",
+              schedules.length === 0 ? "bg-white" : "bg-white/60 backdrop-blur-[2px]"
+            )}>
+              <div className="bg-white p-4 rounded-full shadow-lg">
+                <div className="animate-spin text-indigo-600">
+                  <Calendar size={32} />
+                </div>
               </div>
+              {schedules.length === 0 && (
+                <p className="text-gray-500 mt-4 font-medium animate-pulse">Loading schedules...</p>
+              )}
+            </div>
+          )}
+
+          {/* Content List - always rendered, dimmed during loading */}
+          <div className={clsx(
+            "transition-opacity duration-300",
+            loading ? "opacity-40 pointer-events-none" : "opacity-100"
+          )}>
+            {filteredSchedules.length === 0 ? (
+              !loading && (
+                <div className="bg-white rounded-xl shadow-md border border-gray-100 p-16 text-center">
+                  <div className="w-16 h-16 bg-gray-50 rounded-full flex items-center justify-center mx-auto mb-4">
+                    <Calendar size={32} className="text-gray-300" />
+                  </div>
+                  <p className="text-gray-900 text-lg font-semibold">No schedules found</p>
+                  <p className="text-gray-500 mt-1">
+                    {filterStatus !== 'all'
+                      ? `No ${filterStatus} schedules in ${monthYear}`
+                      : 'Ready to plan your month? Create a schedule above.'}
+                  </p>
+                </div>
+              )
             ) : (
-              <div className="space-y-8">
+              <div className="space-y-8 pb-12">
                 {/* Group schedules by date */}
                 {(() => {
                   const groupedByDate = new Map<string, typeof filteredSchedules>();
@@ -253,7 +326,7 @@ const SchedulePage: React.FC = () => {
               </div>
             )}
           </div>
-        )}
+        </div>
 
         {/* Modal */}
         {showModal && (
@@ -337,6 +410,9 @@ const ScheduleCard: React.FC<ScheduleCardProps> = ({
 
   const bgColor = priorityColors[Math.min(schedule.priority, 2) as keyof typeof priorityColors] || 'bg-white border-l-gray-500';
 
+  const mealPlan = schedule.metadata?.meal_plan as Record<string, string> | undefined;
+  const shoppingList = schedule.metadata?.shopping_list as string[] | undefined;
+
   return (
     <div
       className={clsx(
@@ -410,6 +486,61 @@ const ScheduleCard: React.FC<ScheduleCardProps> = ({
           </p>
         )}
 
+        {/* Meal Plan Display */}
+        {mealPlan && Object.keys(mealPlan).length > 0 && (
+          <div className="mb-4 bg-orange-50 rounded-lg border border-orange-100 overflow-hidden">
+            <div className="bg-orange-100 px-3 py-2 flex items-center gap-2">
+              <Utensils size={16} className="text-orange-600" />
+              <span className="text-xs font-bold text-orange-800 uppercase tracking-wider">Weekly Menu</span>
+            </div>
+            <div className="p-3 space-y-2">
+              {Object.entries(mealPlan)
+                .sort((a, b) => a[0].localeCompare(b[0]))
+                .map(([dateStr, meal]) => {
+                  // Handle YYYY-MM-DD string as local date
+                  const [y, m, d] = dateStr.split('-').map(Number);
+                  const date = new Date(y, m - 1, d);
+                  const dayName = date.toLocaleDateString('en-US', { weekday: 'short' });
+                  const dateNum = date.getDate();
+                  return (
+                    <div key={dateStr} className="flex gap-3 text-sm">
+                      <div className="w-12 flex-shrink-0 flex flex-col items-center justify-center bg-white rounded border border-orange-200 py-1">
+                        <span className="text-[10px] font-bold text-gray-500 uppercase leading-none">{dayName}</span>
+                        <span className="text-sm font-bold text-orange-600 leading-none">{dateNum}</span>
+                      </div>
+                      <span className="font-medium text-gray-800 self-center">{meal}</span>
+                    </div>
+                  );
+                })}
+            </div>
+          </div>
+        )}
+
+        {/* Shopping List Display */}
+        {shoppingList && shoppingList.length > 0 && (
+          <div className="mb-4 bg-emerald-50 rounded-lg border border-emerald-100 overflow-hidden">
+             <div className="bg-emerald-100 px-3 py-2 flex items-center gap-2">
+              <ShoppingBag size={16} className="text-emerald-600" />
+              <span className="text-xs font-bold text-emerald-800 uppercase tracking-wider">Shopping List ({shoppingList.length})</span>
+            </div>
+            <div className="p-3">
+              <div className="flex flex-wrap gap-2">
+                {shoppingList.slice(0, 8).map((item, idx) => (
+                  <span key={idx} className="inline-flex items-center px-2 py-1 rounded text-xs font-medium bg-white text-emerald-700 border border-emerald-200">
+                    {item}
+                  </span>
+                ))}
+                {shoppingList.length > 8 && (
+                  <span className="inline-flex items-center px-2 py-1 rounded text-xs font-medium bg-emerald-100 text-emerald-600">
+                    +{shoppingList.length - 8} more
+                  </span>
+                )}
+              </div>
+              
+            </div>
+          </div>
+        )}
+
         {/* Time and location info - enhanced display */}
         <div className="space-y-3 mb-4 p-4 bg-gradient-to-r from-slate-50 to-slate-100 rounded-lg border border-slate-200">
           <div className="flex items-center gap-3 text-sm">
@@ -467,6 +598,7 @@ const ScheduleModal: React.FC<ScheduleModalProps> = ({ schedule, onClose, onSubm
     end_time: schedule?.end_time ? getLocalDateTime(schedule.end_time) : '',
     location: schedule?.location || '',
     priority: schedule?.priority || 0,
+    metadata: schedule?.metadata,
   });
 
   const [submitting, setSubmitting] = useState(false);

@@ -650,7 +650,8 @@ async def chat_with_agent(request: ChatRequest):
             user_input=request.message,
             owner_id=request.owner_id,
             history=history_dicts,
-            context=request.context
+            context=request.context,
+            user_timezone=request.user_timezone,
         )
         
         return ChatResponse(

@@ -204,6 +204,7 @@ class ChatRequest(BaseModel):
     history: List[ChatMessage] = Field(default_factory=list, description="Previous messages in the conversation")
     owner_id: int = Field(..., description="User ID associated with the chat")
     context: Optional[Dict[str, Any]] = Field(None, description="Optional context data (e.g. current document items for correction)")
+    user_timezone: Optional[str] = Field(None, description="User's IANA timezone e.g. America/Los_Angeles for local date/time")
 
 class ChatResponse(BaseModel):
     """Response from AI chat agent"""

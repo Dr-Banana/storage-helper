@@ -14,10 +14,11 @@ class Intent(str, Enum):
     UPDATE = "UPDATE"
     PLAN_EAT_OUT = "PLAN_EAT_OUT"
     PLAN_COOK_HOME = "PLAN_COOK_HOME"
+    PLAN_AHEAD = "PLAN_AHEAD"
     GENERAL = "GENERAL"
 
 class IntentClassificationResult(BaseModel):
-    intent: Intent = Field(..., description="The detected intent of the user. MUST be one of: SEARCH, UPDATE, PLAN_EAT_OUT, PLAN_COOK_HOME, GENERAL.")
+    intent: Intent = Field(..., description="The detected intent of the user. MUST be one of: SEARCH, UPDATE, PLAN_EAT_OUT, PLAN_COOK_HOME, PLAN_AHEAD, GENERAL.")
     confidence: float = Field(..., description="Confidence score from 0.0 to 1.0.")
     reasoning: str = Field(..., description="Brief explanation of why this intent was chosen.")
 
@@ -27,26 +28,37 @@ class IntentClassifier:
     """
 
     SYSTEM_PROMPT = """
-You are an expert Intent Classifier for a Home AI Agent. Your task is to analyze user input and classify it into one of the following intents:
+You are an expert Intent Classifier for a Home AI Agent. Your task is to analyze user input and classify it into one of the following intents. CRITICAL: Use the conversation history to resolve ambiguity.
 
-1. **SEARCH**: The user wants to find something. This includes searching for documents, receipts, specific food items in inventory, or looking up history.
-   - Example: "Find my Costco receipt from last week", "Do I have any eggs?", "Show me the tax documents from 2024".
+1. **SEARCH**: The user wants to find something in their STORED inventory, documents, or receipts. This is for looking up items that already exist in the system.
+   - Example: "Find my Costco receipt from last week", "Do I have any eggs in my fridge?", "Show me the tax documents from 2024".
+   - NOT for: "What plan do I have?" or "What do I have planned?" — those mean meal plan, use PLAN_AHEAD.
 
-2. **UPDATE**: The user wants to update or modify an existing item. This includes updating item information, changing quantities, modifying metadata, or editing existing documents/items.
-   - Example: "Update the quantity of eggs", "Change the expiration date of milk", "Modify the category of apples", "Update my Costco receipt from last week".
+2. **UPDATE**: The user wants to update or modify an item that ALREADY EXISTS in the system (documents, receipts, inventory items). This is for editing PERSISTED data, NOT for editing a meal plan during a planning conversation.
+   - Example: "Update the quantity of eggs in my inventory", "Change the expiration date of the milk I uploaded", "Modify the category of apples in my receipt".
+   - NOT for: "Change Monday's meal to pork" or "Swap Wednesday's dinner" — when in a meal planning conversation, those are PLAN_AHEAD.
 
 3. **PLAN_EAT_OUT**: The user wants to plan a meal outside the home. This includes restaurant reservations, looking for places to eat, or checking restaurant information.
    - Example: "Book a table for two at a sushi place", "Where should we go for dinner tonight?", "Check the menu for the Italian restaurant nearby".
 
-4. **PLAN_COOK_HOME**: The user wants to plan or execute a meal at home. This includes meal planning, recipe generation, using up ingredients, or checking what to cook.
-   - Example: "What can I cook with tomatoes and eggs?", "Plan my meals for the next week", "Generate a recipe for a healthy dinner".
+4. **PLAN_COOK_HOME**: The user wants to plan or execute a meal at home USING EXISTING INVENTORY. This includes recipe generation based on what they already have, using up ingredients, or checking what to cook with current stock.
+   - Example: "What can I cook with tomatoes and eggs?", "Generate a recipe for a healthy dinner with what I have", "What to make from my fridge".
 
-5. **GENERAL**: Basic greetings, general conversation, or queries that don't fit the above tasks.
+5. **PLAN_AHEAD**: The user wants to PLAN AHEAD for a period (e.g. next week): decide what meals to eat, then get a shopping list of ingredients to buy, or save the list to schedule. This includes:
+   - Starting or continuing a meal plan: "What should I eat next week?", "Help me plan next week's meals", "Yes", "What's your recommendation?"
+   - Viewing the current meal plan: "What plan do I have?", "What do I have now?", "Show me my plan", "What's my current plan?"
+   - Editing the meal plan: "Change Monday's meal to pork", "Swap Sunday's dinner", "Wednesday change to something spicy"
+   - CRITICAL: If recent conversation history shows the user is in the middle of planning meals for next week, phrases like "what I have", "what do I have now", "what plan" mean "show my meal plan" — use PLAN_AHEAD, NOT SEARCH.
+   - When in meal planning context, "change X's meal" = PLAN_AHEAD, NOT UPDATE.
+
+6. **GENERAL**: Basic greetings, general conversation, or queries that don't fit the above tasks.
    - Example: "Hello", "How are you?", "What can you do?".
+
+PRIORITY RULE: If the recent conversation (last few turns) is about planning meals for next week, and the user says something ambiguous like "what I have" or "change Monday's meal", prefer PLAN_AHEAD over SEARCH or UPDATE.
 
 Respond ONLY with a JSON object that strictly adheres to the following schema:
 {
-  "intent": "SEARCH" | "UPDATE" | "PLAN_EAT_OUT" | "PLAN_COOK_HOME" | "GENERAL",
+  "intent": "SEARCH" | "UPDATE" | "PLAN_EAT_OUT" | "PLAN_COOK_HOME" | "PLAN_AHEAD" | "GENERAL",
   "confidence": number (0.0 to 1.0),
   "reasoning": "string"
 }

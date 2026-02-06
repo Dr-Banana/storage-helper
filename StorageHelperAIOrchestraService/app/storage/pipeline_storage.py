@@ -13,7 +13,7 @@ from typing import Dict, Any, Optional, List, TYPE_CHECKING, Union
 from pathlib import Path
 import logging
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 import json
 import httpx
 import aiofiles
@@ -938,7 +938,221 @@ class PipelineStorage:
         except Exception as e:
             logger.error(f"Failed to log feedback via API: {e}")
             return False
-    
+
+    async def create_schedule(
+        self,
+        owner_id: int,
+        title: str,
+        scheduled_time: datetime,
+        event_type: Optional[str] = None,
+        description: Optional[str] = None,
+        end_time: Optional[datetime] = None,
+        location: Optional[str] = None,
+        priority: int = 0,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> Optional[int]:
+        """
+        Create a schedule entry via DataStorageService API.
+
+        [API: POST /api/schedule]
+        Authorization: Bearer user_{owner_id}
+
+        :param owner_id: User ID (for authorization)
+        :param title: Schedule title
+        :param scheduled_time: Start time (required)
+        :param event_type: Optional event type (e.g. "shopping_list", "meal_plan")
+        :param description: Optional description
+        :param end_time: Optional end time
+        :param location: Optional location
+        :param priority: Priority (default 0)
+        :param metadata: Optional metadata (e.g. meal_plan + shopping_list for plan-ahead)
+        :return: Created schedule ID, or None if failed
+        """
+        base_url = _get_storage_base_url()
+        if not base_url:
+            logger.error("Cannot create schedule: Invalid STORAGE_SERVICE_URL configuration")
+            return None
+
+        url = "/api/schedule"
+        payload: Dict[str, Any] = {
+            "title": title,
+            "scheduled_time": scheduled_time.isoformat() if isinstance(scheduled_time, datetime) else scheduled_time,
+        }
+        if event_type is not None:
+            payload["event_type"] = event_type
+        if description is not None:
+            payload["description"] = description
+        if end_time is not None:
+            payload["end_time"] = end_time.isoformat() if isinstance(end_time, datetime) else end_time
+        if location is not None:
+            payload["location"] = location
+        if priority != 0:
+            payload["priority"] = priority
+        if metadata is not None:
+            payload["metadata"] = metadata
+
+        headers = {"Authorization": f"Bearer user_{owner_id}"}
+
+        try:
+            async with httpx.AsyncClient(base_url=base_url, timeout=10.0) as client:
+                response = await client.post(url, json=payload, headers=headers)
+                response.raise_for_status()
+                result = response.json()
+                schedule_id = result.get("id")
+                logger.info(f"Schedule created via API: id={schedule_id}, title={title}")
+                return int(schedule_id) if schedule_id is not None else None
+        except httpx.HTTPStatusError as e:
+            logger.error(f"Failed to create schedule via API: HTTP {e.response.status_code}: {e.response.text[:200]}")
+            return None
+        except Exception as e:
+            logger.error(f"Error creating schedule via API: {e}", exc_info=True)
+            return None
+
+    async def get_user_schedules(self, owner_id: int) -> List[Dict[str, Any]]:
+        """
+        Get all schedules for a user via DataStorageService API.
+        [API: GET /api/schedule]
+        """
+        base_url = _get_storage_base_url()
+        if not base_url:
+            return []
+
+        url = "/api/schedule"
+        headers = {"Authorization": f"Bearer user_{owner_id}"}
+        try:
+            async with httpx.AsyncClient(base_url=base_url, timeout=10.0) as client:
+                response = await client.get(url, headers=headers)
+                response.raise_for_status()
+                return response.json()
+        except Exception as e:
+            logger.warning(f"Failed to get schedules via API: {e}")
+            return []
+
+    async def update_schedule(
+        self,
+        owner_id: int,
+        schedule_id: int,
+        title: Optional[str] = None,
+        event_type: Optional[str] = None,
+        description: Optional[str] = None,
+        scheduled_time: Optional[datetime] = None,
+        end_time: Optional[datetime] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> bool:
+        """
+        Update a schedule via DataStorageService API.
+        [API: PUT /api/schedule/{schedule_id}]
+        """
+        base_url = _get_storage_base_url()
+        if not base_url:
+            return False
+
+        url = f"/api/schedule/{schedule_id}"
+        payload: Dict[str, Any] = {}
+        if title is not None:
+            payload["title"] = title
+        if event_type is not None:
+            payload["event_type"] = event_type
+        if description is not None:
+            payload["description"] = description
+        if scheduled_time is not None:
+            payload["scheduled_time"] = scheduled_time.isoformat()
+        if end_time is not None:
+            payload["end_time"] = end_time.isoformat()
+        if metadata is not None:
+            payload["metadata"] = metadata
+
+        headers = {"Authorization": f"Bearer user_{owner_id}"}
+        try:
+            async with httpx.AsyncClient(base_url=base_url, timeout=10.0) as client:
+                response = await client.put(url, json=payload, headers=headers)
+                response.raise_for_status()
+                logger.info(f"Schedule updated via API: id={schedule_id}")
+                return True
+        except Exception as e:
+            logger.warning(f"Failed to update schedule via API: {e}")
+            return False
+
+    async def create_or_update_meal_plan_schedule(
+        self,
+        owner_id: int,
+        meal_plan: Dict[str, str],
+        shopping_list: List[str],
+        existing_schedule_id: Optional[int] = None,
+        event_type: str = "meal_plan_draft",
+        user_timezone: Optional[str] = None,
+    ) -> Optional[int]:
+        """
+        Create or update a meal plan draft in schedule. Used during PLAN_AHEAD conversation
+        for real-time persistence so the user can see the plan in Schedule page.
+        Uses user_timezone for correct local date (e.g. next Monday in user's location).
+        """
+        try:
+            from zoneinfo import ZoneInfo
+            tz = ZoneInfo(user_timezone) if user_timezone else None
+        except Exception:
+            tz = None
+        now = datetime.now(tz) if tz else datetime.now(timezone.utc)
+        today = now.date()
+        days_ahead = (7 - today.weekday()) % 7
+        if days_ahead == 0:
+            days_ahead = 7
+        next_monday = today + timedelta(days=days_ahead)
+        # Use noon (12:00) instead of midnight to avoid date boundary issues across timezones
+        from datetime import time
+        scheduled_time = datetime.combine(next_monday, time(12, 0, 0))
+        # Keep scheduled_time naive (no timezone) - date is computed in user's local timezone
+        description = "\n".join(f"- {item}" for item in shopping_list) if shopping_list else ""
+        metadata = {"meal_plan": meal_plan, "shopping_list": shopping_list}
+        title = "Next Week Shopping List" if event_type == "shopping_list" else "Next Week Meal Plan (Draft)"
+
+        # Try to update existing schedule if ID is provided
+        if existing_schedule_id:
+            ok = await self.update_schedule(
+                owner_id=owner_id,
+                schedule_id=existing_schedule_id,
+                title=title,
+                event_type=event_type,
+                description=description or None,
+                scheduled_time=scheduled_time,
+                metadata=metadata,
+            )
+            if ok:
+                return existing_schedule_id
+            else:
+                # Update failed (likely 404 - schedule was deleted), fallback to find/create
+                logger.warning(f"Failed to update schedule id={existing_schedule_id}, will try to find or create new one")
+
+        # Find existing draft schedule or create new one
+        schedules = await self.get_user_schedules(owner_id)
+        draft = None
+        for s in schedules:
+            if s.get("event_type") in ("meal_plan_draft", "shopping_list") and "Next Week" in (s.get("title") or ""):
+                draft = s
+                break
+
+        if draft:
+            ok = await self.update_schedule(
+                owner_id=owner_id,
+                schedule_id=draft["id"],
+                title=title,
+                event_type=event_type,
+                description=description or None,
+                scheduled_time=scheduled_time,
+                metadata=metadata,
+            )
+            return draft["id"] if ok else None
+
+        # No existing draft found, create new schedule
+        return await self.create_schedule(
+            owner_id=owner_id,
+            title=title,
+            scheduled_time=scheduled_time,
+            event_type=event_type,
+            description=description or None,
+            metadata=metadata,
+        )
+
     @staticmethod
     def get_pipeline_output(pipeline_result: Dict[str, Any]) -> Dict[str, Any]:
         """

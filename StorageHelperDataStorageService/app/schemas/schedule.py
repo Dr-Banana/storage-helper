@@ -1,7 +1,7 @@
 """
 Pydantic schemas for Schedule API
 """
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_serializer
 from datetime import datetime
 from typing import Optional, Dict, Any
 
@@ -48,9 +48,27 @@ class ScheduleResponse(BaseModel):
     location: Optional[str] = None
     status: str
     priority: int
-    metadata: Optional[Dict[str, Any]] = Field(None, alias="extra_data")
+    metadata: Optional[Dict[str, Any]] = None
     created_at: datetime
 
     class Config:
         from_attributes = True
         populate_by_name = True
+    
+    @classmethod
+    def from_orm_object(cls, obj):
+        """Create instance from SQLAlchemy ORM object with proper field mapping"""
+        return cls(
+            id=obj.id,
+            user_id=obj.user_id,
+            title=obj.title,
+            event_type=obj.event_type,
+            description=obj.description,
+            scheduled_time=obj.scheduled_time,
+            end_time=obj.end_time,
+            location=obj.location,
+            status=obj.status,
+            priority=obj.priority,
+            metadata=obj.extra_data,  # Map extra_data to metadata
+            created_at=obj.created_at,
+        )

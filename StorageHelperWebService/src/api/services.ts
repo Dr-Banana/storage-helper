@@ -492,6 +492,7 @@ export const ingestionService = {
     history: { role: string; content: string }[]; 
     owner_id: number;
     context?: any;
+    user_timezone?: string;
   }): Promise<{
     response: string;
     intent: string;

@@ -8,6 +8,7 @@ from app.agents.search_agent import SearchAgent
 from app.agents.update_agent import UpdateAgent
 from app.agents.plan_eat_out_agent import PlanEatOutAgent
 from app.agents.plan_cook_home_agent import PlanCookHomeAgent
+from app.agents.plan_ahead_agent import PlanAheadAgent
 from app.agents.general_agent import GeneralAgent
 
 
@@ -32,6 +33,7 @@ class AgentFactory:
             Intent.UPDATE: UpdateAgent(),
             Intent.PLAN_EAT_OUT: PlanEatOutAgent(),
             Intent.PLAN_COOK_HOME: PlanCookHomeAgent(),
+            Intent.PLAN_AHEAD: PlanAheadAgent(),
             Intent.GENERAL: GeneralAgent(),
         }
     
