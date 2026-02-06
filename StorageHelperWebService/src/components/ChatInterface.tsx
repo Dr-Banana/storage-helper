@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, memo } from 'react'
-import { X, Send, Minimize2, Maximize2, FileText, Sparkles, User, BrainCircuit, Check, Calendar, ShoppingCart, ChevronRight, Clock, ArrowRight } from 'lucide-react'
+import { X, Send, Minimize2, Maximize2, FileText, Sparkles, User, BrainCircuit, Check, Calendar, ShoppingCart, ArrowRight } from 'lucide-react'
 import { Link, useNavigate } from 'react-router-dom'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -313,7 +313,7 @@ const MessageItem = memo(({ msg, index, setMessages, setIsLoading }: MessageItem
 
 const ChatInterface: React.FC = () => {
   const { userId } = useAuth()
-  const navigate = useNavigate()
+  // const navigate = useNavigate() - removed unused
   const [isOpen, setIsOpen] = useState(false)
   const [isFullScreen, setIsFullScreen] = useState(false)
   const [messages, setMessages] = useState<Message[]>([

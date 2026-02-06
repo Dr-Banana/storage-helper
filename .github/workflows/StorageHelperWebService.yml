@@ -1,0 +1,37 @@
+name: Frontend CI
+
+on:
+  push:
+    branches: [ main, master ]
+    paths:
+      - 'StorageHelperWebService/**'
+      - '.github/workflows/frontend-ci.yml'
+  pull_request:
+    branches: [ main, master ]
+    paths:
+      - 'StorageHelperWebService/**'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+        cache: 'npm'
+        cache-dependency-path: StorageHelperWebService/package-lock.json
+
+    - name: Install Dependencies
+      run: |
+        cd StorageHelperWebService
+        npm ci
+
+    - name: Build and Type Check
+      run: |
+        cd StorageHelperWebService
+        npm run build

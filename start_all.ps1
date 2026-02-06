@@ -89,6 +89,34 @@ try {
 Write-Host "  [OK] Docker verified" -ForegroundColor $GREEN
 Write-Host ""
 
+# ============================================================
+# Vercel Build Check (Frontend)
+# ============================================================
+Write-Host "[Check] Verifying Web Service build (Vercel simulation)..." -ForegroundColor $BLUE
+Push-Location $WEB_SERVICE_DIR
+try {
+    if (-not (Test-Path 'node_modules')) {
+        Write-Host "  Installing dependencies..." -ForegroundColor $YELLOW
+        npm install | Out-Null
+    }
+    
+    Write-Host "  Running 'npm run build'..." -ForegroundColor $YELLOW
+    $buildProcess = Start-Process -FilePath "npm.cmd" -ArgumentList "run", "build" -PassThru -NoNewWindow -Wait
+    
+    if ($buildProcess.ExitCode -ne 0) {
+        Write-Host "  [Error] Web Service build failed! Fix errors before starting." -ForegroundColor $RED
+        Pop-Location
+        exit 1
+    }
+    Write-Host "  [OK] Build verification passed" -ForegroundColor $GREEN
+} catch {
+    Write-Host "  [Error] Build process failed: $_" -ForegroundColor $RED
+    Pop-Location
+    exit 1
+}
+Pop-Location
+Write-Host ""
+
 # Initialize database before starting services
 Write-Host "[Init] Initializing database..." -ForegroundColor $BLUE
 $initDbScript = Join-Path $DATA_STORAGE_DIR "scripts\init-db.ps1"
