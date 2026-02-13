@@ -323,10 +323,18 @@ const ChatInterface: React.FC = () => {
   const [input, setInput] = useState('')
   const [activeContext, setActiveContext] = useState<any>(null)
   const messagesEndRef = useRef<HTMLDivElement>(null)
+  const inputRef = useRef<HTMLTextAreaElement>(null)
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   }
+
+  useEffect(() => {
+    if (inputRef.current) {
+      inputRef.current.style.height = 'auto'
+      inputRef.current.style.height = `${Math.min(inputRef.current.scrollHeight, 120)}px`
+    }
+  }, [input])
 
   useEffect(() => {
     if (isOpen) scrollToBottom()
@@ -424,11 +432,28 @@ const ChatInterface: React.FC = () => {
       }
     }
     
+    const handleScheduleManuallyEdited = () => {
+      // Clear activeContext when user manually edits schedule in Schedule page
+      // This prevents stale context from being sent to AI
+      if (activeContext?.type === 'plan_ahead') {
+        console.log('[ChatInterface] Schedule manually edited, clearing plan_ahead context');
+        setActiveContext(null);
+        
+        // Add a system message to inform user and help AI understand the state was reset
+        setMessages(prev => [...prev, {
+          role: 'model',
+          content: '📝 I noticed you made changes to the meal plan. I\'ve synced with the latest data from the database.'
+        }]);
+      }
+    }
+    
     window.addEventListener('open-chat', handleOpenChat)
     window.addEventListener('update-correction-context', handleUpdateCorrectionContext)
+    window.addEventListener('schedule-manually-edited', handleScheduleManuallyEdited)
     return () => {
       window.removeEventListener('open-chat', handleOpenChat)
       window.removeEventListener('update-correction-context', handleUpdateCorrectionContext)
+      window.removeEventListener('schedule-manually-edited', handleScheduleManuallyEdited)
     }
   }, [userId, messages, isLoading, activeContext])
 
@@ -506,22 +531,34 @@ const ChatInterface: React.FC = () => {
           onSubmit={(e) => { e.preventDefault(); handleSend(); }} 
           className={`relative ${isFullScreen ? 'max-w-4xl mx-auto w-full' : ''}`}
         >
-          <input
-            type="text"
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            placeholder={activeContext ? "Type correction..." : "Ask me anything..."}
-            className="w-full pl-4 pr-12 py-3.5 bg-gray-100 border-transparent focus:bg-white focus:border-home-primary-300 focus:ring-4 focus:ring-home-primary-50 rounded-xl text-sm text-gray-800 placeholder-gray-400 transition-all outline-none"
-            disabled={isLoading}
-            autoFocus
-          />
-          <button
-            type="submit"
-            disabled={!input.trim() || isLoading}
-            className="absolute right-2 top-2 bottom-2 aspect-square bg-home-primary-600 text-white rounded-lg flex items-center justify-center hover:bg-home-primary-700 disabled:opacity-50 disabled:hover:bg-home-primary-600 transition-colors"
-          >
-            <Send size={16} />
-          </button>
+          <div className="flex items-end gap-2 w-full bg-gray-100 border border-transparent focus-within:bg-white focus-within:border-home-primary-300 focus-within:ring-4 focus-within:ring-home-primary-50 rounded-xl transition-all">
+            <textarea
+              ref={inputRef}
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && !e.shiftKey) {
+                  e.preventDefault();
+                  handleSend();
+                }
+              }}
+              placeholder={activeContext ? "Type correction..." : "Ask me anything..."}
+              className="flex-1 pl-4 py-3.5 bg-transparent border-none focus:ring-0 text-sm text-gray-800 placeholder-gray-400 outline-none resize-none custom-scrollbar"
+              disabled={isLoading}
+              autoFocus
+              rows={1}
+              style={{ minHeight: '48px', maxHeight: '120px' }}
+            />
+            <div className="pb-2.5 pr-2">
+              <button
+                type="submit"
+                disabled={!input.trim() || isLoading}
+                className="aspect-square p-2 bg-home-primary-600 text-white rounded-lg flex items-center justify-center hover:bg-home-primary-700 disabled:opacity-50 disabled:hover:bg-home-primary-600 transition-colors"
+              >
+                <Send size={16} />
+              </button>
+            </div>
+          </div>
         </form>
         <div className="mt-2 flex justify-center">
             <span className="text-[10px] text-gray-300 font-medium">AI generated content may be inaccurate.</span>

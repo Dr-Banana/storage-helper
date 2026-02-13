@@ -50,8 +50,19 @@ class ScheduleService:
         start_time: datetime,
         end_time: datetime
     ) -> List[Schedule]:
-        """Get schedules within a date range for a user"""
-        return db.query(Schedule).filter(
+        """
+        Get schedules within a date range for a user.
+        
+        Uses simple two-phase approach:
+        - Phase 1: Query regular schedules by time overlap
+        - Phase 2: Query all meal plan schedules and filter in Python
+        """
+        # Convert datetime range to date for meal plan comparison
+        start_date = start_time.date()
+        end_date = end_time.date()
+        
+        # Phase 1: Get regular schedules with time overlap
+        regular_schedules = db.query(Schedule).filter(
             and_(
                 Schedule.user_id == user_id,
                 or_(
@@ -60,7 +71,63 @@ class ScheduleService:
                     and_(Schedule.scheduled_time <= start_time, Schedule.end_time >= end_time),
                 )
             )
-        ).order_by(Schedule.scheduled_time).all()
+        ).all()
+        
+        # Phase 2: Get all meal plan schedules and filter by meal dates in Python
+        meal_plan_schedules = db.query(Schedule).filter(
+            and_(
+                Schedule.user_id == user_id,
+                Schedule.event_type.in_(['meal_plan_draft', 'shopping_list']),
+                Schedule.extra_data.isnot(None)
+            )
+        ).all()
+        
+        # Filter meal plans that have at least one date in range
+        filtered_meal_plans = []
+        for schedule in meal_plan_schedules:
+            # Skip if already in regular_schedules
+            if schedule in regular_schedules:
+                continue
+            
+            # Check if any meal date falls within range
+            metadata = schedule.extra_data or {}
+            features = metadata.get('features', [])
+            
+            has_date_in_range = False
+            for feature in features:
+                if feature.get('type') == 'meal_plan':
+                    plans = feature.get('plans', [])
+                    for day_plan in plans:
+                        date_str = day_plan.get('date')
+                        if date_str:
+                            try:
+                                # Parse date string (YYYY-MM-DD)
+                                meal_date = datetime.strptime(date_str, '%Y-%m-%d').date()
+                                if start_date <= meal_date <= end_date:
+                                    has_date_in_range = True
+                                    break
+                            except (ValueError, TypeError):
+                                continue
+                    if has_date_in_range:
+                        break
+            
+            if has_date_in_range:
+                filtered_meal_plans.append(schedule)
+        
+        # Combine and deduplicate
+        all_schedules = list(regular_schedules) + filtered_meal_plans
+        
+        # Remove duplicates by ID and sort by scheduled_time
+        seen_ids = set()
+        unique_schedules = []
+        for schedule in all_schedules:
+            if schedule.id not in seen_ids:
+                seen_ids.add(schedule.id)
+                unique_schedules.append(schedule)
+        
+        unique_schedules.sort(key=lambda s: s.scheduled_time)
+        
+        return unique_schedules
 
     @staticmethod
     def update_schedule(

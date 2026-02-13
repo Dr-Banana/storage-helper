@@ -2,23 +2,6 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.api.router import api_router
 import uvicorn
-import logging
-
-# 配置日志输出
-logging.basicConfig(
-    level=logging.WARNING,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[logging.StreamHandler()]
-)
-
-# Explicitly set httpx logger to WARNING to suppress HTTP request logs
-logging.getLogger("httpx").setLevel(logging.WARNING)
-logging.getLogger("httpcore").setLevel(logging.WARNING)
-logging.getLogger("uvicorn").setLevel(logging.WARNING)
-logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
-
-# To keep app specific logs at WARNING level while silencing libraries:
-logging.getLogger("app").setLevel(logging.WARNING)
 
 app = FastAPI(
     title="家用 AI 文件管家 (Orchestra Service)",
