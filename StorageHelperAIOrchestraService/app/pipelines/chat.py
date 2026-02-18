@@ -1,6 +1,7 @@
 import logging
 import httpx
 import json
+import os
 import re
 from datetime import datetime, timedelta
 from typing import List, Dict, Any, Optional
@@ -11,18 +12,21 @@ from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
-# Import scheduling agents
+# Import scheduling agents and plan operation routing
 try:
     from app.agents.scheduling_agent import (
         ScheduleSessionContext,
         SchedulingResponseGenerator,
         PlanAheadAgent,
     )
+    from app.agents.plan_operation_agent import get_operation_type, PlanOperationType
     SCHEDULING_AGENTS_AVAILABLE = True
     logger.info("Scheduling agents imported successfully")
 except ImportError as e:
     logger.warning(f"Scheduling agents not available: {e}")
     SCHEDULING_AGENTS_AVAILABLE = False
+    get_operation_type = None
+    PlanOperationType = None
 
 # Global flag: disable ALL schedule fetching in chat pipeline for now.
 # Fetch logic will be redesigned and moved fully into scheduling agents.
@@ -44,11 +48,9 @@ If the intent is SEARCH: Acknowledge that you are looking for their items or doc
 If the intent is UPDATE: The system has searched for candidates to update. Present these candidates to the user and ASK FOR CONFIRMATION on which one to update and what values to change. DO NOT update until confirmed.
 If the intent is CORRECTION_MODE (user is viewing a list): You can help them FIX existing items or ADD missing items to the list.
 If the intent is PLAN_EAT_OUT: Suggest you can help find restaurants or make reservations.
-If the intent is PLAN_COOK_HOME: Offer to generate recipes based on their ACTUAL inventory items. 
-  - CRITICAL: Only suggest recipes using ingredients that are ACTUALLY in their inventory.
-  - NEVER make up or hallucinate ingredients that are not in the provided inventory list.
-  - If the inventory list is empty or limited, acknowledge this and suggest what they might need to buy.
-If the intent is PLAN_AHEAD: Help the user plan meals for a future period (e.g. next week), decide what to cook each day, then generate a shopping list of ingredients to buy. Offer to save the shopping list to their schedule when they are ready.
+If the intent is PLAN_AHEAD: Help the user plan meals for a future period or a specific date (e.g. next Monday), then generate a shopping list of ingredients to buy. Offer to save the list to their schedule when ready. Plan Cook Home is a sub-flow: when the user is cooking at home, use the provided USER'S ACTUAL INVENTORY (if any) to suggest recipes — only suggest recipes using ingredients that are ACTUALLY in the inventory; never invent ingredients not in the list. If inventory is empty or limited, say so and suggest what to buy.
+  - When the user says they want to cook at home on a date but DON'T KNOW what to cook: FIRST have a short dialogue to decide — ask preferences (cuisine, dietary restrictions, difficulty, number of people), suggest 2–3 options, and let the user pick or refine. AFTER they confirm the dish and date, THEN generate the meal plan and shopping list (ingredients to buy) and use PLAN_JSON when you output the final plan.
+  - When the user already has a plan or knows what to cook: proceed to generate/update meal_plan and shopping_list, and output PLAN_JSON when appropriate.
 If the intent is GENERAL: Be friendly and helpful.
 
 Respond naturally in the same language as the user.
@@ -409,6 +411,35 @@ JSON:"""
         logger.info(f"PLAN_AHEAD: programmatic removal detected - removed {date_to_remove} ({removed_day})")
         return {"meal_plan": new_meal_plan, "shopping_list": current_shopping_list}
 
+    @staticmethod
+    def _extract_ingredients_from_response_text(response_text: str) -> List[str]:
+        """
+        Extract ingredient list from LLM response when it mentions ingredients in natural language
+        but PLAN_JSON had empty shopping_list. Handles patterns like:
+        - "I have added Eggs, Tomatoes, and Scallions to your list"
+        - "Shopping List: Eggs, Tomatoes, and Scallions"
+        - "added X, Y, and Z to your list"
+        """
+        if not (response_text and response_text.strip()):
+            return []
+        text = response_text.strip()
+        # Patterns: "added ... to your list" or "Shopping List: ..." or "ingredients: ..."
+        for pattern in (
+            r"(?:added|I have added)\s+([^.]*?)\s+to (?:your )?list",
+            r"Shopping List:\s*([^.\n]+)",
+            r"ingredients?:\s*([^.\n]+)",
+            r"(?:added|add)\s+([^.]*?)\s+to (?:the )?list",
+        ):
+            m = re.search(pattern, text, re.IGNORECASE | re.DOTALL)
+            if m:
+                raw = m.group(1).strip()
+                # Split by comma and " and "
+                parts = re.split(r"\s*,\s*|\s+and\s+", raw, flags=re.IGNORECASE)
+                items = [p.strip() for p in parts if p.strip() and len(p.strip()) > 1]
+                if items:
+                    return items
+        return []
+
     def _now_in_timezone(self, user_timezone: Optional[str] = None) -> datetime:
         """Return current datetime in user's timezone, or UTC if not provided."""
         try:
@@ -451,8 +482,13 @@ JSON:"""
                 or (
                     history
                     and any(
-                        kw in " ".join(m.get("content", "").lower() for m in history[-4:])
-                        for kw in ("meal plan", "next week", "monday", "tuesday", "planning", "shopping list")
+                        kw in " ".join(m.get("content", "").lower() for m in history[-6:])
+                        for kw in (
+                            "meal plan", "next week", "monday", "tuesday", "planning", "shopping list",
+                            "cook at home", "don't know what to cook", "decide what to cook", "what to cook",
+                            "不知道做什么", "在家做饭", "做什么菜",
+                            "同一天", "same day", "那天", "that day", "再加一个", "add another", "也加",
+                        )
                     )
                 )
             )
@@ -469,10 +505,21 @@ JSON:"""
                 "monday to",
                 "wednesday change",
                 "swap",
+                "what do you recommend",
+                "your recommendation",
+                "something easy",
+                "something simple",
+                "decide for me",
+                "你推荐",
+                "随便",
+                "同一天",
+                "same day",
+                "那天",
+                "that day",
             )
             user_lower = user_input.strip().lower()
             is_ambiguous = any(phrase in user_lower for phrase in ambiguous_plan_phrases)
-            if in_plan_ahead_flow and is_ambiguous and intent_result.intent in (Intent.SEARCH, Intent.UPDATE):
+            if in_plan_ahead_flow and is_ambiguous and intent_result.intent in (Intent.SEARCH, Intent.UPDATE, Intent.GENERAL):
                 old_intent = intent_result.intent
                 intent_result = type(
                     "IntentResult",
@@ -613,21 +660,26 @@ JSON:"""
                  context_msg += "\nUpdate Search Results: 0 documents found."
                  context_msg += "\nTell the user you couldn't find the item they wanted to update."
         
-        if intent_action['action'] == "PLAN_COOK_HOME":
-            # Add detailed inventory information for recipe suggestions
-            inventory_items = intent_action.get('data', {}).get('inventory_items', [])
-            inventory_count = intent_action.get('data', {}).get('inventory_count', 0)
-            
+        # PLAN_AHEAD: inject inventory from Plan Cook Home sub-agent (cook-at-home is a sub-flow of plan-ahead)
+        if intent_action['action'] == "PLAN_AHEAD":
+            try:
+                from app.agents.agent_factory import agent_factory
+                cook_home_result = await agent_factory.get_plan_cook_home_sub_agent().execute(
+                    user_input=user_input, owner_id=owner_id
+                )
+                inventory_items = (cook_home_result.get("data") or {}).get("inventory_items", [])
+                inventory_count = (cook_home_result.get("data") or {}).get("inventory_count", 0)
+            except Exception as e:
+                logger.warning(f"Plan Cook Home sub-agent failed (continuing without inventory): {e}")
+                inventory_items = []
+                inventory_count = 0
             if inventory_count > 0:
-                context_msg += f"\n\nUSER'S ACTUAL INVENTORY ({inventory_count} items):"
-                context_msg += "\nCRITICAL: You MUST ONLY suggest recipes using these actual ingredients."
+                context_msg += f"\n\nUSER'S ACTUAL INVENTORY ({inventory_count} items, from Plan Cook Home sub-agent):"
+                context_msg += "\nCRITICAL: When suggesting recipes for cooking at home, use ONLY these actual ingredients."
                 context_msg += "\nDO NOT hallucinate or invent ingredients not in this list.\n"
-                
-                # Format inventory by category for better organization (limit to 30 items to avoid too long context)
                 items_by_category = {}
                 item_count = 0
                 max_items = 30
-                
                 for item in inventory_items:
                     if item_count >= max_items:
                         break
@@ -637,19 +689,16 @@ JSON:"""
                         items_by_category[category] = []
                     items_by_category[category].append(product_name)
                     item_count += 1
-                
                 for category, items in items_by_category.items():
                     context_msg += f"\n{category}:\n"
                     for item_name in items:
                         context_msg += f"  - {item_name}\n"
-                
                 if inventory_count > max_items:
                     context_msg += f"\n(Showing first {max_items} of {inventory_count} items)"
-                
                 context_msg += "\nWhen suggesting a recipe, list which items from the inventory above will be used."
             else:
-                context_msg += "\n\nINVENTORY STATUS: No food items found in the user's inventory."
-                context_msg += "\nAcknowledge this and suggest that they upload a shopping receipt to add items first."
+                context_msg += "\n\nINVENTORY STATUS (Plan Cook Home): No food items found in the user's inventory."
+                context_msg += "\nWhen suggesting recipes, acknowledge this and suggest what they might need to buy or upload a receipt first."
 
         # Handle schedule queries using SchedulingResponseGenerator
         # NOTE: schedule *fetch* (get_user_schedules) is temporarily disabled.
@@ -778,36 +827,42 @@ JSON:"""
                         storage_client=_default_storage,
                     )
                     
-                    # Update in-memory state if we found data in database
+                    # Update in-memory state only when we found data in database (so chat and calendar stay in sync)
+                    # Use DB as source of truth for which dates exist: do NOT add server_state dates, so manually deleted schedules do not come back. For dates that exist in DB, merge slot details (db + server) so breakfast/lunch are preserved.
                     if db_state.get("schedule_id"):
+                        db_mp = db_state.get("meal_plan") or {}
+                        db_slots = db_state.get("meal_plan_slots") or {}
+                        server_slots = server_state.get("meal_plan_slots") or {}
+                        merged_slots = {d: {**(db_slots.get(d) or {}), **(server_slots.get(d) or {})} for d in db_mp}
+                        db_di = db_state.get("dish_ingredients") or {}
+                        server_di = server_state.get("dish_ingredients") or {}
+                        merged_di = {}
+                        for k in set(db_di) | set(server_di):
+                            merged_di[k] = list(set((db_di.get(k) or []) + (server_di.get(k) or [])))
                         update_plan_state(
                             owner_id=owner_id,
-                            meal_plan=db_state.get("meal_plan", {}),
+                            meal_plan=db_mp,
                             shopping_list=db_state.get("shopping_list", []),
                             schedule_id=db_state.get("schedule_id"),
+                            meal_plan_slots=merged_slots,
+                            dish_ingredients=merged_di,
                             merge=False,
                         )
                         server_state = get_plan_state(owner_id)
-                        logger.info(f"[SCHEDULING AGENT] PlanAheadAgent: Synced meal plan from schedule id={db_state.get('schedule_id')}: {len(db_state.get('meal_plan', {}))} meals")
-                    elif server_state.get("schedule_id"):
-                        # No meal plan found in database, clear the in-memory state
-                        logger.info(f"[SCHEDULING AGENT] PlanAheadAgent: No meal plan found in database, clearing in-memory state for user {owner_id}")
-                        update_plan_state(
-                            owner_id=owner_id,
-                            meal_plan={},
-                            shopping_list=[],
-                            schedule_id=None,
-                            merge=False,
-                        )
-                        server_state = get_plan_state(owner_id)
+                        logger.info(f"[SCHEDULING AGENT] PlanAheadAgent: Synced meal plan from schedule id={db_state.get('schedule_id')}: {len(db_mp)} meals")
+                    # When DB has no schedule_id, keep in-memory state (e.g. same-session plan not yet persisted) so we can persist later
                     
                     # Use context if provided and has plan_ahead data, otherwise use server state
                     if context and context.get("type") == "plan_ahead" and isinstance(context.get("data"), dict):
                         meal_plan = context["data"].get("meal_plan") or server_state.get("meal_plan", {})
                         shopping_list = context["data"].get("shopping_list") or server_state.get("shopping_list", [])
+                        meal_plan_slots = context["data"].get("meal_plan_slots") or server_state.get("meal_plan_slots", {})
+                        dish_ingredients = context["data"].get("dish_ingredients") or server_state.get("dish_ingredients", {})
                     else:
                         meal_plan = plan_data.get("meal_plan") or server_state.get("meal_plan", {})
                         shopping_list = plan_data.get("shopping_list") or server_state.get("shopping_list", [])
+                        meal_plan_slots = plan_data.get("meal_plan_slots") or server_state.get("meal_plan_slots", {})
+                        dish_ingredients = plan_data.get("dish_ingredients") or server_state.get("dish_ingredients", {})
                     
                     # CRITICAL: Save the original meal_plan from database sync (before any modifications)
                     original_meal_plan_dates = set(meal_plan.keys()) if meal_plan else set()
@@ -823,19 +878,160 @@ JSON:"""
                     )
                     logger.info(f"[SCHEDULING AGENT] PLAN_AHEAD request handler: Extracted mod_intent: {mod_intent}")
                     
-                    # Store mod_intent for later use in filtering
+                    # Store mod_intent and operation type for later routing (add/modify/remove/multi only trigger apply)
                     intent_action["data"]["_mod_intent"] = mod_intent
-                    
-                    # 2. Apply modification programmatically to plan JSON
-                    if mod_intent:
-                        logger.info(f"[SCHEDULING AGENT] PLAN_AHEAD request handler: Before apply_plan_modification - meal_plan keys: {list(meal_plan.keys()) if meal_plan else []}, values: {meal_plan}")
-                        meal_plan = plan_ahead_agent.apply_plan_modification(meal_plan, shopping_list, mod_intent)
-                        logger.info(f"[SCHEDULING AGENT] PLAN_AHEAD request handler: After apply_plan_modification - meal_plan keys: {list(meal_plan.keys()) if meal_plan else []}, values: {meal_plan}")
-                        intent_action["data"]["_applied_modification"] = True
-                    
+                    op_type = get_operation_type(mod_intent) if get_operation_type else None
+                    intent_action["data"]["_operation_type"] = op_type.value if (op_type and hasattr(op_type, "value")) else ("view" if not mod_intent else "add")
+                    if op_type:
+                        logger.info(f"[SCHEDULING AGENT] PLAN_AHEAD operation type: {op_type.value} (only ADD/MODIFY/REMOVE/MULTI trigger apply)")
+                    # Programmatic fallback: when user explicitly says 早饭/午饭/晚饭, set meal_time (overwrite LLM if it returned dinner)
+                    if mod_intent and (user_input or "").strip():
+                        def infer_meal_time(text: str) -> str:
+                            if not text:
+                                return "dinner"
+                            t = text.lower()
+                            if "早饭" in text or "早餐" in text or "早上" in text or "breakfast" in t or "morning" in t:
+                                return "breakfast"
+                            if "午饭" in text or "午餐" in text or "中午" in text or "lunch" in t:
+                                return "lunch"
+                            if "晚饭" in text or "晚餐" in text or "晚上" in text or "dinner" in t:
+                                return "dinner"
+                            return "dinner"
+                        def meal_suggests_breakfast(meal_name: str) -> bool:
+                            if not (meal_name or "").strip():
+                                return False
+                            m = (meal_name or "").lower().strip()
+                            keywords = ("pancake", "waffle", "waffles", "煎饼", "松饼", "粥", "面包片", "吐司", "toast", "麦片", "cereal", "酸奶", "yogurt", "鸡蛋", "egg")
+                            return any(k in m for k in keywords)
+                        inferred = infer_meal_time(user_input or "")
+                        # When user said breakfast/lunch, always force meal_time so we don't save to dinner
+                        force_slot = inferred in ("breakfast", "lunch")
+                        def resolve_meal_time_for_modify(op_date: str, new_meal: str, existing_slots: dict) -> str:
+                            """For rename/modify: if date has exactly one slot, keep using that slot.
+                            Otherwise fall back to inferred time or breakfast heuristic."""
+                            if existing_slots and len(existing_slots) == 1:
+                                return list(existing_slots.keys())[0]
+                            if meal_suggests_breakfast(new_meal or ""):
+                                return "breakfast"
+                            return inferred
+
+                        if isinstance(mod_intent.get("operations"), list):
+                            for op in mod_intent["operations"]:
+                                if op.get("operation") in ("add", "modify") and op.get("meal"):
+                                    if force_slot:
+                                        op["meal_time"] = inferred
+                                    elif not op.get("meal_time"):
+                                        if op.get("operation") == "modify" and op.get("date"):
+                                            # Rename: keep the original slot instead of defaulting to dinner
+                                            op["meal_time"] = resolve_meal_time_for_modify(
+                                                op["date"], op.get("meal") or "",
+                                                meal_plan_slots.get(op["date"]) or {}
+                                            )
+                                        elif meal_suggests_breakfast(op.get("meal") or ""):
+                                            op["meal_time"] = "breakfast"
+                                        else:
+                                            op["meal_time"] = inferred
+                        elif mod_intent.get("operation") in ("add", "modify") and mod_intent.get("meal"):
+                            if force_slot:
+                                mod_intent["meal_time"] = inferred
+                            elif not mod_intent.get("meal_time"):
+                                if mod_intent.get("operation") == "modify" and mod_intent.get("date"):
+                                    # Rename: keep the original slot instead of defaulting to dinner
+                                    mod_intent["meal_time"] = resolve_meal_time_for_modify(
+                                        mod_intent["date"], mod_intent.get("meal") or "",
+                                        meal_plan_slots.get(mod_intent["date"]) or {}
+                                    )
+                                elif meal_suggests_breakfast(mod_intent.get("meal") or ""):
+                                    mod_intent["meal_time"] = "breakfast"
+                                else:
+                                    mod_intent["meal_time"] = inferred
+                    # 2. Apply modification only when operation is ADD/MODIFY/REMOVE/MULTI or REMOVE_INGREDIENTS/UPDATE_INGREDIENTS (not VIEW)
+                    # Ingredients-only: PlanIngredientsAgent; else dispatch to PlanAdd/Modify/Remove/Multi
+                    _skip_apply = op_type and PlanOperationType and op_type == PlanOperationType.VIEW
+                    if mod_intent and not _skip_apply:
+                        op_type_val = op_type.value if hasattr(op_type, "value") else op_type
+                        if op_type in (PlanOperationType.REMOVE_INGREDIENTS, PlanOperationType.UPDATE_INGREDIENTS):
+                            from app.agents.plan_ingredients_agent import PlanIngredientsAgent
+                            ingredients_agent = PlanIngredientsAgent()
+                            dish_name = (mod_intent.get("dish") or "").strip()
+                            if dish_name:
+                                if op_type == PlanOperationType.REMOVE_INGREDIENTS:
+                                    dish_ingredients, shopping_list = ingredients_agent.apply_remove_ingredients(
+                                        dish_name, dish_ingredients, shopping_list
+                                    )
+                                    intent_action["data"]["dish_ingredients"] = dish_ingredients
+                                    logger.info(f"[SCHEDULING AGENT] PLAN_AHEAD: Applied ingredients op ({op_type_val}) for dish '{dish_name}'")
+                                else:
+                                    # UPDATE_INGREDIENTS: merge new ingredients with existing (e.g. "加个葱" -> add 葱, keep 西红柿/鸡蛋)
+                                    ing_list = mod_intent.get("ingredients") or []
+                                    if ing_list:
+                                        # Find existing ingredients for this dish (match by key)
+                                        existing_ings = []
+                                        for k, v in (dish_ingredients or {}).items():
+                                            if (k or "").strip().lower() == (dish_name or "").strip().lower() or ((dish_name or "").strip().lower() in (k or "").strip().lower()):
+                                                existing_ings = list(v or [])
+                                                break
+                                        merged_ings = list(dict.fromkeys(existing_ings + [x.strip() for x in ing_list if (x or "").strip()]))
+                                        dish_ingredients, shopping_list = ingredients_agent.apply_set_ingredients(
+                                            dish_name, merged_ings, dish_ingredients, shopping_list
+                                        )
+                                        intent_action["data"]["dish_ingredients"] = dish_ingredients
+                                        logger.info(f"[SCHEDULING AGENT] PLAN_AHEAD: Applied ingredients op ({op_type_val}) for dish '{dish_name}'")
+                                    else:
+                                        intent_action["data"]["_ingredients_skip_apply"] = True  # allow response PLAN_JSON to merge dish_ingredients
+                                        logger.info(f"[SCHEDULING AGENT] PLAN_AHEAD: update_ingredients for dish '{dish_name}' with no list (LLM may suggest in response)")
+                            intent_action["data"]["_applied_modification"] = True
+                        else:
+                            logger.info(f"[SCHEDULING AGENT] PLAN_AHEAD request handler: Dispatching to operation agent (op={op_type_val}) - meal_plan keys: {list(meal_plan.keys()) if meal_plan else []}, values: {meal_plan}")
+                            meal_plan, meal_plan_slots = plan_ahead_agent.execute_operation(
+                                op_type=op_type_val,
+                                mod_intent=mod_intent,
+                                meal_plan=meal_plan,
+                                meal_plan_slots=meal_plan_slots,
+                                shopping_list=shopping_list,
+                            )
+                            logger.info(f"[SCHEDULING AGENT] PLAN_AHEAD request handler: After apply_plan_modification - meal_plan keys: {list(meal_plan.keys()) if meal_plan else []}, values: {meal_plan}")
+                            intent_action["data"]["_applied_modification"] = True
+                            # For multi-ops: also handle update_ingredients/remove_ingredients sub-ops
+                            if isinstance(mod_intent.get("operations"), list):
+                                from app.agents.plan_ingredients_agent import PlanIngredientsAgent as _PIA
+                                _ing_agent = _PIA()
+                                for _sub_op in mod_intent["operations"]:
+                                    _sop_type = (_sub_op.get("operation") or "").strip()
+                                    _sop_dish = (_sub_op.get("dish") or "").strip()
+                                    if _sop_type == "remove_ingredients" and _sop_dish:
+                                        dish_ingredients, shopping_list = _ing_agent.apply_remove_ingredients(
+                                            _sop_dish, dish_ingredients, shopping_list)
+                                        logger.info(f"[SCHEDULING AGENT] Multi-op: removed ingredients for '{_sop_dish}'")
+                                    elif _sop_type == "update_ingredients" and _sop_dish:
+                                        _sop_ing = [x.strip() for x in (_sub_op.get("ingredients") or []) if (x or "").strip()]
+                                        if _sop_ing:
+                                            _exist = []
+                                            for k, v in (dish_ingredients or {}).items():
+                                                if (k or "").strip().lower() == _sop_dish.lower():
+                                                    _exist = list(v or [])
+                                                    break
+                                            dish_ingredients, shopping_list = _ing_agent.apply_set_ingredients(
+                                                _sop_dish, list(dict.fromkeys(_exist + _sop_ing)), dish_ingredients, shopping_list)
+                                            logger.info(f"[SCHEDULING AGENT] Multi-op: set ingredients for '{_sop_dish}': {_sop_ing}")
+                                        else:
+                                            # No ingredients specified: tell LLM to suggest them
+                                            intent_action["data"]["_ingredients_skip_apply"] = True
+                                            intent_action["data"]["_ingredients_skip_apply_dish"] = _sop_dish
+                                            logger.info(f"[SCHEDULING AGENT] Multi-op: update_ingredients for '{_sop_dish}' with no list (LLM may suggest)")
+                                intent_action["data"]["dish_ingredients"] = dish_ingredients
+
                     # Update intent_action data with current (possibly modified) state
+                    # For ingredients operations, preserve dish_ingredients from intent_action if it was already set
                     intent_action["data"]["meal_plan"] = meal_plan
+                    intent_action["data"]["meal_plan_slots"] = meal_plan_slots
                     intent_action["data"]["shopping_list"] = shopping_list
+                    # Only update dish_ingredients if it wasn't already set by ingredients operation (to avoid overwriting with old value)
+                    if "dish_ingredients" not in intent_action["data"] or intent_action["data"]["dish_ingredients"] is None:
+                        intent_action["data"]["dish_ingredients"] = dish_ingredients
+                    else:
+                        # Sync local variable with updated value from intent_action
+                        dish_ingredients = intent_action["data"]["dish_ingredients"]
                     logger.info(f"[SCHEDULING AGENT] PLAN_AHEAD request handler: Final state stored in intent_action - meal_plan keys: {list(intent_action['data']['meal_plan'].keys()) if intent_action['data'].get('meal_plan') else []}")
                     
                     # Generate context message using PlanAheadAgent
@@ -843,7 +1039,23 @@ JSON:"""
                         meal_plan=meal_plan,
                         shopping_list=shopping_list,
                         user_timezone=user_timezone,
+                        dish_ingredients=dish_ingredients,
                     )
+                    # When the user asked to add ingredients for a dish but didn't specify any,
+                    # give the LLM an explicit instruction so it generates them and puts them in PLAN_JSON
+                    if intent_action.get("data", {}).get("_ingredients_skip_apply"):
+                        _skip_dish = (
+                            intent_action["data"].get("_ingredients_skip_apply_dish")
+                            or (intent_action["data"].get("_mod_intent") or {}).get("dish")
+                            or ""
+                        )
+                        if _skip_dish:
+                            context_msg += f'\n\nCRITICAL INGREDIENTS TASK: The user wants to ADD INGREDIENTS for "{_skip_dish}" but did not list any specific ingredients.'
+                            context_msg += f'\nYOU MUST:'
+                            context_msg += f'\n  1. Suggest typical/classic ingredients for "{_skip_dish}" in your response text'
+                            context_msg += f'\n  2. MANDATORY — include them in PLAN_JSON under dish_ingredients: {{"{_skip_dish}": ["ing1", "ing2", ...]}}'
+                            context_msg += f'\n  3. Add these same ingredients to shopping_list in PLAN_JSON'
+                            context_msg += f'\n  Do NOT output PLAN_JSON without dish_ingredients for this request. This is required.'
                 except Exception as e:
                     logger.error(f"[SCHEDULING AGENT] PlanAheadAgent error: {e}", exc_info=True)
                     # Fall back to old behavior if PlanAheadAgent fails
@@ -862,7 +1074,6 @@ JSON:"""
         )
         if schedule_lookup_only_this_turn:
             logger.info("[SCHEDULING AGENT] This turn is schedule lookup only; will skip PLAN_AHEAD parse/persist in response")
-        
         system_instruction += context_msg
 
         # 4. Final results to return to frontend
@@ -890,7 +1101,7 @@ JSON:"""
             "systemInstruction": {"parts": [{"text": system_instruction}]},
             "generationConfig": {
                 "temperature": 0.7,
-                "maxOutputTokens": 2048  # Increased from 500 to handle longer responses with recipe suggestions
+                "maxOutputTokens": 8192  # Enough for full PLAN_JSON (meal_plan + shopping_list + dish_ingredients)
             }
         }
 
@@ -952,17 +1163,19 @@ JSON:"""
                         from app.storage.pipeline_storage import _default_storage
                         plan_ahead_agent = PlanAheadAgent(gemini_api_url=self.api_url)
                         
-                        # Get current meal plan state
+                        # Get current meal plan state and operation type (ADD/MODIFY/REMOVE/VIEW/MULTI)
                         current_meal_plan = intent_action["data"].get("meal_plan", {})
                         current_shopping_list = intent_action["data"].get("shopping_list", [])
-                        mod_intent = intent_action["data"].get("_mod_intent")  # Store mod_intent for later use
-                        
+                        mod_intent = intent_action["data"].get("_mod_intent")
+                        op_type = intent_action["data"].get("_operation_type") or (get_operation_type(mod_intent).value if get_operation_type else "view")
+                        logger.info(f"[SCHEDULING AGENT] PLAN_AHEAD response handler: operation_type={op_type}, applied_mod={intent_action['data'].get('_applied_modification')}")
                         logger.info(f"[SCHEDULING AGENT] PLAN_AHEAD response handler: Initial state - current_meal_plan keys: {list(current_meal_plan.keys())}, mod_intent: {mod_intent}")
                         
                         # For add operation: check if target date already has a plan, if yes skip, if no merge with existing schedule and save
                         # For modify/remove operations: fetch complete meal_plan from database to merge properly
                         db_meal_plan_base = {}
                         db_shopping_list_base = []
+                        db_meal_plan_slots_for_remove = {}
                         target_schedule_id = None
                         add_date_has_existing_plan = False  # Initialize variable - will be set based on database check
                         
@@ -1005,8 +1218,12 @@ JSON:"""
                                     for op_intent in sorted_ops:
                                         op = op_intent.get("operation")
                                         op_date = op_intent.get("date")
+                                        op_meal = op_intent.get("meal")
                                         
                                         if op == "remove" and op_date:
+                                            # Only delete schedule when removing entire date; if removing a specific dish (op_meal), just update slots later
+                                            if op_meal:
+                                                continue
                                             # Delete single-day schedules containing this date
                                             for s in all_schedules:
                                                 mp, _ = extract_meal_plan_from_schedule(s)
@@ -1086,8 +1303,8 @@ JSON:"""
                                             add_date_has_existing_plan = target_schedule is not None
                                             logger.info(f"[SCHEDULING AGENT] PLAN_AHEAD: ADD operation - target date {target_date} has existing plan in DB: {add_date_has_existing_plan}")
                                         
-                                        # REMOVE: delete schedules that only contain the removed date; remember multi-day schedule for persist
-                                        if operation == "remove" and target_date:
+                                        # REMOVE: delete schedules only when removing entire date; if removing a specific dish (meal), skip delete and update slots at persist
+                                        if operation == "remove" and target_date and not mod_intent.get("meal"):
                                             removed_date = target_date
                                             plan_state = get_plan_state(owner_id)
                                             for s in all_schedules:
@@ -1136,6 +1353,10 @@ JSON:"""
                                         if target_schedule:
                                             target_schedule_id = target_schedule.get("id")
                                             db_meal_plan_base, db_shopping_list_base = extract_meal_plan_from_schedule(target_schedule)
+                                            try:
+                                                _, _, _, db_meal_plan_slots_for_remove = _default_storage._extract_meal_plan_from_schedule(target_schedule)
+                                            except Exception:
+                                                pass
                                             
                                             # 合并逻辑：数据库(Base) + 内存中的修改(Current)
                                             # 注意：current_meal_plan 此时已经包含了 PlanAheadAgent 在内存中应用的新修改
@@ -1182,21 +1403,40 @@ JSON:"""
                                 current_shopping_list=current_shopping_list,
                                 gemini_api_url=self.api_url,
                             )
-                        
                         # 4. Update action_data and server state only if plan changed or we applied a modification
                         if parsed_plan or intent_action["data"].get("_applied_modification"):
                             applied_mod = intent_action["data"].get("_applied_modification")
+                            _ingredients_only_op = (intent_action["data"].get("_operation_type") or "") in ("remove_ingredients", "update_ingredients") and not intent_action["data"].get("_ingredients_skip_apply")
                             logger.info(f"[SCHEDULING AGENT] PLAN_AHEAD response handler: Processing - applied_mod={applied_mod}, parsed_plan exists={parsed_plan is not None}")
                             if parsed_plan:
                                 parsed_mp = parsed_plan.get("meal_plan") if isinstance(parsed_plan.get("meal_plan"), dict) else None
                                 parsed_sl = parsed_plan.get("shopping_list") if isinstance(parsed_plan.get("shopping_list"), list) else None
-                                logger.info(f"[SCHEDULING AGENT] PLAN_AHEAD response handler: Parsed plan - parsed_mp keys: {list(parsed_mp.keys()) if parsed_mp else None}, parsed_mp values: {parsed_mp}")
+                                # Fallback: if LLM mentioned ingredients in message but PLAN_JSON has empty shopping_list, extract from response text
+                                if (parsed_sl is None or len(parsed_sl) == 0) and response_text:
+                                    extracted = self._extract_ingredients_from_response_text(response_text)
+                                    if extracted:
+                                        parsed_sl = extracted
+                                        logger.info(f"[SCHEDULING AGENT] PLAN_AHEAD response handler: Extracted ingredients from response text: {parsed_sl}")
+                                logger.info(f"[SCHEDULING AGENT] PLAN_AHEAD response handler: Parsed plan - parsed_mp keys: {list(parsed_mp.keys()) if parsed_mp else None}, parsed_mp values: {parsed_mp}, parsed_sl: {parsed_sl}")
+                                # Only trust PLAN_JSON for dates in current plan or this turn's target date(s); ignore hallucinated dates
+                                allowed_dates = set(current_meal_plan.keys()) if current_meal_plan else set()
+                                if mod_intent:
+                                    if isinstance(mod_intent.get("operations"), list):
+                                        for op in mod_intent.get("operations", []):
+                                            if op.get("date"):
+                                                allowed_dates.add(op["date"])
+                                    elif mod_intent.get("date"):
+                                        allowed_dates.add(mod_intent["date"])
+                                if parsed_mp and allowed_dates:
+                                    parsed_mp = {k: v for k, v in parsed_mp.items() if k in allowed_dates}
                                 # View-only subset: LLM echoed only the range we showed; merge and do not persist
                                 if not applied_mod and parsed_mp is not None and current_meal_plan and set(parsed_mp.keys()) < set(current_meal_plan.keys()):
                                     logger.info(f"[SCHEDULING AGENT] PLAN_AHEAD response handler: View-only subset detected, merging")
                                     intent_action["data"]["meal_plan"] = {**current_meal_plan, **parsed_mp}
                                     if parsed_sl is not None:
                                         intent_action["data"]["shopping_list"] = parsed_sl
+                                    if not _ingredients_only_op and isinstance(parsed_plan.get("dish_ingredients"), dict):
+                                        intent_action["data"]["dish_ingredients"] = parsed_plan["dish_ingredients"]
                                 # Multiple operations: handle all operations (remove first, then add/modify)
                                 if applied_mod and mod_intent and isinstance(mod_intent.get("operations"), list):
                                     operations_list = mod_intent.get("operations")
@@ -1207,12 +1447,40 @@ JSON:"""
                                         intent_action["data"]["shopping_list"] = list(set((current_shopping_list or []) + parsed_sl))
                                     else:
                                         intent_action["data"]["shopping_list"] = current_shopping_list
-                                
-                                # Add: if target date already has plan, skip; otherwise merge with existing schedule and save
+                                    if not _ingredients_only_op and isinstance(parsed_plan.get("dish_ingredients"), dict):
+                                        intent_action["data"]["dish_ingredients"] = parsed_plan["dish_ingredients"]
+
+                                # Add: if target date already has plan, treat as update-existing (merge dish and persist); otherwise merge and maybe create new
                                 elif applied_mod and mod_intent and mod_intent.get("operation") == "add":
                                     if add_date_has_existing_plan:
-                                        logger.info(f"[SCHEDULING AGENT] PLAN_AHEAD response handler: ADD operation - target date already has plan, skipping save")
-                                        # Don't update intent_action, keep current state
+                                        # Same day already has a plan: current_meal_plan already has merged "A and B" from apply_plan_modification. Update existing schedule.
+                                        logger.info(f"[SCHEDULING AGENT] PLAN_AHEAD response handler: ADD operation - target date already has plan, will UPDATE existing schedule with merged meal")
+                                        intent_action["data"]["meal_plan"] = current_meal_plan
+                                        intent_action["data"]["shopping_list"] = list(set((current_shopping_list or []) + (parsed_sl or [])))
+                                        # Merge dish_ingredients and meal_plan_slots: existing from target_schedule + new from applied/parsed
+                                        try:
+                                            _, _, db_dish_ingredients, db_meal_plan_slots = _default_storage._extract_meal_plan_from_schedule(target_schedule)
+                                            parsed_di = parsed_plan.get("dish_ingredients") if isinstance(parsed_plan.get("dish_ingredients"), dict) else {}
+                                            db_di = db_dish_ingredients or {}
+                                            merged_di = {}
+                                            for k in set(db_di) | set(parsed_di):
+                                                merged_di[k] = list(set((db_di.get(k) or []) + (parsed_di.get(k) or [])))
+                                            if not _ingredients_only_op:
+                                                intent_action["data"]["dish_ingredients"] = merged_di
+                                            # For target date use only cur_slots (applied state) so we don't resurrect slots user deleted from that day in DB. For other dates merge db + cur.
+                                            cur_slots = intent_action["data"].get("meal_plan_slots") or {}
+                                            target_date = mod_intent.get("date")
+                                            merged_slots = {}
+                                            for d in set((db_meal_plan_slots or {}).keys()) | set(cur_slots.keys()):
+                                                if d == target_date:
+                                                    merged_slots[d] = dict(cur_slots.get(d) or {})
+                                                else:
+                                                    merged_slots[d] = {**((db_meal_plan_slots or {}).get(d) or {}), **(cur_slots.get(d) or {})}
+                                            intent_action["data"]["meal_plan_slots"] = merged_slots
+                                        except Exception:
+                                            if not _ingredients_only_op and isinstance(parsed_plan.get("dish_ingredients"), dict):
+                                                intent_action["data"]["dish_ingredients"] = parsed_plan["dish_ingredients"]
+                                        # target_schedule_id already set above; persist_meal_plan will use it to update
                                     else:
                                         logger.info(f"[SCHEDULING AGENT] PLAN_AHEAD response handler: ADD operation - target date has no plan, merging with existing schedule")
                                         # Merge existing plan (if any) with new item
@@ -1220,7 +1488,9 @@ JSON:"""
                                         logger.info(f"[SCHEDULING AGENT] PLAN_AHEAD response handler: ADD operation - merged result keys: {list(intent_action['data']['meal_plan'].keys())}, values: {intent_action['data']['meal_plan']}")
                                         if parsed_sl is not None:
                                             intent_action["data"]["shopping_list"] = list(set((current_shopping_list or []) + parsed_sl))
-                                        
+                                        if not _ingredients_only_op and isinstance(parsed_plan.get("dish_ingredients"), dict):
+                                            intent_action["data"]["dish_ingredients"] = parsed_plan["dish_ingredients"]
+
                                         # If no existing schedule was found, create a new schedule directly
                                         target_date = mod_intent.get("date")
                                         meal = mod_intent.get("meal")
@@ -1236,6 +1506,7 @@ JSON:"""
                                                 if new_schedule_id:
                                                     logger.info(f"[SCHEDULING AGENT] PLAN_AHEAD response handler: Successfully created schedule id={new_schedule_id} for add operation")
                                                     intent_action["data"]["schedule_id"] = new_schedule_id
+                                                    intent_action["data"]["_new_schedule_created_this_turn"] = True
                                                     target_schedule_id = new_schedule_id
                                                     # Update plan state with new schedule ID
                                                     update_plan_state(owner_id=owner_id, schedule_id=new_schedule_id, merge=True)
@@ -1245,9 +1516,24 @@ JSON:"""
                                 elif applied_mod and mod_intent and mod_intent.get("operation") == "modify":
                                     logger.info(f"[SCHEDULING AGENT] PLAN_AHEAD response handler: MODIFY operation - merging")
                                     intent_action["data"]["meal_plan"] = {**current_meal_plan, **(parsed_mp or {})}
-                                    if parsed_sl is not None:
-                                        intent_action["data"]["shopping_list"] = parsed_sl
-                                    
+                                    parsed_di = parsed_plan.get("dish_ingredients") if isinstance(parsed_plan.get("dish_ingredients"), dict) else None
+                                    if not _ingredients_only_op and parsed_di:
+                                        # Merge with existing dish_ingredients so we keep other dishes' lists; parsed_di updates/adds the modified dish only
+                                        current_di = intent_action["data"].get("dish_ingredients") or {}
+                                        merged_di = {**current_di, **parsed_di}
+                                        intent_action["data"]["dish_ingredients"] = merged_di
+                                        from itertools import chain
+                                        # When LLM returned only one dish in dish_ingredients (e.g. "蓝莓煎饼生成清单" -> only 蓝莓煎饼's list), show only that dish's ingredients in shopping_list
+                                        if len(parsed_di) == 1:
+                                            intent_action["data"]["shopping_list"] = sorted(set(next(iter(parsed_di.values()))))
+                                        else:
+                                            intent_action["data"]["shopping_list"] = sorted(set(chain(*merged_di.values())))
+                                    else:
+                                        if parsed_sl is not None:
+                                            intent_action["data"]["shopping_list"] = parsed_sl
+                                        if not _ingredients_only_op and isinstance(parsed_plan.get("dish_ingredients"), dict):
+                                            intent_action["data"]["dish_ingredients"] = parsed_plan["dish_ingredients"]
+
                                     # If no existing schedule was found and target date doesn't have plan, create a new schedule directly
                                     target_date = mod_intent.get("date")
                                     meal = mod_intent.get("meal")
@@ -1264,39 +1550,75 @@ JSON:"""
                                             if new_schedule_id:
                                                 logger.info(f"[SCHEDULING AGENT] PLAN_AHEAD response handler: Successfully created schedule id={new_schedule_id} for modify operation")
                                                 intent_action["data"]["schedule_id"] = new_schedule_id
+                                                intent_action["data"]["_new_schedule_created_this_turn"] = True
                                                 target_schedule_id = new_schedule_id
                                                 # Update plan state with new schedule ID
                                                 update_plan_state(owner_id=owner_id, schedule_id=new_schedule_id, merge=True)
                                         except Exception as e:
                                             logger.error(f"[SCHEDULING AGENT] PLAN_AHEAD response handler: Failed to create schedule for modify: {e}", exc_info=True)
-                                # Remove: drop removed date from current, then overlay any parsed (don't let partial PLAN_JSON overwrite)
+                                # Remove: if removing entire date, drop it; if removing only a dish (meal), current_meal_plan already updated by apply_plan_modification
                                 elif applied_mod and mod_intent and mod_intent.get("operation") == "remove":
-                                    removed_date = mod_intent.get("date")
-                                    logger.info(f"[SCHEDULING AGENT] PLAN_AHEAD response handler: REMOVE operation - removing date {removed_date}")
-                                    base = {k: v for k, v in current_meal_plan.items() if k != removed_date} if current_meal_plan else {}
-                                    intent_action["data"]["meal_plan"] = {**base, **(parsed_mp or {})}
+                                    if mod_intent.get("meal"):
+                                        # Remove one dish from one slot - keep current_meal_plan (already correct)
+                                        intent_action["data"]["meal_plan"] = current_meal_plan
+                                        logger.info(f"[SCHEDULING AGENT] PLAN_AHEAD response handler: REMOVE dish - keeping slot-updated meal_plan")
+                                    else:
+                                        removed_date = mod_intent.get("date")
+                                        logger.info(f"[SCHEDULING AGENT] PLAN_AHEAD response handler: REMOVE operation - removing date {removed_date}")
+                                        base = {k: v for k, v in current_meal_plan.items() if k != removed_date} if current_meal_plan else {}
+                                        intent_action["data"]["meal_plan"] = {**base, **(parsed_mp or {})}
+                                        # If parsed_mp brings removed_date back, restore meal_plan_slots from DB so lunch/dinner aren't flattened to dinner
+                                        if (parsed_mp or {}).get(removed_date) and db_meal_plan_slots_for_remove.get(removed_date):
+                                            cur_slots = dict(intent_action["data"].get("meal_plan_slots") or {})
+                                            cur_slots[removed_date] = db_meal_plan_slots_for_remove.get(removed_date) or {}
+                                            intent_action["data"]["meal_plan_slots"] = cur_slots
+                                            logger.info(f"[SCHEDULING AGENT] PLAN_AHEAD response handler: Restored meal_plan_slots for {removed_date} from DB")
                                     if parsed_sl is not None:
                                         intent_action["data"]["shopping_list"] = parsed_sl
+                                # update_ingredients/remove_ingredients: merge dish_ingredients from request handler (already applied) with parsed_plan if LLM returned it
+                                elif applied_mod and mod_intent and mod_intent.get("operation") in ("update_ingredients", "remove_ingredients"):
+                                    logger.info(f"[SCHEDULING AGENT] PLAN_AHEAD response handler: {mod_intent.get('operation')} operation - preserving applied dish_ingredients")
+                                    # Keep meal_plan and shopping_list from current state (ingredients op doesn't change meals)
+                                    intent_action["data"]["meal_plan"] = current_meal_plan
+                                    # Merge dish_ingredients: request handler already applied the change, merge with parsed_plan if LLM returned it
+                                    current_di = intent_action["data"].get("dish_ingredients") or {}
+                                    parsed_di = parsed_plan.get("dish_ingredients") if isinstance(parsed_plan.get("dish_ingredients"), dict) else {}
+                                    if parsed_di:
+                                        # Merge: parsed_di may have additional dishes or updates from LLM
+                                        merged_di = {**current_di, **parsed_di}
+                                        intent_action["data"]["dish_ingredients"] = merged_di
+                                    # If parsed_sl exists, merge with current shopping_list
+                                    if parsed_sl is not None:
+                                        intent_action["data"]["shopping_list"] = list(set((current_shopping_list or []) + parsed_sl))
                                 else:
                                     logger.info(f"[SCHEDULING AGENT] PLAN_AHEAD response handler: Default case - using parsed_mp directly")
-                                    if parsed_mp is not None:
-                                        intent_action["data"]["meal_plan"] = parsed_mp
-                                    if parsed_sl is not None:
-                                        intent_action["data"]["shopping_list"] = parsed_sl
+                                    if not _ingredients_only_op:
+                                        if parsed_mp is not None:
+                                            intent_action["data"]["meal_plan"] = parsed_mp
+                                        if parsed_sl is not None:
+                                            intent_action["data"]["shopping_list"] = parsed_sl
+                                        if isinstance(parsed_plan.get("dish_ingredients"), dict):
+                                            intent_action["data"]["dish_ingredients"] = parsed_plan["dish_ingredients"]
                             
                             meal_plan_final = intent_action["data"].get("meal_plan", {})
                             logger.info(f"[SCHEDULING AGENT] PLAN_AHEAD response handler: meal_plan_final keys: {list(meal_plan_final.keys())}, values: {meal_plan_final}")
                             shopping_list_final = intent_action["data"].get("shopping_list", [])
+                            dish_ingredients_final = intent_action["data"].get("dish_ingredients")
+                            # Get current dish_ingredients from plan state for comparison
+                            current_state = get_plan_state(owner_id)
+                            current_dish_ingredients = current_state.get("dish_ingredients") or {}
+                            logger.info(f"[SCHEDULING AGENT] PLAN_AHEAD response handler: dish_ingredients_final={dish_ingredients_final}, current_dish_ingredients={current_dish_ingredients}")
                             
                             # Only persist when user actually changed something or plan content changed (avoid re-PUT on view-only)
+                            # For ingredients operations, also check if dish_ingredients changed
+                            dish_ingredients_changed = dish_ingredients_final != current_dish_ingredients if dish_ingredients_final is not None else False
                             plan_changed = parsed_plan is not None and (
-                                meal_plan_final != current_meal_plan or shopping_list_final != current_shopping_list
+                                meal_plan_final != current_meal_plan or shopping_list_final != current_shopping_list or dish_ingredients_changed
                             )
                             # Do not persist when we merged a subset (view-only) to avoid wiping other weeks
                             merged_subset = not applied_mod and parsed_plan and isinstance(parsed_plan.get("meal_plan"), dict) and current_meal_plan and set(parsed_plan["meal_plan"].keys()) < set(current_meal_plan.keys())
-                            # For ADD: skip persist if target date already has plan in database (but allow if we just created a new schedule)
-                            # Check if we just created a new schedule (target_schedule_id was set during add operation)
-                            new_schedule_created = intent_action["data"].get("schedule_id") is not None and target_schedule_id == intent_action["data"].get("schedule_id")
+                            # For ADD: skip persist only when we actually created a new schedule this turn (create_schedule_for_add). Updating existing schedule (add_date_has_existing_plan) must persist.
+                            new_schedule_created = intent_action["data"].get("_new_schedule_created_this_turn", False)
                             should_persist = (applied_mod or plan_changed) and not merged_subset
                             
                             # Handle multiple operations: always persist (operations already handled in DB)
@@ -1304,8 +1626,8 @@ JSON:"""
                                 should_persist = True  # Multiple operations always need persist
                                 logger.info(f"[SCHEDULING AGENT] PLAN_AHEAD response handler: Multiple operations - will persist final meal_plan")
                             elif applied_mod and mod_intent and mod_intent.get("operation") == "add" and add_date_has_existing_plan and not new_schedule_created:
-                                should_persist = False
-                                logger.info(f"[SCHEDULING AGENT] PLAN_AHEAD response handler: ADD operation skipped - target date already has plan in database")
+                                should_persist = True  # Update existing schedule with merged meal (add-to-same-day)
+                                logger.info(f"[SCHEDULING AGENT] PLAN_AHEAD response handler: ADD to existing day - will persist (update) schedule id={target_schedule_id}")
                             elif new_schedule_created and mod_intent and mod_intent.get("operation") != "remove":
                                 # Only skip persist for add/modify operations when new schedule was created
                                 # Remove operations always need persist to update the schedule
@@ -1324,16 +1646,27 @@ JSON:"""
                             
                             intent_action["data"]["meal_plan"] = meal_plan_final
                             
-                            # 6. Update server state (replace completely, not merge)
+                            # 6. Update server state (replace completely, not merge); keep meal_plan_slots so next request has breakfast/lunch/dinner
+                            meal_plan_slots_for_state = intent_action["data"].get("meal_plan_slots")
                             update_plan_state(
                                 owner_id=owner_id,
                                 meal_plan=meal_plan_final,
                                 shopping_list=shopping_list_final,
+                                meal_plan_slots=meal_plan_slots_for_state if meal_plan_slots_for_state is not None else {},
                                 merge=False,  # Replace completely to allow removal
                             )
 
                             # 7. Persist to schedule only when plan was modified or meaningfully changed
                             logger.info(f"[SCHEDULING AGENT] PLAN_AHEAD response handler: should_persist={should_persist}, plan_changed={plan_changed}, merged_subset={merged_subset}")
+                            _why = "skip" if not should_persist else "persist"
+                            _reason = []
+                            if not (applied_mod or plan_changed):
+                                _reason.append("not_applied_and_plan_unchanged")
+                            if merged_subset:
+                                _reason.append("merged_subset")
+                            if new_schedule_created and mod_intent and mod_intent.get("operation") != "remove":
+                                _reason.append("new_schedule_created_skip")
+                            logger.info(f"[BACKEND] persist_decision: should_persist={should_persist}, why={_why}, reason={_reason}, applied_mod={applied_mod}, plan_changed={plan_changed}")
                             if should_persist:
                                 plan_state = get_plan_state(owner_id)
                                 existing_id = plan_state.get("schedule_id")
@@ -1341,6 +1674,8 @@ JSON:"""
                                 if target_schedule_id: 
                                     existing_id = target_schedule_id
                                 logger.info(f"[SCHEDULING AGENT] PLAN_AHEAD response handler: Persisting meal_plan - existing_id={existing_id}, meal_plan_final keys: {list(meal_plan_final.keys())}, values: {meal_plan_final}")
+                                meal_plan_slots_final = intent_action["data"].get("meal_plan_slots")
+                                logger.info(f"[BACKEND] meal_plan_slots_final_passed_to_persist: existing_id={existing_id}, meal_plan_final_keys={list(meal_plan_final.keys()) if meal_plan_final else []}, meal_plan_slots_final={meal_plan_slots_final}")
                                 schedule_id = await plan_ahead_agent.persist_meal_plan(
                                     meal_plan=meal_plan_final,
                                     shopping_list=shopping_list_final,
@@ -1349,11 +1684,14 @@ JSON:"""
                                     storage_client=_default_storage,
                                     user_timezone=user_timezone,
                                     event_type="meal_plan_draft",
+                                    dish_ingredients=dish_ingredients_final,
+                                    meal_plan_slots=meal_plan_slots_final,
                                 )
+                                logger.info(f"[BACKEND] persist_result: schedule_id={schedule_id}, success={schedule_id is not None}")
                                 logger.info(f"[SCHEDULING AGENT] PLAN_AHEAD response handler: Persist completed - schedule_id={schedule_id}")
                                 if schedule_id:
                                     intent_action["data"]["schedule_id"] = schedule_id
-                                    update_plan_state(owner_id=owner_id, schedule_id=schedule_id, merge=True)
+                                    update_plan_state(owner_id=owner_id, schedule_id=schedule_id, dish_ingredients=intent_action["data"].get("dish_ingredients"), merge=True)
                                     
                                     # If this was a new addition (not just viewing), modify response to confirm save
                                     # Handle multiple operations: extract dates and meals from operations

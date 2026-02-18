@@ -1,7 +1,11 @@
+import logging
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.api.router import api_router
 import uvicorn
+
+logging.basicConfig(level=logging.WARNING)
+logging.getLogger("app").setLevel(logging.INFO)
 
 app = FastAPI(
     title="家用 AI 文件管家 (Orchestra Service)",

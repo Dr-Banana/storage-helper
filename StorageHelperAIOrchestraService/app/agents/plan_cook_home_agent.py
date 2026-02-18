@@ -1,5 +1,8 @@
 """
-PlanCookHomeAgent: Agent for handling home cooking meal planning
+PlanCookHomeAgent: Sub-agent of Plan Ahead for home cooking (inventory + recipe suggestions).
+
+Not a top-level intent; invoked by the chat pipeline when handling PLAN_AHEAD to inject
+user inventory and support "cook at home" flows (e.g. suggest recipes from existing stock).
 """
 import httpx
 from typing import Dict, Any, List
@@ -9,12 +12,11 @@ from app.storage.pipeline_storage import _get_storage_base_url
 
 class PlanCookHomeAgent(BaseAgent):
     """
-    Home cooking meal planning Agent: Handles recipe generation and meal planning requests
-    Provides suggestions based on user's actual inventory
+    Plan Cook Home sub-agent: Provides user inventory and recipe suggestions.
+    Used under PLAN_AHEAD for cooking-at-home flows.
     """
-    
     def __init__(self):
-        super().__init__("PLAN_COOK_HOME")
+        super().__init__("PLAN_AHEAD_COOK_HOME")
     
     async def _get_user_inventory(self, owner_id: int) -> List[Dict[str, Any]]:
         """

@@ -2,7 +2,7 @@
 Plan Ahead State Manager: Stores and retrieves meal planning state per user.
 Uses in-memory storage keyed by owner_id. For production, consider Redis or DB.
 """
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 from datetime import datetime, timezone
 import logging
 
@@ -31,9 +31,11 @@ def get_plan_state(owner_id: int) -> Dict[str, Any]:
             "meal_plan": state.get("meal_plan", {}),
             "shopping_list": state.get("shopping_list", []),
             "schedule_id": state.get("schedule_id"),
+            "meal_plan_slots": state.get("meal_plan_slots", {}),
+            "dish_ingredients": state.get("dish_ingredients", {}),
             "updated_at": state.get("updated_at"),
         }
-    return {"meal_plan": {}, "shopping_list": []}
+    return {"meal_plan": {}, "shopping_list": [], "meal_plan_slots": {}, "dish_ingredients": {}}
 
 
 def update_plan_state(
@@ -41,51 +43,67 @@ def update_plan_state(
     meal_plan: Optional[Dict[str, str]] = None,
     shopping_list: Optional[list] = None,
     schedule_id = _UNSET,  # Use sentinel to distinguish None from unset
+    meal_plan_slots: Optional[Dict[str, Dict[str, str]]] = None,
+    dish_ingredients: Optional[Dict[str, List[str]]] = None,
     merge: bool = True,
 ) -> Dict[str, Any]:
     """
     Update plan state for a user.
-    
-    Args:
-        owner_id: User ID
-        meal_plan: New meal_plan dict (date -> meal name), or None to keep existing
-        shopping_list: New shopping_list array, or None to keep existing
-        schedule_id: Schedule ID to set, None to clear, or unset to keep existing
-        merge: If True, merge with existing state; if False, replace
-        
-    Returns:
-        Updated state dictionary
+    meal_plan_slots: date -> { breakfast?, lunch?, dinner?, snack? } for storing lunch/breakfast/dinner.
+    dish_ingredients: dish_name -> list of ingredient names for per-dish display (can be updated via chat).
     """
     current = _plan_states.get(owner_id, {})
-    
+
     if merge:
-        # Merge meal_plan
         if meal_plan is not None:
             current_meal_plan = current.get("meal_plan", {})
             current_meal_plan.update(meal_plan)
             current["meal_plan"] = current_meal_plan
         elif "meal_plan" not in current:
             current["meal_plan"] = {}
-        
-        # Merge shopping_list (deduplicate)
+
         if shopping_list is not None:
             current_shopping_list = current.get("shopping_list", [])
-            # Add new items, deduplicate
             combined = list(set(current_shopping_list + shopping_list))
             current["shopping_list"] = combined
         elif "shopping_list" not in current:
             current["shopping_list"] = []
+
+        if meal_plan_slots is not None:
+            cur_slots = current.get("meal_plan_slots", {})
+            for d, slot_dict in meal_plan_slots.items():
+                cur_slots[d] = {**cur_slots.get(d, {}), **slot_dict}
+            current["meal_plan_slots"] = cur_slots
+        elif "meal_plan_slots" not in current:
+            current["meal_plan_slots"] = {}
+
+        if dish_ingredients is not None:
+            cur_di = current.get("dish_ingredients", {})
+            for dish_name, ing_list in dish_ingredients.items():
+                cur_di[dish_name] = list(set(cur_di.get(dish_name, []) + (ing_list or [])))
+            current["dish_ingredients"] = cur_di
+        elif "dish_ingredients" not in current:
+            current["dish_ingredients"] = {}
     else:
-        # Replace
         if meal_plan is not None:
             current["meal_plan"] = meal_plan
         elif "meal_plan" not in current:
             current["meal_plan"] = {}
-        
+
         if shopping_list is not None:
             current["shopping_list"] = shopping_list
         elif "shopping_list" not in current:
             current["shopping_list"] = []
+
+        if meal_plan_slots is not None:
+            current["meal_plan_slots"] = meal_plan_slots
+        elif "meal_plan_slots" not in current:
+            current["meal_plan_slots"] = {}
+
+        if dish_ingredients is not None:
+            current["dish_ingredients"] = dish_ingredients
+        elif "dish_ingredients" not in current:
+            current["dish_ingredients"] = {}
 
     # Handle schedule_id: support explicit None to clear stale ID
     if schedule_id is not _UNSET:

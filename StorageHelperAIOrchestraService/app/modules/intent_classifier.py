@@ -13,12 +13,12 @@ class Intent(str, Enum):
     SEARCH = "SEARCH"
     UPDATE = "UPDATE"
     PLAN_EAT_OUT = "PLAN_EAT_OUT"
-    PLAN_COOK_HOME = "PLAN_COOK_HOME"
     PLAN_AHEAD = "PLAN_AHEAD"
     GENERAL = "GENERAL"
 
+
 class IntentClassificationResult(BaseModel):
-    intent: Intent = Field(..., description="The detected intent of the user. MUST be one of: SEARCH, UPDATE, PLAN_EAT_OUT, PLAN_COOK_HOME, PLAN_AHEAD, GENERAL.")
+    intent: Intent = Field(..., description="The detected intent of the user. MUST be one of: SEARCH, UPDATE, PLAN_EAT_OUT, PLAN_AHEAD, GENERAL.")
     confidence: float = Field(..., description="Confidence score from 0.0 to 1.0.")
     reasoning: str = Field(..., description="Brief explanation of why this intent was chosen.")
 
@@ -41,24 +41,23 @@ You are an expert Intent Classifier for a Home AI Agent. Your task is to analyze
 3. **PLAN_EAT_OUT**: The user wants to plan a meal outside the home. This includes restaurant reservations, looking for places to eat, or checking restaurant information.
    - Example: "Book a table for two at a sushi place", "Where should we go for dinner tonight?", "Check the menu for the Italian restaurant nearby".
 
-4. **PLAN_COOK_HOME**: The user wants to plan or execute a meal at home USING EXISTING INVENTORY. This includes recipe generation based on what they already have, using up ingredients, or checking what to cook with current stock.
-   - Example: "What can I cook with tomatoes and eggs?", "Generate a recipe for a healthy dinner with what I have", "What to make from my fridge".
-
-5. **PLAN_AHEAD**: The user wants to PLAN AHEAD for a period (e.g. next week): decide what meals to eat, then get a shopping list of ingredients to buy, or save the list to schedule. This includes:
+4. **PLAN_AHEAD**: The user wants to PLAN AHEAD for a period or a specific date: decide what to cook (possibly via dialogue), then get a meal plan and shopping list of ingredients to buy, or save to schedule. Plan Cook Home is a sub-flow under PLAN_AHEAD (cooking at home, using inventory or deciding what to cook). This includes:
+   - Cooking at home using existing inventory: "What can I cook with tomatoes and eggs?", "Generate a recipe with what I have", "What to make from my fridge".
+   - Planning to cook at home on a date but not yet decided what to cook: "I'm planning to cook at home next Monday but I don't know what to cook", "下周一想在家做饭但不知道做什么".
    - Starting or continuing a meal plan: "What should I eat next week?", "Help me plan next week's meals", "Yes", "What's your recommendation?"
    - Viewing the current meal plan: "What plan do I have?", "What do I have now?", "Show me my plan", "What's my current plan?"
    - Editing the meal plan: "Change Monday's meal to pork", "Swap Sunday's dinner", "Wednesday change to something spicy"
-   - CRITICAL: If recent conversation history shows the user is in the middle of planning meals for next week, phrases like "what I have", "what do I have now", "what plan" mean "show my meal plan" — use PLAN_AHEAD, NOT SEARCH.
+   - CRITICAL: If recent conversation history shows the user is in the middle of planning meals, phrases like "what I have", "what do I have now", "what plan" mean "show my meal plan" — use PLAN_AHEAD, NOT SEARCH.
    - When in meal planning context, "change X's meal" = PLAN_AHEAD, NOT UPDATE.
 
-6. **GENERAL**: Basic greetings, general conversation, or queries that don't fit the above tasks.
+5. **GENERAL**: Basic greetings, general conversation, or queries that don't fit the above tasks.
    - Example: "Hello", "How are you?", "What can you do?".
 
 PRIORITY RULE: If the recent conversation (last few turns) is about planning meals for next week, and the user says something ambiguous like "what I have" or "change Monday's meal", prefer PLAN_AHEAD over SEARCH or UPDATE.
 
 Respond ONLY with a JSON object that strictly adheres to the following schema:
 {
-  "intent": "SEARCH" | "UPDATE" | "PLAN_EAT_OUT" | "PLAN_COOK_HOME" | "PLAN_AHEAD" | "GENERAL",
+  "intent": "SEARCH" | "UPDATE" | "PLAN_EAT_OUT" | "PLAN_AHEAD" | "GENERAL",
   "confidence": number (0.0 to 1.0),
   "reasoning": "string"
 }

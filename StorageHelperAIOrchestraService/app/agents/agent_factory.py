@@ -27,16 +27,22 @@ class AgentFactory:
         return cls._instance
     
     def _initialize_agents(self):
-        """Initialize all agent instances"""
+        """Initialize all agent instances. Plan Cook Home is a sub-agent of Plan Ahead, not a top-level intent."""
         self._agents = {
             Intent.SEARCH: SearchAgent(),
             Intent.UPDATE: UpdateAgent(),
             Intent.PLAN_EAT_OUT: PlanEatOutAgent(),
-            Intent.PLAN_COOK_HOME: PlanCookHomeAgent(),
             Intent.PLAN_AHEAD: PlanAheadAgent(),
             Intent.GENERAL: GeneralAgent(),
         }
-    
+        self._plan_cook_home_sub_agent: Optional[PlanCookHomeAgent] = None
+
+    def get_plan_cook_home_sub_agent(self) -> PlanCookHomeAgent:
+        """Return the Plan Cook Home sub-agent (used under PLAN_AHEAD for inventory and recipe suggestions)."""
+        if self._plan_cook_home_sub_agent is None:
+            self._plan_cook_home_sub_agent = PlanCookHomeAgent()
+        return self._plan_cook_home_sub_agent
+
     def get_agent(self, intent: Intent) -> BaseAgent:
         """
         Get the corresponding agent based on intent

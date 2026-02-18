@@ -12,6 +12,8 @@ from datetime import datetime, date, timedelta
 from typing import Optional, List, Tuple, Dict, Any, Literal
 import logging
 import json
+import os
+import re
 import httpx
 
 # --- NEW IMPORTS FOR DATABASE WRITE ---
@@ -35,6 +37,79 @@ except ImportError:
     logger.warning("[SCHEDULING AGENT] plan_ahead_state module not available")
 
 logger = logging.getLogger(__name__)
+
+
+def _robust_json_parse(text: str, expect_object: bool = True) -> Optional[Dict[str, Any]]:
+    """
+    Parse JSON from LLM output with common fixes for instability.
+    - Strips markdown code blocks (```json ... ``` or ``` ... ```)
+    - Extracts first complete {...} or [...] by brace/bracket matching
+    - Removes trailing commas before } or ]
+    - Retries with fixes on JSONDecodeError
+    """
+    if not text or not isinstance(text, str):
+        return None
+    raw = text.strip()
+    # Strip markdown code block
+    if raw.startswith("```"):
+        lines = raw.split("\n")
+        if lines and lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        raw = "\n".join(lines)
+    # Find first complete JSON object or array
+    start_char = "{"
+    end_char = "}"
+    if not expect_object:
+        if raw.strip().startswith("["):
+            start_char, end_char = "[", "]"
+    start_idx = raw.find(start_char)
+    if start_idx < 0:
+        return None
+    depth = 0
+    in_string = None
+    escape = False
+    i = start_idx
+    while i < len(raw):
+        c = raw[i]
+        if in_string:
+            if escape:
+                escape = False
+            elif c == "\\":
+                escape = True
+            elif c == in_string:
+                in_string = None
+            i += 1
+            continue
+        if c in ('"', "'"):
+            in_string = c
+            i += 1
+            continue
+        if c == start_char:
+            depth += 1
+        elif c == end_char:
+            depth -= 1
+            if depth == 0:
+                json_str = raw[start_idx : i + 1]
+                break
+        i += 1
+    else:
+        return None
+    # Fix common LLM mistakes: trailing comma before } or ]
+    json_str = re.sub(r",\s*}", "}", json_str)
+    json_str = re.sub(r",\s*]", "]", json_str)
+    try:
+        return json.loads(json_str)
+    except json.JSONDecodeError:
+        pass
+    # Retry: fix trailing comma after last value (e.g. {"a":1,} -> {"a":1})
+    json_str = re.sub(r",\s*}", "}", json_str)
+    json_str = re.sub(r",\s*]", "]", json_str)
+    try:
+        return json.loads(json_str)
+    except json.JSONDecodeError:
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -196,7 +271,9 @@ JSON:"""
             raw = data.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "")
             if not raw or not raw.strip():
                 return None
-            parsed = json.loads(raw.strip())
+            parsed = _robust_json_parse(raw.strip(), expect_object=True)
+            if not parsed:
+                return None
             start_s, end_s = parsed.get("start"), parsed.get("end")
             if not start_s or not end_s:
                 return None
@@ -591,7 +668,9 @@ JSON:"""
             raw = data.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "")
             if not raw or not raw.strip():
                 return None
-            parsed = json.loads(raw.strip())
+            parsed = _robust_json_parse(raw.strip(), expect_object=True)
+            if not parsed:
+                return None
             op = (parsed.get("operation") or "").lower()
             if op == "none" or op not in ("add", "delete", "modify"):
                 return None
@@ -920,17 +999,45 @@ class PlanAheadAgent:
         storage_client: Any,  # PipelineStorage instance
     ) -> Dict[str, Any]:
         """
-        Sync meal plan state from database to ensure we have the latest data.
+        Sync meal plan state from database so chat and calendar use the same data.
         Returns synced state with meal_plan, shopping_list, schedule_id.
-
-        NOTE: All schedule *fetch* operations are temporarily disabled while
-        the schedule service is being redesigned. This method now returns an
-        empty state without calling storage_client.get_user_schedules.
         """
+        try:
+            schedules = await storage_client.get_user_schedules(owner_id)
+        except Exception as e:
+            logger.warning(f"[SCHEDULING AGENT] PlanAheadAgent: get_user_schedules failed for user {owner_id}: {e}")
+            return {"meal_plan": {}, "shopping_list": [], "schedule_id": None, "meal_plan_slots": {}, "dish_ingredients": {}}
+        merged_meal_plan: Dict[str, str] = {}
+        merged_shopping_list: List[str] = []
+        merged_slots: Dict[str, Dict[str, str]] = {}
+        merged_dish_ingredients: Dict[str, List[str]] = {}
+        first_meal_plan_schedule_id: Optional[int] = None
+        for s in schedules:
+            if s.get("event_type") not in ("meal_plan_draft", "shopping_list"):
+                continue
+            mp, sl, di, slots = storage_client._extract_meal_plan_from_schedule(s)
+            if mp:
+                merged_meal_plan.update(mp)
+                if first_meal_plan_schedule_id is None:
+                    first_meal_plan_schedule_id = s.get("id")
+            if sl:
+                merged_shopping_list = list(set(merged_shopping_list + sl))
+            for d, slot_dict in (slots or {}).items():
+                merged_slots[d] = {**merged_slots.get(d, {}), **slot_dict}
+            for dish_name, ing_list in (di or {}).items():
+                merged_dish_ingredients[dish_name] = list(set(merged_dish_ingredients.get(dish_name, []) + (ing_list or [])))
+        result = {
+            "meal_plan": merged_meal_plan,
+            "shopping_list": merged_shopping_list,
+            "schedule_id": first_meal_plan_schedule_id,
+            "meal_plan_slots": merged_slots,
+            "dish_ingredients": merged_dish_ingredients,
+        }
         logger.info(
-            f"[SCHEDULING AGENT] PlanAheadAgent: Meal plan sync from database is disabled for user {owner_id}"
+            f"[SCHEDULING AGENT] PlanAheadAgent: Synced from DB for user {owner_id}: "
+            f"{len(merged_meal_plan)} meals, {len(merged_shopping_list)} ingredients, schedule_id={first_meal_plan_schedule_id}"
         )
-        return {"meal_plan": {}, "shopping_list": [], "schedule_id": None}
+        return result
 
     async def extract_modification_intent(
         self,
@@ -976,48 +1083,34 @@ class PlanAheadAgent:
         
         history_blob = ""
         if history and len(history) >= 2:
-            recent = history[-4:]
-            history_blob = "\nRecent conversation:\n"
+            # Use last 8 messages so "同一天" / "same day" can be linked to earlier "再加一个X" (add another dish)
+            recent = history[-8:]
+            history_blob = "\nRecent conversation (use this to resolve references like 'same day' or the dish name from previous user message):\n"
             for msg in recent:
                 role = "User" if msg.get("role") == "user" else "Assistant"
-                history_blob += f"{role}: {msg.get('content', '')[:250]}\n"
+                history_blob += f"{role}: {msg.get('content', '')[:350]}\n"
 
-        prompt = f"""You are extracting meal plan modification intent. Current date: {today.strftime('%Y-%m-%d')}.
-Date reference (weekday -> YYYY-MM-DD): {date_ref}
-Current plan: {json.dumps(current_meal_plan, ensure_ascii=False)}
+        prompt = f"""Extract meal-plan intent. Return one JSON object.
+
+Input: today={today.strftime('%Y-%m-%d')}, dates={date_ref}, plan={json.dumps(current_meal_plan, ensure_ascii=False)}
 {history_blob}
-User's latest input: "{user_input}"
+User: "{user_input}"
 
-Determine the modification intent. You can return EITHER:
-- A single operation (old format): {{"operation": "...", "date": "...", "meal": "...", "append": bool}}
-- Multiple operations (new format): {{"operations": [{{"operation": "...", "date": "...", "meal": "..."}}, ...]}}
+Output format (single): {{"operation":"add|modify|remove|update_ingredients|remove_ingredients|none", "date":"YYYY-MM-DD"?, "meal"?,"dish"?,"ingredients"?[], "append"?bool, "meal_time"?:"breakfast"|"lunch"|"dinner"}}
+Or (multi): {{"operations":[{{"operation","date","meal"?,"meal_time"?}}, ...]}}
 
-For single operation:
-- operation: "remove" | "modify" | "add" | "none"
-- date: "YYYY-MM-DD" (required if operation is remove/modify/add; use date reference)
-- meal: string (required only for modify/add; the meal name)
-- append: boolean (true if user wants to ADD ANOTHER dish to existing date; false to replace)
+Responsibilities (pick ONE; order matters):
+1) INGREDIENTS — User lists items FOR an existing dish (e.g. "早餐要 hashbrown 还有煎蛋") and plan already has that meal: -> "update_ingredients", dish = existing dish from plan, ingredients = listed items. "今天的早饭加上ingredients"/"早饭加上ingredients"/"X加上ingredients" = add ingredients FOR that meal/dish: -> "update_ingredients", dish = existing dish name for that date/meal from plan (e.g. today breakfast = plan's value for today; if 日餐 on that date then dish=日餐). ingredients = [] if user did not list items. Do NOT use add with meal="ingredients". Delete/删掉 ingredients for dish X: -> "remove_ingredients", dish=X. No date.
+2) MEAL PLAN — Add: new dish on a date (date, meal, meal_time). "今天早上做个X"/"今天我打算早上做个早餐"/"做个鸡蛋 薯饼和面包" (today) -> add, date=today from Input, meal=X or 早餐 or 鸡蛋 薯饼和面包, meal_time=breakfast. Modify: replace dish on date. "把X变为单独的一道菜" (plan has A and B and X that day) -> modify, that date, meal="A and B and X" (keep all, X separate in list). Remove: drop date. 早饭/早餐/breakfast->meal_time "breakfast"; 午饭/午餐->"lunch"; 晚饭/晚餐->"dinner".
+3) DATE MOVE — "改到X" / "time should be X not Y": -> operations [remove old_date, add new_date with same meal].
+4) SAME DAY — "同一天"/"same day" after "加X": -> add, append=true, date=plan date, meal=X from history.
+5) CONFIRM — "做个X吧"/"就X吧" with one date in plan: -> modify, that date, meal=X.
+5.5) RENAME+INGREDIENTS — User renames/changes a dish AND asks to add/set ingredients for it (e.g. "做个毛氏红烧肉吧，把食材加上", "改成X，加上食材"): -> operations: [{{"operation":"modify","date":...,"meal":new_name}}, {{"operation":"update_ingredients","dish":new_name,"ingredients":[]}}]. Always use the operations list for this combined case.
+6) VIEW — "what's my plan"/只看/满意: -> "none".
 
-For multiple operations (use when user wants to correct/move a plan):
-- operations: array of operation objects, each with operation, date, meal (if needed), append (if needed)
-- Execute operations in order: remove operations first, then add/modify
+Examples: add (today breakfast)->{{"operation":"add","date":"{today.strftime('%Y-%m-%d')}","meal":"早餐","append":false,"meal_time":"breakfast"}}; modify (split dish)->{{"operation":"modify","date":"2026-02-15","meal":"鸡蛋 and 薯饼 and 面包 and hashbrown","append":false}}; remove->{{"operation":"remove","date":"2026-02-10","meal":null,"append":false}}; update_ingredients->{{"operation":"update_ingredients","dish":"西式早餐","ingredients":["hashbrown","煎蛋"]}}; remove_ingredients->{{"operation":"remove_ingredients","dish":"日餐"}}; multi->{{"operations":[{{"operation":"remove","date":"2026-02-22"}},{{"operation":"add","date":"2026-02-15","meal":"Indian food"}}]}}; none->{{"operation":"none","date":null,"meal":null,"append":false}}
 
-CRITICAL RULES:
-1. If user says "time should be [new_date] not [old_date]" or "change from [old_date] to [new_date]" -> return multiple operations: [{{"operation":"remove","date":"old_date"}}, {{"operation":"add","date":"new_date","meal":"[meal from old_date]"}}]
-2. If user says "and [another dish]" or "also [dish]" or "add another [dish]" -> append=true, operation="add"
-3. If user says "[day] will be [dish]" -> append=false, operation="modify" (replace)
-4. If user says "[dish] on [day]" without context -> append=false, operation="add"
-5. Infer the date from conversation context if not explicitly mentioned
-6. When correcting dates, preserve the meal name from the old date
-
-Examples:
-- "remove tuesday" -> {{"operation":"remove","date":"2026-02-10","meal":null,"append":false}}
-- "change thursday to pizza" -> {{"operation":"modify","date":"2026-02-12","meal":"Pizza","append":false}}
-- "add pasta on friday" -> {{"operation":"add","date":"2026-02-13","meal":"Pasta","append":false}}
-- "time should be feb 15th not 22nd" (current plan has Indian food on 2026-02-22) -> {{"operations":[{{"operation":"remove","date":"2026-02-22"}},{{"operation":"add","date":"2026-02-15","meal":"Indian food"}}]}}
-- "change from monday to tuesday" (current plan has Pizza on Monday) -> {{"operations":[{{"operation":"remove","date":"2026-02-09"}},{{"operation":"add","date":"2026-02-10","meal":"Pizza"}}]}}
-- "what's my plan" -> {{"operation":"none","date":null,"meal":null,"append":false}}
-
+Return only one JSON object, no markdown or extra text.
 JSON:"""
 
         try:
@@ -1029,11 +1122,13 @@ JSON:"""
                 resp = await client.post(api_url, headers={"Content-Type": "application/json"}, json=payload)
                 resp.raise_for_status()
                 data = resp.json()
-            text = data.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "")
+            text = (data.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "") or "").strip()
             if not text:
                 return None
-            parsed = json.loads(text)
-            
+            parsed = _robust_json_parse(text, expect_object=True)
+            if parsed is None:
+                logger.warning("[SCHEDULING AGENT] PlanAheadAgent: extract_modification_intent robust JSON parse failed")
+                return None
             # Check for multiple operations format
             if "operations" in parsed and isinstance(parsed.get("operations"), list):
                 operations = parsed.get("operations", [])
@@ -1043,16 +1138,27 @@ JSON:"""
                     for op in operations:
                         op_type = op.get("operation")
                         if op_type and op_type != "none":
-                            date_val = op.get("date")
-                            if date_val:
-                                valid_ops.append(op)
+                            # update_ingredients/remove_ingredients need a dish (not a date)
+                            if op_type in ("update_ingredients", "remove_ingredients"):
+                                if op.get("dish"):
+                                    valid_ops.append(op)
+                            else:
+                                date_val = op.get("date")
+                                if date_val:
+                                    valid_ops.append(op)
                     if valid_ops:
                         logger.info(f"[SCHEDULING AGENT] PlanAheadAgent: Extracted multiple modification intents: {len(valid_ops)} operations")
                         return {"operations": valid_ops}
                 return None
             
             # Single operation format (backward compatible)
-            op = parsed.get("operation")
+            op = (parsed.get("operation") or "").lower()
+            if op in ("remove_ingredients", "update_ingredients"):
+                dish_val = parsed.get("dish")
+                if dish_val:
+                    logger.info(f"[SCHEDULING AGENT] PlanAheadAgent: Extracted ingredients intent: {parsed}")
+                    return parsed
+                return None
             if op and op != "none":
                 date_val = parsed.get("date")
                 if date_val:
@@ -1068,72 +1174,96 @@ JSON:"""
         meal_plan: Dict[str, str],
         shopping_list: List[str],
         intent: Dict[str, Any],
-    ) -> Dict[str, str]:
-        """Apply modification intent to meal_plan. Returns new meal_plan dict.
-        
-        Supports both single operation and multiple operations:
-        - Single: {"operation": "add", "date": "...", "meal": "..."}
-        - Multiple: {"operations": [{"operation": "remove", "date": "..."}, {"operation": "add", "date": "...", "meal": "..."}]}
+        meal_plan_slots: Optional[Dict[str, Dict[str, str]]] = None,
+    ) -> Tuple[Dict[str, str], Dict[str, Dict[str, str]]]:
+        """Apply modification intent. Returns (new_meal_plan, new_meal_plan_slots).
+        meal_plan_slots: date -> { breakfast?, lunch?, dinner?, snack? }. When intent has meal_time (e.g. lunch), update that slot.
         """
-        plan = dict(meal_plan)
-        
-        # Handle multiple operations
+        # Start from slots: use existing or derive from flat meal_plan (all as dinner)
+        slots: Dict[str, Dict[str, str]] = {}
+        if meal_plan_slots:
+            for d, s in meal_plan_slots.items():
+                slots[d] = dict(s)
+        for d, text in meal_plan.items():
+            if d not in slots:
+                slots[d] = {}
+            # Only default flat text to dinner when this date has no slot info at all; otherwise we'd resurrect or duplicate (e.g. add dinner: "burger" when user had only breakfast)
+            if not slots[d] and text:
+                slots[d]["dinner"] = text
+
+        def apply_one(op: str, date: Optional[str], meal: Optional[str], append: bool, meal_time: str) -> None:
+            if not date:
+                return
+            if date not in slots:
+                slots[date] = {}
+            mt = meal_time or "dinner"
+            if op == "remove":
+                if meal and mt:
+                    # Remove only this dish from this slot; support partial match (e.g. "汉堡" removes "蘑菇汉堡")
+                    current = (slots.get(date) or {}).get(mt) or ""
+                    meal_lower = meal.strip().lower()
+                    parts = [
+                        p.strip() for p in re.split(r"\s+and\s+", current, flags=re.IGNORECASE)
+                        if p.strip() and not (p.strip().lower() == meal_lower or meal_lower in p.strip().lower())
+                    ]
+                    if parts:
+                        slots[date][mt] = " and ".join(parts)
+                    else:
+                        slots[date].pop(mt, None)
+                    if not slots.get(date):
+                        slots.pop(date, None)
+                    logger.info(f"[SCHEDULING AGENT] PlanAheadAgent: Removed '{meal}' from {date} {mt}")
+                else:
+                    slots.pop(date, None)
+                    logger.info(f"[SCHEDULING AGENT] PlanAheadAgent: Removed date {date} from meal plan")
+            elif op in ("modify", "add") and meal:
+                if append and mt in slots.get(date, {}):
+                    slots[date][mt] = f"{slots[date][mt]} and {meal}"
+                else:
+                    slots[date][mt] = meal
+                logger.info(f"[SCHEDULING AGENT] PlanAheadAgent: {op} date {date} {mt} to '{meal}'")
+
+        # Multi-op
         if "operations" in intent and isinstance(intent.get("operations"), list):
-            operations = intent.get("operations", [])
-            # Execute remove operations first, then add/modify
-            sorted_ops = sorted(operations, key=lambda x: 0 if x.get("operation") == "remove" else 1)
-            
+            sorted_ops = sorted(intent["operations"], key=lambda x: 0 if x.get("operation") == "remove" else 1)
             for op_intent in sorted_ops:
-                op = op_intent.get("operation")
-                date = op_intent.get("date")
-                meal = op_intent.get("meal")
-                append = op_intent.get("append", False)
-                
-                if op == "remove" and date:
-                    plan.pop(date, None)
-                    logger.info(f"[SCHEDULING AGENT] PlanAheadAgent: Removed date {date} from meal plan (multi-op)")
-                elif op == "modify" and date and meal:
-                    if date in plan and append:
-                        existing = plan[date]
-                        plan[date] = f"{existing} and {meal}"
-                    else:
-                        plan[date] = meal
-                    logger.info(f"[SCHEDULING AGENT] PlanAheadAgent: Modified date {date} to '{meal}' (multi-op)")
-                elif op == "add" and date and meal:
-                    if date in plan:
-                        existing = plan[date]
-                        plan[date] = f"{existing} and {meal}"
-                    else:
-                        plan[date] = meal
-                    logger.info(f"[SCHEDULING AGENT] PlanAheadAgent: Added meal '{meal}' to date {date} (multi-op)")
-            
-            return plan
-        
-        # Single operation (backward compatible)
-        op = intent.get("operation")
-        date = intent.get("date")
-        meal = intent.get("meal")
-        append = intent.get("append", False)
-        
-        if op == "remove" and date:
-            plan.pop(date, None)
-            logger.info(f"[SCHEDULING AGENT] PlanAheadAgent: Removed date {date} from meal plan")
-        elif op == "modify" and date and meal:
-            if date in plan and append:
-                existing = plan[date]
-                plan[date] = f"{existing} and {meal}"
-            else:
-                plan[date] = meal
-            logger.info(f"[SCHEDULING AGENT] PlanAheadAgent: Modified date {date} to '{meal}'")
-        elif op == "add" and date and meal:
-            if date in plan:
-                existing = plan[date]
-                plan[date] = f"{existing} and {meal}"
-            else:
-                plan[date] = meal
-            logger.info(f"[SCHEDULING AGENT] PlanAheadAgent: Added meal '{meal}' to date {date}")
-        
-        return plan
+                apply_one(
+                    op_intent.get("operation", ""),
+                    op_intent.get("date"),
+                    op_intent.get("meal"),
+                    op_intent.get("append", False),
+                    op_intent.get("meal_time") or "dinner",
+                )
+        else:
+            op = intent.get("operation")
+            date = intent.get("date")
+            meal = intent.get("meal")
+            apply_one(op, date, meal, intent.get("append", False), intent.get("meal_time") or "dinner")
+
+        # Build flat meal_plan from slots for backward compat (concat all dishes per date)
+        plan = {}
+        for d, s in slots.items():
+            parts = [v for v in s.values() if v]
+            if parts:
+                plan[d] = " and ".join(parts)
+        return plan, slots
+
+    def execute_operation(
+        self,
+        op_type: str,
+        mod_intent: Dict[str, Any],
+        meal_plan: Dict[str, str],
+        meal_plan_slots: Dict[str, Dict[str, str]],
+        shopping_list: List[str],
+    ) -> Tuple[Dict[str, str], Dict[str, Dict[str, str]]]:
+        """
+        Apply op_type (add/modify/remove/multi) to meal_plan via apply_plan_modification.
+        Returns (meal_plan, meal_plan_slots). VIEW/unknown returns inputs unchanged.
+        """
+        if op_type in ("add", "modify", "remove", "multi"):
+            logger.info(f"[SCHEDULING AGENT] execute_operation: op_type={op_type}, date={mod_intent.get('date')}, meal={mod_intent.get('meal')}")
+            return self.apply_plan_modification(meal_plan, shopping_list, mod_intent, meal_plan_slots=meal_plan_slots)
+        return meal_plan, meal_plan_slots
 
     async def create_schedule_for_add(
         self,
@@ -1230,9 +1360,11 @@ JSON:"""
         meal_plan: Dict[str, str],
         shopping_list: List[str],
         user_timezone: Optional[str] = None,
+        dish_ingredients: Optional[Dict[str, List[str]]] = None,
     ) -> str:
         """
         Generate context message for PLAN_AHEAD mode.
+        dish_ingredients: dish_name -> list of ingredient names so LLM can preserve/update via chat.
         """
         now = self._now_in_timezone(user_timezone)
         today = now.date()
@@ -1250,6 +1382,12 @@ JSON:"""
         context_msg += "\nYou MUST end EVERY response with a PLAN_JSON line showing the COMPLETE final plan."
         context_msg += "\nFormat: PLAN_JSON: {\"meal_plan\": {\"YYYY-MM-DD\": \"meal name\", ...}, \"shopping_list\": [\"item1\", ...]}"
         context_msg += "\nExample: PLAN_JSON: {\"meal_plan\": {\"2025-02-10\": \"Stir Fry\", \"2025-02-12\": \"Tacos\"}, \"shopping_list\": [\"beef\", \"rice\"]}"
+        context_msg += "\n\nCRITICAL: When you mention ingredients in your message (e.g. 'I have added Eggs, Tomatoes, and Scallions to your list'), you MUST include the SAME ingredients in the PLAN_JSON shopping_list array. Never output PLAN_JSON with empty shopping_list if you listed ingredients in the message."
+        context_msg += "\n\nWhen the SAME day has MULTIPLE dishes (e.g. \"西红柿炒鸡蛋 and 红烧肉\"), you MUST output dish_ingredients so each dish shows its own ingredients:"
+        context_msg += "\nPLAN_JSON: {\"meal_plan\": {\"YYYY-MM-DD\": \"Dish A and Dish B\"}, \"shopping_list\": [\"a1\", \"b1\"], \"dish_ingredients\": {\"Dish A\": [\"a1\", \"a2\"], \"Dish B\": [\"b1\", \"b2\"]}}"
+        context_msg += "\nThis prevents mixing ingredients: 西红柿炒鸡蛋 gets 鸡蛋/西红柿/葱, 红烧肉 gets 五花肉/冰糖/酱油, etc."
+        context_msg += "\n\nWhen user adds or updates ingredients for a dish (e.g. 'add curry to indian food', 'indian food ingredients: rice, naan'), output dish_ingredients in PLAN_JSON with that dish's list updated (merge with existing dish_ingredients above)."
+        context_msg += "\n\nWhen user asks to generate a list for ONE dish only (e.g. 'X生成清单', 'generate list for X', '我要吃X生成清单'), output dish_ingredients with ONLY that dish's ingredients (e.g. {\"X\": [\"ing1\", \"ing2\"]}). Do NOT include other dishes' ingredients in shopping_list or dish_ingredients for that response."
         context_msg += "\n\nWhen to save: When user says 'save' or 'add to schedule', add a line: SAVE_TO_SCHEDULE"
         
         separator_line = "=" * 60
@@ -1258,6 +1396,8 @@ JSON:"""
             context_msg += f"\nCURRENT PLAN STATE (SYNCED FROM DATABASE - THIS IS THE ONLY TRUTH):"
             context_msg += f"\nmeal_plan={json.dumps(meal_plan, ensure_ascii=False)}"
             context_msg += f"\nshopping_list={json.dumps(shopping_list, ensure_ascii=False)}"
+            if dish_ingredients:
+                context_msg += f"\ndish_ingredients={json.dumps(dish_ingredients, ensure_ascii=False)}"
             context_msg += f"\n{separator_line}"
             context_msg += "\n\nCRITICAL RULES FOR PLAN_JSON OUTPUT:"
             context_msg += "\n\nRULE 0 (MOST IMPORTANT): IGNORE ALL MEAL PLANS FROM CHAT HISTORY!"
@@ -1287,36 +1427,19 @@ JSON:"""
         """
         Parse PLAN_JSON from LLM response text.
         Returns parsed plan dict or None if not found/invalid.
+        Uses robust parsing (trailing comma fix, markdown strip) for stability.
         """
         plan_json_marker = "PLAN_JSON:"
-        
         if plan_json_marker not in response_text:
             return None
-        
-        try:
-            idx = response_text.find(plan_json_marker)
-            json_str = response_text[idx + len(plan_json_marker):].strip()
-            # Trim to first complete JSON object
-            brace = json_str.find("{")
-            if brace >= 0:
-                depth = 0
-                end = brace
-                for i, c in enumerate(json_str[brace:], start=brace):
-                    if c == "{":
-                        depth += 1
-                    elif c == "}":
-                        depth -= 1
-                        if depth == 0:
-                            end = i
-                            break
-                json_str = json_str[brace:end + 1]
-            parsed = json.loads(json_str)
-            if isinstance(parsed.get("meal_plan"), dict) or isinstance(parsed.get("shopping_list"), list):
-                logger.info("[SCHEDULING AGENT] PlanAheadAgent: Parsed PLAN_JSON from response")
-                return parsed
-        except (json.JSONDecodeError, ValueError) as parse_err:
-            logger.warning(f"[SCHEDULING AGENT] PlanAheadAgent: Could not parse PLAN_JSON: {parse_err}")
-        
+        idx = response_text.find(plan_json_marker)
+        json_slice = response_text[idx + len(plan_json_marker):].strip()
+        parsed = _robust_json_parse(json_slice, expect_object=True)
+        if parsed and (isinstance(parsed.get("meal_plan"), dict) or isinstance(parsed.get("shopping_list"), list)):
+            logger.info("[SCHEDULING AGENT] PlanAheadAgent: Parsed PLAN_JSON from response")
+            return parsed
+        if parsed is None and ("{" in json_slice and "meal_plan" in json_slice):
+            logger.warning("[SCHEDULING AGENT] PlanAheadAgent: Could not parse PLAN_JSON (robust parse returned None)")
         return None
 
     def try_detect_removal_from_response(
@@ -1463,8 +1586,8 @@ JSON:"""
                 
                 json_string = result.get('candidates', [{}])[0].get('content', {}).get('parts', [{}])[0].get('text')
                 if json_string:
-                    parsed = json.loads(json_string)
-                    if isinstance(parsed.get("meal_plan"), dict) or isinstance(parsed.get("shopping_list"), list):
+                    parsed = _robust_json_parse(json_string, expect_object=True)
+                    if parsed and (isinstance(parsed.get("meal_plan"), dict) or isinstance(parsed.get("shopping_list"), list)):
                         logger.info("[SCHEDULING AGENT] PlanAheadAgent: Extracted plan from text using LLM")
                         return parsed
         except Exception as e:
@@ -1501,18 +1624,23 @@ JSON:"""
         storage_client: Any,  # PipelineStorage instance
         user_timezone: Optional[str] = None,
         event_type: str = "meal_plan_draft",
+        dish_ingredients: Optional[Dict[str, List[str]]] = None,
+        meal_plan_slots: Optional[Dict[str, Dict[str, str]]] = None,
     ) -> Optional[int]:
         """
         Persist meal plan to schedule. Returns schedule_id if successful, None otherwise.
         If meal plan is empty and there's an existing schedule, deletes it.
+        dish_ingredients: optional map dish_name -> list of ingredient names for per-dish display.
+        meal_plan_slots: optional date -> { breakfast?, lunch?, dinner? } so lunch/breakfast are stored correctly.
         """
         try:
+            logger.info(f"[BACKEND] persist_meal_plan entry: existing_schedule_id={existing_schedule_id}, meal_plan_keys={list(meal_plan.keys()) if meal_plan else []}, has_meal_plan_slots={bool(meal_plan_slots)}")
             # If meal plan is empty and there's an existing schedule, delete it
             if not meal_plan and not shopping_list and existing_schedule_id:
                 logger.info(f"[SCHEDULING AGENT] PlanAheadAgent: Meal plan is empty, deleting schedule id={existing_schedule_id}")
                 await storage_client.delete_schedule(existing_schedule_id, owner_id)
                 return None
-            
+
             # If there's content, save/update the schedule
             if meal_plan or shopping_list:
                 schedule_id = await storage_client.create_or_update_meal_plan_schedule(
@@ -1522,6 +1650,8 @@ JSON:"""
                     existing_schedule_id=existing_schedule_id,
                     event_type=event_type,
                     user_timezone=user_timezone,
+                    dish_ingredients=dish_ingredients,
+                    meal_plan_slots=meal_plan_slots,
                 )
                 if schedule_id:
                     logger.info(f"[SCHEDULING AGENT] PlanAheadAgent: Meal plan persisted to schedule id={schedule_id}")

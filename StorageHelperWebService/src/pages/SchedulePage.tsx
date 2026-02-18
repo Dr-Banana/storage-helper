@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback, useRef, useMemo, memo } from 'react';
-import { Calendar, Plus, MapPin, Edit2, Trash2, CheckCircle2, Circle, ChevronLeft, ChevronRight, Utensils, ShoppingBag, X, ChefHat, ArrowRight } from 'lucide-react';
+import { Calendar, Plus, Edit2, Trash2, CheckCircle2, Circle, ChevronLeft, ChevronRight, Utensils, ShoppingBag, X, ChefHat, ArrowRight } from 'lucide-react';
 import ScheduleService, { Schedule, CreateScheduleRequest } from '../api/scheduleService';
 import clsx from 'clsx';
 
@@ -1004,6 +1004,20 @@ const ScheduleModal: React.FC<ScheduleModalProps> = ({ schedule, selectedDate, o
     metadata: schedule?.metadata || {},
   });
 
+  // Sync form when opening a different schedule (fixes TS6133 and keeps form correct when schedule prop changes)
+  useEffect(() => {
+    setFormData({
+      title: schedule?.title || '',
+      event_type: schedule?.event_type || '',
+      description: schedule?.description || '',
+      scheduled_time: getLocalDateTime(schedule?.scheduled_time),
+      end_time: schedule?.end_time ? getLocalDateTime(schedule.end_time) : '',
+      location: schedule?.location || '',
+      priority: schedule?.priority ?? 0,
+      metadata: schedule?.metadata || {},
+    });
+  }, [schedule?.id, schedule?.title]);
+
   const [isMealPlanMode, setIsMealPlanMode] = useState(() => {
     return !!getMealPlanFeature(schedule || null);
   });
@@ -1024,10 +1038,6 @@ const ScheduleModal: React.FC<ScheduleModalProps> = ({ schedule, selectedDate, o
     return dayPlan ? [dayPlan] : [];
   }, [mealPlanFeature.plans, selectedDate]);
 
-  const handleInputChange = useCallback((field: keyof CreateScheduleRequest, value: any) => {
-    setFormData(prev => ({ ...prev, [field]: value }));
-  }, []);
-
   const toggleMealPlanMode = useCallback(() => {
     setIsMealPlanMode(prev => !prev);
   }, []);
@@ -1041,33 +1051,46 @@ const ScheduleModal: React.FC<ScheduleModalProps> = ({ schedule, selectedDate, o
     setSubmitting(true);
     try {
       let finalMetadata = { ...formData.metadata };
+      let title = formData.title || '';
+      let scheduled_time = formData.scheduled_time;
+      let event_type = formData.event_type || '';
 
       if (isMealPlanMode && mealPlanFeature.plans.length > 0) {
-        // Update feature timestamp
         const updatedFeature: MealPlanFeature = {
           ...mealPlanFeature,
           updated_at: new Date().toISOString()
         };
-        
-        finalMetadata = {
-          ...finalMetadata,
-          features: [updatedFeature]
-        };
+        finalMetadata = { ...finalMetadata, features: [updatedFeature] };
+        event_type = event_type || 'meal_plan_draft';
+        // When creating new (no schedule) and UI only shows Kitchen & Dining: derive title/scheduled_time from first plan
+        if (!schedule) {
+          const firstPlan = mealPlanFeature.plans[0];
+          if (!title && firstPlan?.meals?.length) {
+            const names = firstPlan.meals.flatMap(m => m.dishes.map(d => d.name).filter(Boolean));
+            title = names.length ? names.join(', ') : 'Meal Plan';
+          }
+          if (!title) title = 'Meal Plan';
+          if (firstPlan?.date) {
+            scheduled_time = new Date(firstPlan.date + 'T12:00:00').toISOString().slice(0, 16);
+          }
+        }
       } else {
-        // Remove features if meal plan mode is disabled
         if ('features' in finalMetadata) delete finalMetadata.features;
+        if (!title) title = 'Schedule';
       }
 
       await onSubmit({
         ...formData,
-        scheduled_time: new Date(formData.scheduled_time).toISOString(),
+        title,
+        scheduled_time: new Date(scheduled_time).toISOString(),
         end_time: formData.end_time ? new Date(formData.end_time).toISOString() : undefined,
+        event_type: event_type || undefined,
         metadata: finalMetadata,
       });
     } finally {
       setSubmitting(false);
     }
-  }, [formData, isMealPlanMode, mealPlanFeature, onSubmit]);
+  }, [formData, isMealPlanMode, mealPlanFeature, schedule, onSubmit]);
 
   return (
     // FIX 1: Removed backdrop-blur-sm, changed to simple opaque color for performance
@@ -1100,165 +1123,70 @@ const ScheduleModal: React.FC<ScheduleModalProps> = ({ schedule, selectedDate, o
         {/* FIX 2: Removed transform-gpu, it causes high memory usage and repaint issues on large scroll areas */}
         <div className="flex-1 overflow-y-auto custom-scrollbar">
           <form id="schedule-form" onSubmit={handleSubmit} className="p-8">
-            <div className="flex flex-col lg:flex-row gap-8">
-              
-              {/* Left Column: General Info */}
+            <div className="flex flex-col gap-8">
+              {/* Only Kitchen & Dining for now; Title / Start Time / End Time / Priority / Location / Notes hidden (future) */}
               <div className="flex-1 space-y-6">
-                <div className="space-y-4">
-                  <div>
-                    <label className="block text-sm font-bold text-gray-700 mb-1.5">Title</label>
-                    <input
-                      type="text"
-                      required
-                      value={formData.title}
-                      onChange={(e) => handleInputChange('title', e.target.value)}
-                      className="w-full px-4 py-2.5 bg-gray-50 border border-gray-200 rounded-xl focus:bg-white focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 font-medium text-gray-900 placeholder:text-gray-400"
-                      placeholder="What needs to be done?"
-                    />
-                  </div>
-
-                  <div className="grid grid-cols-2 gap-4">
-                    <div>
-                      <label className="block text-sm font-bold text-gray-700 mb-1.5">Start Time</label>
-                      <input
-                        type="datetime-local"
-                        required
-                        value={formData.scheduled_time}
-                        onChange={(e) => handleInputChange('scheduled_time', e.target.value)}
-                        className="w-full px-4 py-2.5 bg-gray-50 border border-gray-200 rounded-xl focus:bg-white focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 text-sm"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-sm font-bold text-gray-700 mb-1.5">End Time</label>
-                      <input
-                        type="datetime-local"
-                        value={formData.end_time}
-                        onChange={(e) => handleInputChange('end_time', e.target.value)}
-                        className="w-full px-4 py-2.5 bg-gray-50 border border-gray-200 rounded-xl focus:bg-white focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 text-sm"
-                      />
-                    </div>
-                  </div>
-
-                  <div className="grid grid-cols-2 gap-4">
-                    <div>
-                      <label className="block text-sm font-bold text-gray-700 mb-1.5">Type</label>
-                      <input
-                        type="text"
-                        value={formData.event_type || ''}
-                        onChange={(e) => handleInputChange('event_type', e.target.value)}
-                        className="w-full px-4 py-2.5 bg-gray-50 border border-gray-200 rounded-xl focus:bg-white focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 text-sm"
-                        placeholder="e.g. Work, Personal"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-sm font-bold text-gray-700 mb-1.5">Priority</label>
-                      <select
-                        value={formData.priority || 0}
-                        onChange={(e) => handleInputChange('priority', parseInt(e.target.value))}
-                        className="w-full px-4 py-2.5 bg-gray-50 border border-gray-200 rounded-xl focus:bg-white focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 text-sm cursor-pointer"
-                      >
-                        <option value="0">🔵 Normal Priority</option>
-                        <option value="1">🟡 High Priority</option>
-                        <option value="2">🔴 Urgent</option>
-                      </select>
-                    </div>
-                  </div>
-
-                  <div>
-                    <label className="block text-sm font-bold text-gray-700 mb-1.5">Location</label>
-                    <div className="relative">
-                      <MapPin size={18} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-gray-400" />
-                      <input
-                        type="text"
-                        value={formData.location || ''}
-                        onChange={(e) => handleInputChange('location', e.target.value)}
-                        className="w-full pl-10 pr-4 py-2.5 bg-gray-50 border border-gray-200 rounded-xl focus:bg-white focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 text-sm"
-                        placeholder="Add location"
-                      />
-                    </div>
-                  </div>
-
-                  <div>
-                    <label className="block text-sm font-bold text-gray-700 mb-1.5">Notes</label>
-                    <textarea
-                      value={formData.description || ''}
-                      onChange={(e) => handleInputChange('description', e.target.value)}
-                      className="w-full px-4 py-3 bg-gray-50 border border-gray-200 rounded-xl focus:bg-white focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 resize-none text-sm leading-relaxed"
-                      placeholder="Add description..."
-                      rows={4}
-                    />
-                  </div>
-                </div>
+              {/* Mode Toggle */}
+              <div className="flex items-center justify-between">
+                <h3 className="text-sm font-bold text-gray-900 uppercase tracking-wider flex items-center gap-2">
+                  <ChefHat size={18} className="text-orange-500"/> 
+                  Kitchen & Dining
+                </h3>
+                <button 
+                  type="button"
+                  onClick={toggleMealPlanMode}
+                  className={clsx(
+                    "relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2",
+                    isMealPlanMode ? "bg-orange-500" : "bg-gray-200"
+                  )}
+                >
+                  <span className={clsx(
+                    "inline-block h-4 w-4 transform rounded-full bg-white transition-transform",
+                    isMealPlanMode ? "translate-x-6" : "translate-x-1"
+                  )} />
+                </button>
               </div>
 
-              {/* Right Column: Meal & Shopping Context */}
-              <div className="flex-1 lg:border-l lg:border-gray-100 lg:pl-8 space-y-6">
-                
-                {/* Mode Toggle */}
-                <div className="flex items-center justify-between">
-                  <h3 className="text-sm font-bold text-gray-900 uppercase tracking-wider flex items-center gap-2">
-                    <ChefHat size={18} className="text-orange-500"/> 
-                    Kitchen & Dining
-                  </h3>
+              {/* Meal Plan Content */}
+              {isMealPlanMode && (
+                <div className="space-y-6">
+                  <p className="text-sm text-gray-500">
+                    {selectedDate 
+                      ? `Editing meal for ${new Date(selectedDate).toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric' })}`
+                      : 'Plan your meals by date, meal time, and dishes with ingredients.'}
+                  </p>
+
+                  <DetailedMealPlanEditor 
+                    dayPlans={displayedDayPlans} 
+                    onChange={(updatedPlans) => {
+                      setMealPlanFeature(prev => {
+                        if (selectedDate) {
+                          const otherDays = prev.plans.filter(p => p.date !== selectedDate);
+                          return { ...prev, plans: [...otherDays, ...updatedPlans].sort((a, b) => a.date.localeCompare(b.date)) };
+                        }
+                        return { ...prev, plans: updatedPlans };
+                      });
+                    }}
+                    startDate={formData.scheduled_time}
+                  />
+                </div>
+              )}
+              
+              {!isMealPlanMode && (
+                <div className="h-64 flex flex-col items-center justify-center text-center p-8 bg-gray-50 rounded-xl border border-dashed border-gray-200 text-gray-400">
+                  <ChefHat size={48} className="mb-4 opacity-20" />
+                  <p className="text-sm font-medium">Meal planning disabled</p>
                   <button 
-                    type="button"
-                    onClick={toggleMealPlanMode}
-                    className={clsx(
-                      "relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2",
-                      isMealPlanMode ? "bg-orange-500" : "bg-gray-200"
-                    )}
+                    type="button" 
+                    onClick={enableMealPlanMode}
+                    className="mt-2 text-xs text-indigo-600 font-bold hover:underline"
                   >
-                    <span className={clsx(
-                      "inline-block h-4 w-4 transform rounded-full bg-white transition-transform",
-                      isMealPlanMode ? "translate-x-6" : "translate-x-1"
-                    )} />
+                    Enable to add Menu & Grocery list
                   </button>
                 </div>
-
-                {/* Meal Plan Content */}
-                {isMealPlanMode && (
-                  <div className="space-y-6">
-                    <p className="text-sm text-gray-500">
-                      {selectedDate 
-                        ? `Editing meal for ${new Date(selectedDate).toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric' })}`
-                        : 'Plan your meals by date, meal time, and dishes with ingredients.'}
-                    </p>
-
-                    <DetailedMealPlanEditor 
-                      dayPlans={displayedDayPlans} 
-                      onChange={(updatedPlans) => {
-                        // Update the feature with new plans
-                        setMealPlanFeature(prev => {
-                          // If editing single day, merge with existing plans
-                          if (selectedDate) {
-                            const otherDays = prev.plans.filter(p => p.date !== selectedDate);
-                            return { ...prev, plans: [...otherDays, ...updatedPlans].sort((a, b) => a.date.localeCompare(b.date)) };
-                          }
-                          // Otherwise replace all plans
-                          return { ...prev, plans: updatedPlans };
-                        });
-                      }}
-                      startDate={formData.scheduled_time}
-                    />
-                  </div>
-                )}
-                
-                {!isMealPlanMode && (
-                  <div className="h-64 flex flex-col items-center justify-center text-center p-8 bg-gray-50 rounded-xl border border-dashed border-gray-200 text-gray-400">
-                    <ChefHat size={48} className="mb-4 opacity-20" />
-                    <p className="text-sm font-medium">Meal planning disabled</p>
-                    <button 
-                      type="button" 
-                      onClick={enableMealPlanMode}
-                      className="mt-2 text-xs text-indigo-600 font-bold hover:underline"
-                    >
-                      Enable to add Menu & Grocery list
-                    </button>
-                  </div>
-                )}
-              </div>
-
+              )}
             </div>
+          </div>
           </form>
         </div>
 

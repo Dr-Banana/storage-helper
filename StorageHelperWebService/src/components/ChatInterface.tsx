@@ -240,8 +240,8 @@ const MessageItem = memo(({ msg, index, setMessages, setIsLoading }: MessageItem
         
         {/* === Rich Content Embeds === */}
         
-        {/* Meal Plan Card Embed */}
-        {msg.role === 'model' && msg.action === 'PLAN_AHEAD' && msg.actionData && (
+        {/* Meal Plan display disabled: single source of truth is /schedule page. Plan data is persisted there. */}
+        {false && msg.role === 'model' && msg.action === 'PLAN_AHEAD' && msg.actionData && (
           <MealPlanCard 
             plan={msg.actionData} 
             onViewSchedule={msg.actionData.schedule_id ? () => navigate('/schedule') : undefined} 

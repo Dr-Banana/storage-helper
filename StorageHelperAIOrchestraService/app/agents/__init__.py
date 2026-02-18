@@ -9,6 +9,7 @@ from app.agents.plan_cook_home_agent import PlanCookHomeAgent
 from app.agents.plan_ahead_agent import PlanAheadAgent
 from app.agents.general_agent import GeneralAgent
 from app.agents.agent_factory import AgentFactory
+from app.agents.plan_operation_agent import PlanOperationType, get_operation_type
 
 __all__ = [
     "BaseAgent",
@@ -19,4 +20,6 @@ __all__ = [
     "PlanAheadAgent",
     "GeneralAgent",
     "AgentFactory",
+    "PlanOperationType",
+    "get_operation_type",
 ]
