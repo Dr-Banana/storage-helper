@@ -12,8 +12,22 @@ dist
 dist-ssr
 *.local
 
+# Env files with secrets (manage separately per environment)
+.env.android*
+
 # Temporary files
 tmp/
+
+# Capacitor - generated build artifacts (keep capacitor.config.ts, keep android/ios source)
+/android/app/build/
+/android/.gradle/
+/android/local.properties
+/ios/App/App.xcworkspace/xcuserdata/
+/ios/App/Pods/
+
+# Firebase / Google Services - contains API keys, manage via secrets
+/android/app/google-services.json
+/ios/App/App/GoogleService-Info.plist
 
 # Editor directories and files
 .vscode/*

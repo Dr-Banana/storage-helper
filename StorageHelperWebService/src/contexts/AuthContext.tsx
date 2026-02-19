@@ -1,5 +1,6 @@
 import { createContext, useContext, useState, useEffect, ReactNode } from 'react'
-import { setAuthTokenGetter } from '../api/client'
+import { setAuthTokenGetter, getApiBaseUrl } from '../api/client'
+import { nativeGoogleSignOut } from '../services/googleAuth'
 
 interface AuthContextType {
   userId: number | null
@@ -47,7 +48,7 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
       }
 
       try {
-        const response = await fetch('/api/auth/verify', {
+        const response = await fetch(`${getApiBaseUrl()}/auth/verify`, {
           headers: {
             'Authorization': `Bearer ${authToken}`
           }
@@ -107,6 +108,7 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
     localStorage.removeItem('authToken')
     localStorage.removeItem('userEmail')
     localStorage.removeItem('userDisplayName')
+    nativeGoogleSignOut()
   }
 
   return (

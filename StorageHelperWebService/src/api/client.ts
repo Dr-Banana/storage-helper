@@ -1,6 +1,17 @@
 import axios from 'axios'
 
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || '/api'
+/**
+ * Resolve the API base URL for the current runtime environment.
+ *
+ * For native apps (Android/iOS), we rely on `adb reverse` (Android) or
+ * equivalent to tunnel device localhost → host localhost, so no IP rewriting
+ * is needed. Just return the configured URL as-is.
+ */
+export const getApiBaseUrl = (): string => {
+  return import.meta.env.VITE_API_BASE_URL || '/api'
+}
+
+const API_BASE_URL = getApiBaseUrl()
 
 const apiClient = axios.create({
   baseURL: API_BASE_URL,

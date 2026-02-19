@@ -1,3 +1,4 @@
+import { useEffect } from 'react'
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
 import { GoogleOAuthProvider } from '@react-oauth/google'
 import { AuthProvider, useAuth } from './contexts/AuthContext'
@@ -12,6 +13,7 @@ import SearchPage from './pages/SearchPage'
 import ProfilePage from './pages/ProfilePage'
 import LocationsPage from './pages/LocationsPage'
 import SchedulePage from './pages/SchedulePage'
+import { isNativePlatform, initGoogleAuth } from './services/googleAuth'
 
 const AppRoutes = () => {
   const { isAuthenticated } = useAuth()
@@ -41,25 +43,38 @@ const AppRoutes = () => {
 }
 
 function App() {
-  // Get Google Client ID from environment variable
   const googleClientId = import.meta.env.VITE_GOOGLE_CLIENT_ID
-  
+
   if (!googleClientId) {
     console.warn('VITE_GOOGLE_CLIENT_ID environment variable is not set')
   }
 
+  // Initialize native Google Auth plugin on app startup (no-op on web)
+  useEffect(() => {
+    initGoogleAuth()
+  }, [])
+
+  const appTree = (
+    <AuthProvider>
+      <BrowserRouter
+        future={{
+          v7_startTransition: true,
+          v7_relativeSplatPath: true,
+        }}
+      >
+        <AppRoutes />
+      </BrowserRouter>
+    </AuthProvider>
+  )
+
+  // On native Android/iOS, the Google OAuth web script is not used
+  if (isNativePlatform()) {
+    return appTree
+  }
+
   return (
     <GoogleOAuthProvider clientId={googleClientId || ''}>
-      <AuthProvider>
-        <BrowserRouter
-          future={{
-            v7_startTransition: true,
-            v7_relativeSplatPath: true,
-          }}
-        >
-          <AppRoutes />
-        </BrowserRouter>
-      </AuthProvider>
+      {appTree}
     </GoogleOAuthProvider>
   )
 }

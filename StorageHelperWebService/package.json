@@ -8,9 +8,15 @@
     "server": "tsx server/upload-temp.ts",
     "build": "tsc && vite build",
     "preview": "vite preview",
-    "lint": "eslint . --ext ts,tsx --report-unused-disable-directives --max-warnings 0"
+    "lint": "eslint . --ext ts,tsx --report-unused-disable-directives --max-warnings 0",
+    "android:dev": "tsc && vite build --mode development && npx cap sync android",
+    "android:prod": "tsc && vite build && npx cap sync android"
   },
   "dependencies": {
+    "@capacitor/android": "^5.7.8",
+    "@capacitor/cli": "^5.7.8",
+    "@capacitor/core": "^5.7.8",
+    "@codetrix-studio/capacitor-google-auth": "^3.3.6",
     "@react-oauth/google": "^0.12.1",
     "@tailwindcss/typography": "^0.5.19",
     "axios": "^1.6.2",
