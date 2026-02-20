@@ -9,22 +9,20 @@ export default {
   theme: {
     extend: {
       colors: {
-        // Home-style color scheme - warm and cozy
+        // Legacy home colors — kept for backward compatibility
         home: {
-          // Primary colors - warm beige and orange
           primary: {
             50: '#fef9f3',
             100: '#fdf2e7',
             200: '#fae4c9',
             300: '#f6d0a5',
             400: '#f1b570',
-            500: '#ec9a3a', // Primary color
+            500: '#ec9a3a',
             600: '#dd7f1f',
             700: '#b86318',
             800: '#944f1a',
             900: '#784218',
           },
-          // Secondary colors - soft blue
           secondary: {
             50: '#f0f9ff',
             100: '#e0f2fe',
@@ -37,19 +35,16 @@ export default {
             800: '#075985',
             900: '#0c4a6e',
           },
-          // Background colors - cream and beige
           background: {
-            light: '#fefbf7',
-            DEFAULT: '#faf7f2',
-            dark: '#f5f1e8',
+            light: '#FAF9F6',
+            DEFAULT: '#F5F5F4',
+            dark: '#E7E5E4',
           },
-          // Text colors - dark brown
           text: {
-            light: '#8b7355',
-            DEFAULT: '#5d4e37',
-            dark: '#3d3324',
+            light: '#A8A29E',
+            DEFAULT: '#57534E',
+            dark: '#292524',
           },
-          // Success colors - soft green
           success: {
             50: '#f0fdf4',
             100: '#dcfce7',
@@ -59,7 +54,6 @@ export default {
             500: '#22c55e',
             600: '#16a34a',
           },
-          // Warning colors - warm yellow
           warning: {
             50: '#fffbeb',
             100: '#fef3c7',
@@ -69,7 +63,6 @@ export default {
             500: '#f59e0b',
             600: '#d97706',
           },
-          // Error colors - soft red
           error: {
             50: '#fef2f2',
             100: '#fee2e2',
@@ -82,7 +75,7 @@ export default {
         },
       },
       fontFamily: {
-        sans: ['Inter', 'system-ui', 'sans-serif'],
+        sans: ['-apple-system', 'BlinkMacSystemFont', '"Segoe UI"', 'Roboto', 'Helvetica', 'Arial', 'sans-serif'],
       },
       borderRadius: {
         'home': '12px',
@@ -90,6 +83,11 @@ export default {
       boxShadow: {
         'home': '0 2px 8px rgba(0, 0, 0, 0.08)',
         'home-lg': '0 4px 16px rgba(0, 0, 0, 0.12)',
+        'warm': '0 2px 8px rgba(41, 37, 36, 0.06)',
+        'warm-lg': '0 8px 24px rgba(41, 37, 36, 0.10)',
+      },
+      backgroundImage: {
+        'warm-paper': 'linear-gradient(135deg, #FAF9F6 0%, #F5F5F4 100%)',
       },
     },
   },

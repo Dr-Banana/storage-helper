@@ -3,40 +3,99 @@
 @tailwind utilities;
 
 @layer base {
-  * {
-    @apply border-home-background-dark;
+  :root {
+    /* 核心基底：米色与暖灰，保护视力且温馨 */
+    --color-bg: #FAF9F6;
+    --color-surface: #FFFFFF;
+    --color-surface-subtle: #F5F5F4;
+
+    /* 文字颜色：使用深灰而非纯黑，减少刺眼感 */
+    --color-text-main: #292524;
+    --color-text-secondary: #57534E;
+    --color-text-muted: #A8A29E;
+
+    /* 品牌色：沉稳的暖炭色 */
+    --color-primary: #44403C;
+    --color-on-primary: #FFFFFF;
+
+    /* 功能色 */
+    --color-accent-green: #059669;
+    --color-accent-green-bg: #ECFDF5;
+    --color-accent-orange: #EA580C;
+    --color-accent-orange-bg: #FFF7ED;
   }
-  
+
+  * {
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  html {
+    overflow-x: hidden;
+  }
+
   body {
-    @apply bg-home-background-light text-home-text-dark font-sans antialiased;
+    background-color: var(--color-bg);
+    color: var(--color-text-main);
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    overflow-x: hidden;
   }
 }
 
 @layer components {
-  .btn-primary {
-    @apply bg-home-primary-500 hover:bg-home-primary-600 text-white font-medium px-4 py-2 rounded-home transition-colors duration-200 shadow-home;
+  /* ── 卡片 ── */
+  .card-base {
+    @apply bg-white rounded-2xl border border-stone-100;
+    box-shadow: 0 2px 8px rgba(41, 37, 36, 0.05);
   }
-  
+
+  /* ── Legacy card — backward compat ── */
+  .card {
+    @apply bg-white rounded-2xl border border-stone-100 p-6;
+    box-shadow: 0 2px 8px rgba(41, 37, 36, 0.05);
+  }
+
+  /* ── 按钮 ── */
+  .btn-primary {
+    @apply bg-stone-800 text-white px-6 py-3 rounded-xl font-medium
+           active:scale-95 transition-all duration-200
+           flex items-center justify-center gap-2;
+    box-shadow: 0 2px 6px rgba(41, 37, 36, 0.18);
+  }
+
   .btn-secondary {
-    @apply bg-home-background-dark hover:bg-home-background text-home-text-dark font-medium px-4 py-2 rounded-home transition-colors duration-200 border border-home-primary-200;
+    @apply bg-stone-100 hover:bg-stone-200 text-stone-700 font-medium px-4 py-2 rounded-xl
+           transition-colors duration-200 border border-stone-200;
   }
 
   .btn-danger {
-    @apply bg-red-500 hover:bg-red-600 text-white font-medium px-4 py-2 rounded-home transition-colors duration-200 shadow-home;
-  }
-  
-  .card {
-    @apply bg-white rounded-home shadow-home p-6 border border-home-primary-100;
-  }
-  
-  .input {
-    @apply w-full px-4 py-2 border border-home-primary-200 rounded-home focus:outline-none focus:ring-2 focus:ring-home-primary-300 focus:border-home-primary-400 bg-white text-home-text-dark;
+    @apply bg-red-500 hover:bg-red-600 text-white font-medium px-4 py-2 rounded-xl
+           transition-colors duration-200;
   }
 
+  .btn-ghost {
+    @apply text-stone-600 hover:bg-stone-100 px-4 py-2 rounded-xl transition-colors
+           flex items-center justify-center gap-2;
+  }
+
+  /* ── 输入框 ── */
+  .input {
+    @apply w-full px-4 py-3 border border-stone-200 rounded-xl
+           focus:outline-none focus:ring-2 focus:ring-stone-300 focus:border-stone-400
+           bg-white text-stone-800 placeholder:text-stone-400
+           transition-colors duration-150;
+  }
+
+  /* ── 底部导航激活态 ── */
+  .nav-active-pill {
+    @apply bg-stone-100 text-stone-900;
+  }
+
+  /* ── 动画 ── */
   @keyframes slideUp {
     from {
       opacity: 0;
-      transform: translateY(10px);
+      transform: translateY(12px);
     }
     to {
       opacity: 1;
@@ -45,6 +104,39 @@
   }
 
   .animate-slide-up {
-    animation: slideUp 0.4s ease-out forwards;
+    animation: slideUp 0.3s ease-out forwards;
   }
+
+  @keyframes fadeIn {
+    from { opacity: 0; }
+    to   { opacity: 1; }
+  }
+
+  .animate-fade-in {
+    animation: fadeIn 0.25s ease-out forwards;
+  }
+}
+
+/* ── 隐藏滚动条但保留功能 ── */
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+/* ── 自定义滚动条样式（用于模态框等大滚动区域）── */
+.custom-scrollbar::-webkit-scrollbar {
+  width: 4px;
+}
+.custom-scrollbar::-webkit-scrollbar-track {
+  background: #F5F5F4;
+}
+.custom-scrollbar::-webkit-scrollbar-thumb {
+  background: #D6D3D1;
+  border-radius: 2px;
+}
+.custom-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: #A8A29E;
 }

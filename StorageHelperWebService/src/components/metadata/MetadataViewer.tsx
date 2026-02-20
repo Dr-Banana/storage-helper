@@ -1,5 +1,5 @@
-import React, { useState, useEffect } from 'react';
-import { Trash2, Sparkles, Plus } from 'lucide-react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { Trash2, Sparkles, Plus, ChevronRight } from 'lucide-react';
 
 interface MetadataViewerProps {
   metadata: Record<string, any>;
@@ -63,6 +63,22 @@ const ReceiptMetadataViewer: React.FC<{
   const [previewItems, setPreviewItems] = useState<any[] | null>(null);
 
   const displayItems = previewItems || items;
+
+  // Scroll hint: track whether the table can still scroll right
+  const tableScrollRef = useRef<HTMLDivElement>(null);
+  const [canScrollRight, setCanScrollRight] = useState(false);
+
+  const syncScrollHint = useCallback(() => {
+    const el = tableScrollRef.current;
+    if (!el) return;
+    setCanScrollRight(el.scrollLeft < el.scrollWidth - el.clientWidth - 2);
+  }, []);
+
+  useEffect(() => {
+    // Re-check whenever items change (initial render or data update)
+    const id = requestAnimationFrame(syncScrollHint);
+    return () => cancelAnimationFrame(id);
+  }, [displayItems, syncScrollHint]);
   
   // Listen for AI correction events from ChatInterface
   useEffect(() => {
@@ -475,7 +491,21 @@ const ReceiptMetadataViewer: React.FC<{
       </div>
 
       {/* Items Table */}
-      <div className="overflow-x-auto rounded-home border border-home-primary-200">
+      <div className="relative">
+        {/* Right-edge fade gradient — visible when there is still content to scroll to */}
+        {canScrollRight && (
+          <div
+            className="pointer-events-none absolute right-0 top-0 bottom-0 w-12 z-10 flex items-center justify-end pr-1"
+            style={{ background: 'linear-gradient(to right, transparent 0%, rgba(255,255,255,0.95) 100%)' }}
+          >
+            <ChevronRight size={16} className="text-stone-400 animate-pulse" />
+          </div>
+        )}
+        <div
+          ref={tableScrollRef}
+          onScroll={syncScrollHint}
+          className="overflow-x-auto rounded-home border border-home-primary-200"
+        >
         <table className="min-w-full divide-y divide-home-primary-200">
           <thead className="bg-home-primary-50">
             <tr>
@@ -674,7 +704,8 @@ const ReceiptMetadataViewer: React.FC<{
             </button>
           </div>
         )}
-      </div>
+        </div>{/* end overflow-x-auto */}
+      </div>{/* end relative wrapper */}
     </div>
   );
 };

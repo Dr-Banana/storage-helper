@@ -100,7 +100,7 @@ const ProfilePage = () => {
 
   if (loading) {
     return (
-      <div className="max-w-4xl mx-auto">
+      <div className="max-w-4xl mx-auto px-4 sm:px-6 py-6">
         <div className="card text-center py-12">
           <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-home-primary-500 mx-auto"></div>
           <p className="mt-4 text-home-text-light">Loading profile...</p>
@@ -111,7 +111,7 @@ const ProfilePage = () => {
 
   if (!user) {
     return (
-      <div className="max-w-4xl mx-auto">
+      <div className="max-w-4xl mx-auto px-4 sm:px-6 py-6">
         <div className="card text-center py-12">
           <p className="text-home-text-light">Failed to load profile</p>
         </div>
@@ -120,7 +120,7 @@ const ProfilePage = () => {
   }
 
   return (
-    <div className="max-w-4xl mx-auto">
+    <div className="max-w-4xl mx-auto px-4 sm:px-6 py-6">
       <div className="mb-6 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
         <h1 className="text-3xl font-bold text-home-text-dark">My Profile</h1>
         <button

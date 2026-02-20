@@ -2,8 +2,13 @@ import { useState, useEffect, useCallback } from 'react'
 import { Link } from 'react-router-dom'
 import { MapPin, FileText, Plus, Edit2, Trash2, X, ChevronRight, Search, Clock } from 'lucide-react'
 import { locationService, documentService, categoryService, Document, StorageLocation } from '../api/services'
+import { getApiBaseUrl } from '../api/client'
 import { useAuth } from '../contexts/AuthContext'
 import CategoryIcon from '../components/CategoryIcon'
+
+const _API_ORIGIN = getApiBaseUrl().replace(/\/api\/?$/, '')
+const toAbsoluteUrl = (url: string | null | undefined): string =>
+  !url ? '' : (url.startsWith('http://') || url.startsWith('https://')) ? url : _API_ORIGIN + (url.startsWith('/') ? url : '/' + url)
 
 interface LocationFormData {
   name: string
@@ -334,7 +339,7 @@ const LocationsPage = () => {
 
 
   return (
-    <div className="max-w-6xl mx-auto">
+    <div className="max-w-6xl mx-auto px-4 sm:px-6 py-6">
       <div className="mb-6 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
         <h1 className="text-3xl font-bold text-home-text-dark">Storage Locations</h1>
         {userId && (
@@ -414,9 +419,11 @@ const LocationsPage = () => {
                   {location.photo_url && (
                     <div className="mb-4 rounded-xl overflow-hidden aspect-video bg-home-background-dark">
                       <img
-                        src={location.photo_url}
+                        src={toAbsoluteUrl(location.photo_url)}
                         alt={location.name}
                         className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500"
+                        onLoad={(e) => { e.currentTarget.style.display = '' }}
+                        onError={(e) => { e.currentTarget.style.display = 'none' }}
                       />
                     </div>
                   )}
@@ -486,11 +493,15 @@ const LocationsPage = () => {
                       to={`/documents/${doc.id}`}
                       className="flex items-center gap-4 p-4 bg-white rounded-2xl border border-home-primary-100 hover:border-home-primary-300 hover:shadow-home-sm transition-all group"
                     >
-                      <div className="w-12 h-12 rounded-xl bg-home-background-dark overflow-hidden flex-shrink-0 flex items-center justify-center">
-                        {doc.image_url ? (
-                          <img src={doc.image_url} className="w-full h-full object-cover" />
-                        ) : (
-                          <CategoryIcon categoryCode={doc.category_code || (isFood ? 'VEGETABLE' : 'UNKNOWN')} size={20} />
+                      <div className="relative w-12 h-12 rounded-xl bg-home-background-dark overflow-hidden flex-shrink-0 flex items-center justify-center">
+                        <CategoryIcon categoryCode={doc.category_code || (isFood ? 'VEGETABLE' : 'UNKNOWN')} size={20} />
+                        {doc.image_url && (
+                          <img
+                            src={toAbsoluteUrl(doc.image_url)}
+                            className="absolute inset-0 w-full h-full object-cover"
+                            onLoad={(e) => { e.currentTarget.style.display = '' }}
+                            onError={(e) => { e.currentTarget.style.display = 'none' }}
+                          />
                         )}
                       </div>
                       <div className="flex-1 min-w-0">

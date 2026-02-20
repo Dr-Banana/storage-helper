@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, memo } from 'react'
-import { X, Send, Minimize2, Maximize2, FileText, Sparkles, User, BrainCircuit, Check, Calendar, ShoppingCart, ArrowRight } from 'lucide-react'
+import { X, Send, FileText, Sparkles, User, BrainCircuit, Check, Calendar, ShoppingCart, ArrowRight } from 'lucide-react'
 import { Link, useNavigate } from 'react-router-dom'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -311,11 +311,13 @@ const MessageItem = memo(({ msg, index, setMessages, setIsLoading }: MessageItem
   )
 })
 
-const ChatInterface: React.FC = () => {
+interface ChatInterfaceProps {
+  isOpen: boolean
+  onClose: () => void
+}
+
+const ChatInterface: React.FC<ChatInterfaceProps> = ({ isOpen, onClose }) => {
   const { userId } = useAuth()
-  // const navigate = useNavigate() - removed unused
-  const [isOpen, setIsOpen] = useState(false)
-  const [isFullScreen, setIsFullScreen] = useState(false)
   const [messages, setMessages] = useState<Message[]>([
     { role: 'model', content: 'Hi! I\'m your Home AI. How can I help you today?' }
   ])
@@ -338,7 +340,14 @@ const ChatInterface: React.FC = () => {
 
   useEffect(() => {
     if (isOpen) scrollToBottom()
-  }, [messages, isOpen, isFullScreen, isLoading])
+  }, [messages, isOpen, isLoading])
+
+  // Focus input when panel opens
+  useEffect(() => {
+    if (isOpen) {
+      setTimeout(() => inputRef.current?.focus(), 150)
+    }
+  }, [isOpen])
 
   const handleSend = async (overrideInput?: string, overrideContext?: any) => {
     const messageToSend = overrideInput || input.trim()
@@ -410,8 +419,6 @@ const ChatInterface: React.FC = () => {
   // Event Listeners (Open Chat, Context Updates)
   useEffect(() => {
     const handleOpenChat = (e: any) => {
-      setIsOpen(true)
-      setIsFullScreen(false)
       if (e.detail?.context) {
           setActiveContext(e.detail.context);
           if (e.detail.context.type === 'correction') {
@@ -457,19 +464,8 @@ const ChatInterface: React.FC = () => {
     }
   }, [userId, messages, isLoading, activeContext])
 
-  if (!isOpen) {
-    return (
-      <button
-        onClick={() => { setIsOpen(true); setIsFullScreen(false); setActiveContext(null); }}
-        className="fixed bottom-6 right-6 w-14 h-14 bg-home-primary-600 text-white rounded-full shadow-lg shadow-home-primary-600/30 flex items-center justify-center hover:scale-105 hover:bg-home-primary-700 transition-all z-50"
-      >
-        <Sparkles size={24} />
-      </button>
-    )
-  }
-
   return (
-    <div className={`fixed z-50 transition-all duration-300 ease-in-out flex flex-col bg-white shadow-2xl overflow-hidden ring-1 ring-black/5 ${isFullScreen ? 'inset-0 rounded-none' : 'bottom-6 right-6 w-96 h-[650px] rounded-2xl'}`}>
+    <div className="h-full flex flex-col bg-white overflow-hidden">
       
       {/* Header */}
       <div className="px-5 py-4 flex items-center justify-between border-b border-gray-100 bg-white/95 backdrop-blur z-10">
@@ -495,17 +491,14 @@ const ChatInterface: React.FC = () => {
           </div>
         </div>
         <div className="flex items-center gap-1">
-          <button onClick={() => setIsFullScreen(!isFullScreen)} className="p-2 text-gray-400 hover:text-gray-600 hover:bg-gray-50 rounded-lg transition-colors">
-            {isFullScreen ? <Minimize2 size={18} /> : <Maximize2 size={18} />}
-          </button>
-          <button onClick={() => { setIsOpen(false); setActiveContext(null); }} className="p-2 text-gray-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-colors">
+          <button onClick={() => { onClose(); setActiveContext(null); }} className="p-2 text-gray-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-colors">
             <X size={18} />
           </button>
         </div>
       </div>
 
       {/* Messages Area */}
-      <div className={`flex-1 min-h-0 overflow-y-auto p-4 space-y-6 custom-scrollbar bg-gray-50/50 ${isFullScreen ? 'max-w-4xl mx-auto w-full' : ''}`}>
+      <div className="flex-1 min-h-0 overflow-y-auto p-4 space-y-6 custom-scrollbar bg-gray-50/50">
         {messages.map((msg, index) => (
           <MessageItem key={index} index={index} msg={msg} setMessages={setMessages} setIsLoading={setIsLoading} />
         ))}
@@ -526,10 +519,10 @@ const ChatInterface: React.FC = () => {
       </div>
 
       {/* Input Area */}
-      <div className="p-4 bg-white border-t border-gray-100">
+      <div className="p-4 bg-white border-t border-gray-100" style={{ paddingBottom: 'max(1rem, env(safe-area-inset-bottom, 1rem))' }}>
         <form 
           onSubmit={(e) => { e.preventDefault(); handleSend(); }} 
-          className={`relative ${isFullScreen ? 'max-w-4xl mx-auto w-full' : ''}`}
+          className="relative"
         >
           <div className="flex items-end gap-2 w-full bg-gray-100 border border-transparent focus-within:bg-white focus-within:border-home-primary-300 focus-within:ring-4 focus-within:ring-home-primary-50 rounded-xl transition-all">
             <textarea
@@ -545,7 +538,6 @@ const ChatInterface: React.FC = () => {
               placeholder={activeContext ? "Type correction..." : "Ask me anything..."}
               className="flex-1 pl-4 py-3.5 bg-transparent border-none focus:ring-0 text-sm text-gray-800 placeholder-gray-400 outline-none resize-none custom-scrollbar"
               disabled={isLoading}
-              autoFocus
               rows={1}
               style={{ minHeight: '48px', maxHeight: '120px' }}
             />

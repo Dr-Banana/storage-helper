@@ -1,9 +1,13 @@
 import { useState, useEffect } from 'react'
-import { useParams, Link, useNavigate } from 'react-router-dom'
-import { ArrowLeft, Calendar, User, FileText, MapPin, Tag, Trash2, Edit2, Save, X } from 'lucide-react'
+import { useParams, useNavigate } from 'react-router-dom'
+import { Calendar, User, FileText, MapPin, Tag, Trash2, Edit2, Save, X } from 'lucide-react'
 import { documentService, userService, categoryService, locationService, ingestionService, Document, DocumentPage, DocumentFile, DocumentCategory, StorageLocation, CategoryTypeInfo } from '../api/services'
 import { useAuth } from '../contexts/AuthContext'
-import apiClient from '../api/client'
+import apiClient, { getApiBaseUrl } from '../api/client'
+
+const _API_ORIGIN = getApiBaseUrl().replace(/\/api\/?$/, '')
+const toAbsoluteUrl = (url: string | null | undefined): string =>
+  !url ? '' : (url.startsWith('http://') || url.startsWith('https://')) ? url : _API_ORIGIN + (url.startsWith('/') ? url : '/' + url)
 import MetadataViewer from '../components/metadata/MetadataViewer'
 
 const DocumentDetailPage = () => {
@@ -260,10 +264,7 @@ const DocumentDetailPage = () => {
     return (
       <div className="max-w-4xl mx-auto">
         <div className="card text-center py-12">
-          <p className="text-home-text-light mb-4">Document not found</p>
-          <Link to="/documents" className="btn-primary">
-            Back to Documents
-          </Link>
+          <p className="text-home-text-light">Document not found</p>
         </div>
       </div>
     )
@@ -271,21 +272,12 @@ const DocumentDetailPage = () => {
 
   return (
     <div className="max-w-4xl mx-auto">
-      {/* Back button */}
-      <Link
-        to="/documents"
-        className="inline-flex items-center gap-2 text-home-text-light hover:text-home-primary-600 mb-6 transition-colors"
-      >
-        <ArrowLeft size={20} />
-        Back to Documents
-      </Link>
-
       {/* Document info card */}
       <div className="card mb-6">
         <div className="flex flex-col md:flex-row gap-6">
           <div className="flex-1">
-            <div className="flex justify-between items-start mb-4">
-              <h1 className="text-3xl font-bold text-home-text-dark">
+            <div className="flex flex-col sm:flex-row sm:justify-between sm:items-start gap-3 mb-4">
+              <h1 className="text-2xl sm:text-3xl font-bold text-home-text-dark leading-tight">
                 {(() => {
                   // If title is "Document page X" format, use Document #ID instead
                   if (document.title && /^Document page \d+$/i.test(document.title)) {
@@ -298,12 +290,12 @@ const DocumentDetailPage = () => {
                   return document.title
                 })()}
               </h1>
-              <div className="flex gap-2">
+              <div className="flex gap-2 flex-shrink-0">
                 {!editing ? (
                   <>
                     <button
                       onClick={handleStartEdit}
-                      className="btn-secondary flex items-center gap-2"
+                      className="btn-secondary flex items-center gap-2 flex-1 sm:flex-none justify-center"
                     >
                       <Edit2 size={18} />
                       Edit
@@ -311,7 +303,7 @@ const DocumentDetailPage = () => {
                     <button
                       onClick={handleDelete}
                       disabled={deleting}
-                      className="btn-danger flex items-center gap-2"
+                      className="btn-danger flex items-center gap-2 flex-1 sm:flex-none justify-center"
                     >
                       <Trash2 size={18} />
                       {deleting ? 'Deleting...' : 'Delete'}
@@ -322,7 +314,7 @@ const DocumentDetailPage = () => {
                     <button
                       onClick={handleSave}
                       disabled={saving}
-                      className="btn-primary flex items-center gap-2"
+                      className="btn-primary flex items-center gap-2 flex-1 sm:flex-none justify-center"
                     >
                       <Save size={18} />
                       {saving ? 'Saving...' : 'Save'}
@@ -330,7 +322,7 @@ const DocumentDetailPage = () => {
                     <button
                       onClick={handleCancelEdit}
                       disabled={saving}
-                      className="btn-secondary flex items-center gap-2"
+                      className="btn-secondary flex items-center gap-2 flex-1 sm:flex-none justify-center"
                     >
                       <X size={18} />
                       Cancel
@@ -536,7 +528,7 @@ const DocumentDetailPage = () => {
                   {file.file_type === 'pdf' ? (
                     <div className="w-full h-[600px] rounded-home overflow-hidden bg-home-background-dark">
                       <iframe
-                        src={file.url}
+                        src={toAbsoluteUrl(file.url)}
                         className="w-full h-full border-0"
                         title={`PDF Preview ${index + 1}`}
                       />
@@ -544,7 +536,7 @@ const DocumentDetailPage = () => {
                   ) : (
                     <div className="rounded-home overflow-hidden bg-home-background-dark">
                       <img
-                        src={file.url}
+                        src={toAbsoluteUrl(file.url)}
                         alt={`File ${index + 1}`}
                         className="w-full h-auto max-h-[600px] object-contain"
                       />

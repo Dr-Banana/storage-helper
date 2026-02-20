@@ -13,8 +13,18 @@ import {
   Layers
 } from 'lucide-react'
 import { documentService, userService, categoryService, locationService, Document, DocumentFile, DocumentCategory, StorageLocation } from '../api/services'
+import { getApiBaseUrl } from '../api/client'
 import { useAuth } from '../contexts/AuthContext'
 import CategoryIcon from '../components/CategoryIcon'
+
+// On Android/Capacitor there is no Vite proxy. Relative URLs like /app/tmp/... or
+// /api/documents/files?... must be made absolute so they reach the backend via adb reverse.
+const _API_ORIGIN = getApiBaseUrl().replace(/\/api\/?$/, '')
+const toAbsoluteUrl = (url: string | null | undefined): string | null => {
+  if (!url) return null
+  if (url.startsWith('http://') || url.startsWith('https://')) return url
+  return _API_ORIGIN + (url.startsWith('/') ? url : '/' + url)
+}
 
 interface DocumentWithExtras extends Document {
   previewFiles?: DocumentFile[]
@@ -203,7 +213,7 @@ const DocumentsPage = () => {
   const hierarchicalDocs = buildHierarchy(filteredDocuments);
 
   return (
-    <div className="max-w-7xl mx-auto">
+    <div className="max-w-7xl mx-auto px-4 sm:px-6 py-6">
       {/* Page title and actions */}
       <div className="mb-6 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
         <div>
@@ -377,28 +387,31 @@ const DocumentsPage = () => {
                   {/* Delete button (hover only) */}
                   <button
                     onClick={(e) => handleDelete(e, doc.id)}
-                    className="absolute top-3 right-3 p-2 bg-white/90 backdrop-blur-sm text-red-500 rounded-full opacity-0 group-hover:opacity-100 transition-all duration-200 hover:bg-red-500 hover:text-white z-20 shadow-sm"
+                    className="absolute top-3 right-3 p-2 bg-white/90 backdrop-blur-sm text-red-500 rounded-full opacity-0 pointer-events-none group-hover:opacity-100 group-hover:pointer-events-auto transition-all duration-200 hover:bg-red-500 hover:text-white z-20 shadow-sm"
                   >
                     <Trash2 size={16} />
                   </button>
 
                   {/* Media Section */}
                   <div className="relative aspect-[4/3] bg-home-background-dark overflow-hidden">
-                    {doc.image_url ? (
-                      <img
-                        src={doc.image_url}
-                        alt={doc.title}
-                        className="w-full h-full object-cover group-hover:scale-110 transition-transform duration-500"
+                    {/* Fallback icon — always rendered, visible when image absent or fails */}
+                    <div className="absolute inset-0 w-full h-full flex flex-col items-center justify-center p-6 text-center">
+                      <CategoryIcon
+                        categoryCode={doc.category?.code || (isFood ? 'VEGETABLE' : 'UNKNOWN')}
+                        size={48}
+                        className="mb-3 transform group-hover:scale-110 transition-transform duration-300 shadow-sm"
                       />
-                    ) : (
-                      <div className="w-full h-full flex flex-col items-center justify-center p-6 text-center">
-                        <CategoryIcon 
-                          categoryCode={doc.category?.code || (isFood ? 'VEGETABLE' : 'UNKNOWN')} 
-                          size={48} 
-                          className="mb-3 transform group-hover:scale-110 transition-transform duration-300 shadow-sm"
-                        />
-                        {!isFood && <FileText className="text-home-primary-200" size={32} />}
-                      </div>
+                      {!isFood && <FileText className="text-home-primary-200" size={32} />}
+                    </div>
+                    {/* Image overlay — hides itself on error, revealing the icon below */}
+                    {doc.image_url && (
+                      <img
+                        src={toAbsoluteUrl(doc.image_url)!}
+                        alt={doc.title}
+                        className="absolute inset-0 w-full h-full object-cover group-hover:scale-110 transition-transform duration-500"
+                        onLoad={(e) => { e.currentTarget.style.display = '' }}
+                        onError={(e) => { e.currentTarget.style.display = 'none' }}
+                      />
                     )}
                     
                     {/* Category Badge */}
@@ -486,11 +499,15 @@ const DocumentsPage = () => {
                           to={`/documents/${child.id}`}
                           className="flex-1 flex items-center gap-3 min-w-0"
                         >
-                        <div className="w-8 h-8 rounded-lg bg-home-background-dark overflow-hidden flex-shrink-0 flex items-center justify-center">
-                          {child.image_url ? (
-                            <img src={child.image_url} className="w-full h-full object-cover" />
-                          ) : (
-                            <CategoryIcon categoryCode={child.category?.code || 'VEGETABLE'} size={14} />
+                        <div className="relative w-8 h-8 rounded-lg bg-home-background-dark overflow-hidden flex-shrink-0 flex items-center justify-center">
+                          <CategoryIcon categoryCode={child.category?.code || 'VEGETABLE'} size={14} />
+                          {child.image_url && (
+                            <img
+                              src={toAbsoluteUrl(child.image_url)!}
+                              className="absolute inset-0 w-full h-full object-cover"
+                              onLoad={(e) => { e.currentTarget.style.display = '' }}
+                              onError={(e) => { e.currentTarget.style.display = 'none' }}
+                            />
                           )}
                         </div>
                         <div className="flex-1 min-w-0">
@@ -542,11 +559,15 @@ const DocumentsPage = () => {
                       to={`/documents/${doc.id}`}
                       className="flex-1 flex items-center gap-4 min-w-0"
                     >
-                      <div className="w-12 h-12 rounded-xl bg-home-background-dark overflow-hidden flex-shrink-0 flex items-center justify-center">
-                        {doc.image_url ? (
-                          <img src={doc.image_url} className="w-full h-full object-cover" />
-                        ) : (
-                          <CategoryIcon categoryCode={doc.category?.code || (isFood ? 'VEGETABLE' : 'UNKNOWN')} size={20} />
+                      <div className="relative w-12 h-12 rounded-xl bg-home-background-dark overflow-hidden flex-shrink-0 flex items-center justify-center">
+                        <CategoryIcon categoryCode={doc.category?.code || (isFood ? 'VEGETABLE' : 'UNKNOWN')} size={20} />
+                        {doc.image_url && (
+                          <img
+                            src={toAbsoluteUrl(doc.image_url)!}
+                            className="absolute inset-0 w-full h-full object-cover"
+                            onLoad={(e) => { e.currentTarget.style.display = '' }}
+                            onError={(e) => { e.currentTarget.style.display = 'none' }}
+                          />
                         )}
                       </div>
                       
@@ -622,11 +643,10 @@ const DocumentsPage = () => {
                             to={`/documents/${child.id}`}
                             className="flex-1 flex items-center gap-4 min-w-0"
                           >
-                          <div className="w-8 h-8 rounded-lg bg-home-background-dark overflow-hidden flex-shrink-0 flex items-center justify-center">
-                            {child.image_url ? (
-                              <img src={child.image_url} className="w-full h-full object-cover" />
-                            ) : (
-                              <CategoryIcon categoryCode={child.category?.code || 'VEGETABLE'} size={14} />
+                          <div className="relative w-8 h-8 rounded-lg bg-home-background-dark overflow-hidden flex-shrink-0 flex items-center justify-center">
+                            <CategoryIcon categoryCode={child.category?.code || 'VEGETABLE'} size={14} />
+                            {child.image_url && (
+                              <img src={toAbsoluteUrl(child.image_url)!} className="absolute inset-0 w-full h-full object-cover" onLoad={(e) => { e.currentTarget.style.display = '' }} onError={(e) => { e.currentTarget.style.display = 'none' }} />
                             )}
                           </div>
                           <div className="flex-1 min-w-0">
