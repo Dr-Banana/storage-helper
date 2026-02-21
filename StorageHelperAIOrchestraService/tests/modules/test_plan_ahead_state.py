@@ -31,6 +31,8 @@ class TestGetPlanState:
             "shopping_list": [],
             "meal_plan_slots": {},
             "dish_ingredients": {},
+            "is_draft": False,
+            "draft_base_db_dates": set(),
         }
 
     def test_get_existing_state(self):
@@ -245,6 +247,172 @@ class TestClearPlanState:
         """Should return False when state doesn't exist"""
         result = clear_plan_state(owner_id=999)
         assert result is False
+
+
+class TestDraftMode:
+    """Tests for is_draft flag and draft_base_db_dates snapshot field."""
+
+    def test_is_draft_defaults_false_empty_state(self):
+        """Empty state returns is_draft=False."""
+        assert get_plan_state(owner_id=900)["is_draft"] is False
+
+    def test_is_draft_defaults_false_for_legacy_state_without_flag(self):
+        """Old in-memory records that lack is_draft field default to False."""
+        _plan_states[901] = {"meal_plan": {}, "shopping_list": []}
+        assert get_plan_state(901)["is_draft"] is False
+
+    def test_set_is_draft_true(self):
+        """Updating is_draft=True persists the flag."""
+        update_plan_state(owner_id=902, is_draft=True)
+        assert get_plan_state(902)["is_draft"] is True
+
+    def test_confirm_clears_is_draft(self):
+        """Setting is_draft=False after True simulates the confirm step."""
+        update_plan_state(owner_id=903, is_draft=True)
+        update_plan_state(owner_id=903, is_draft=False)
+        assert get_plan_state(903)["is_draft"] is False
+
+    def test_is_draft_unset_does_not_change_existing_value(self):
+        """Calling update without is_draft should leave the existing flag untouched."""
+        update_plan_state(owner_id=904, is_draft=True)
+        update_plan_state(owner_id=904, meal_plan={"2026-03-01": "Pasta"})
+        assert get_plan_state(904)["is_draft"] is True
+
+    def test_draft_base_db_dates_stored_and_retrieved(self):
+        """draft_base_db_dates snapshot is persisted and returned by get_plan_state."""
+        base = {"2026-02-20", "2026-02-21"}
+        update_plan_state(owner_id=905, draft_base_db_dates=base)
+        assert get_plan_state(905)["draft_base_db_dates"] == base
+
+    def test_draft_base_db_dates_defaults_to_empty_set(self):
+        """State without draft_base_db_dates returns an empty set."""
+        _plan_states[906] = {"meal_plan": {}, "shopping_list": []}
+        assert get_plan_state(906)["draft_base_db_dates"] == set()
+
+    def test_draft_base_db_dates_not_modified_when_not_passed(self):
+        """Subsequent updates that omit draft_base_db_dates leave the snapshot intact."""
+        update_plan_state(owner_id=907, draft_base_db_dates={"2026-02-20"})
+        update_plan_state(owner_id=907, meal_plan={"2026-02-21": "Pasta"})
+        assert get_plan_state(907)["draft_base_db_dates"] == {"2026-02-20"}
+
+    def test_full_draft_lifecycle(self):
+        """Simulate recommend → modify → confirm lifecycle through state updates."""
+        oid = 908
+
+        # 1. Recommend: create draft with base snapshot
+        update_plan_state(
+            owner_id=oid,
+            meal_plan={"2026-02-23": "Kung Pao Chicken", "2026-02-24": "Braised Pork"},
+            is_draft=True,
+            draft_base_db_dates={"2026-02-20"},
+            merge=False,
+        )
+        state = get_plan_state(oid)
+        assert state["is_draft"] is True
+        assert len(state["meal_plan"]) == 2
+        assert state["draft_base_db_dates"] == {"2026-02-20"}
+
+        # 2. Modify: add a meal to the draft
+        update_plan_state(oid, meal_plan={"2026-02-25": "Mapo Tofu"}, is_draft=True, merge=True)
+        state = get_plan_state(oid)
+        assert len(state["meal_plan"]) == 3
+        assert state["is_draft"] is True
+
+        # 3. Confirm: finalise (is_draft → False)
+        update_plan_state(oid, is_draft=False, merge=True)
+        state = get_plan_state(oid)
+        assert state["is_draft"] is False
+        assert len(state["meal_plan"]) == 3  # meals intact
+
+
+class TestGhostDateFilter:
+    """
+    Tests for the ghost-date filter logic executed inside execute() at confirm time.
+
+    The filter prevents dates deleted by the user in the Web UI from being
+    "resurrected" when the draft is confirmed.  The logic is:
+        user_deleted = base_db_dates - current_db_dates
+        draft = {d: v for d, v in draft.items() if d not in user_deleted}
+    """
+
+    @staticmethod
+    def _apply_filter(draft_plan, draft_slots, base_db_dates, current_db_dates):
+        """Reproduce the ghost-date filter from plan_ahead_pipeline.execute."""
+        user_deleted = set(base_db_dates) - set(current_db_dates)
+        if not user_deleted:
+            return draft_plan, draft_slots
+        filtered_plan = {d: v for d, v in draft_plan.items() if d not in user_deleted}
+        filtered_slots = {d: v for d, v in draft_slots.items() if d not in user_deleted}
+        return filtered_plan, filtered_slots
+
+    def test_no_deleted_dates_returns_draft_unchanged(self):
+        """If the user deleted nothing, the entire draft is preserved."""
+        plan = {"2026-02-23": "Dish A", "2026-02-24": "Dish B"}
+        slots = {"2026-02-23": {"dinner": ["Dish A"]}, "2026-02-24": {"dinner": ["Dish B"]}}
+        fp, fs = self._apply_filter(plan, slots, {"2026-02-23"}, {"2026-02-23"})
+        assert fp == plan
+        assert fs == slots
+
+    def test_user_deleted_date_is_removed_from_draft(self):
+        """A date the user deleted between recommend and confirm is excluded."""
+        plan = {"2026-02-23": "Dish A", "2026-02-24": "Dish B"}
+        slots = {"2026-02-23": {"dinner": ["Dish A"]}, "2026-02-24": {"dinner": ["Dish B"]}}
+        # Feb 23 was in DB at draft creation but user deleted it since
+        fp, fs = self._apply_filter(plan, slots, {"2026-02-23"}, {})
+        assert "2026-02-23" not in fp
+        assert "2026-02-24" in fp
+        assert "2026-02-23" not in fs
+
+    def test_new_ai_recommended_dates_always_kept(self):
+        """Dates the AI added (never in DB) are NOT treated as deleted."""
+        plan = {"2026-02-23": "Existing", "2026-02-28": "AI New Dish"}
+        slots = {
+            "2026-02-23": {"dinner": ["Existing"]},
+            "2026-02-28": {"dinner": ["AI New Dish"]},
+        }
+        # Feb 23 was in DB; Feb 28 was never in DB
+        fp, _ = self._apply_filter(plan, slots, {"2026-02-23"}, {})
+        assert "2026-02-23" not in fp   # deleted by user
+        assert "2026-02-28" in fp       # new AI recommendation → keep
+
+    def test_empty_base_dates_keeps_entire_draft(self):
+        """If nothing was in DB when the draft was created, nothing gets filtered."""
+        plan = {"2026-02-23": "Dish A", "2026-02-24": "Dish B"}
+        slots = {"2026-02-23": {"dinner": ["Dish A"]}, "2026-02-24": {"dinner": ["Dish B"]}}
+        fp, fs = self._apply_filter(plan, slots, set(), {})
+        assert fp == plan
+        assert fs == slots
+
+    def test_multiple_deleted_dates_all_removed(self):
+        """When the user deleted multiple dates, all of them are stripped."""
+        plan = {
+            "2026-02-20": "Old 1",
+            "2026-02-21": "Old 2",
+            "2026-02-23": "New",
+        }
+        slots = {
+            "2026-02-20": {"dinner": ["Old 1"]},
+            "2026-02-21": {"dinner": ["Old 2"]},
+            "2026-02-23": {"dinner": ["New"]},
+        }
+        fp, _ = self._apply_filter(plan, slots, {"2026-02-20", "2026-02-21"}, {})
+        assert "2026-02-20" not in fp
+        assert "2026-02-21" not in fp
+        assert "2026-02-23" in fp
+
+    def test_partial_deletion_keeps_surviving_db_dates(self):
+        """If the user deleted only some old dates, the rest survive."""
+        plan = {"2026-02-20": "Keep", "2026-02-21": "Deleted", "2026-02-25": "AI"}
+        slots = {
+            "2026-02-20": {"dinner": ["Keep"]},
+            "2026-02-21": {"dinner": ["Deleted"]},
+            "2026-02-25": {"dinner": ["AI"]},
+        }
+        # Feb 20 and Feb 21 were in DB; user only deleted Feb 21
+        fp, _ = self._apply_filter(plan, slots, {"2026-02-20", "2026-02-21"}, {"2026-02-20"})
+        assert "2026-02-20" in fp    # still in DB → kept
+        assert "2026-02-21" not in fp  # deleted
+        assert "2026-02-25" in fp    # AI recommendation → kept
 
 
 class TestIntegrationScenarios:

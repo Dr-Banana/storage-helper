@@ -49,10 +49,11 @@ PLAN_AHEAD_RESPONSE_SCHEMA: Dict[str, Any] = {
     "properties": {
         "action": {
             "type": "string",
-            "enum": ["add", "modify", "remove", "update_ingredients", "remove_ingredients", "view"],
+            "enum": ["add", "modify", "remove", "update_ingredients", "remove_ingredients", "view", "ask", "recommend", "confirm"],
         },
         "target_date": {"type": "string"},
         "meal_time": {"type": "string", "enum": ["breakfast", "lunch", "dinner"]},
+        "recommendation_reason": {"type": "string", "nullable": True},
         "user_message": {"type": "string"},
         "meal_entries": {
             "type": "array",
@@ -1039,14 +1040,22 @@ class PlanAheadAgent:
                     if isinstance(val, list):
                         slots[d][mt] = list(val)
                     elif isinstance(val, str) and val.strip():
-                        parts = [p.strip() for p in re.split(r"\s+and\s+", val, flags=re.IGNORECASE) if p.strip()]
-                        slots[d][mt] = parts if parts else [val.strip()]
+                        # Treat the whole string as a single dish name to avoid splitting
+                        # dish names that contain " and " (e.g. "Fish and Chips").
+                        slots[d][mt] = [val.strip()]
         for d, text in meal_plan.items():
             if d not in slots:
                 slots[d] = {}
             if not slots[d] and text:
-                parts = [p.strip() for p in re.split(r"\s+and\s+", text, flags=re.IGNORECASE) if p.strip()]
-                slots[d]["dinner"] = parts if parts else [text.strip()]
+                # Legacy flat string from DB: may be ", "-joined (sync path) or
+                # " and "-joined (parse_structured_response path).
+                # Split by comma first; fall back to whole string to avoid breaking
+                # dish names that contain " and ".
+                if "," in text:
+                    parts = [p.strip() for p in text.split(",") if p.strip()]
+                else:
+                    parts = [text.strip()]
+                slots[d]["dinner"] = parts
 
         def apply_one(op: str, date: Optional[str], meal: Optional[str], append: bool, meal_time: str) -> None:
             if not date:
@@ -1071,7 +1080,9 @@ class PlanAheadAgent:
                     slots.pop(date, None)
                     logger.info(f"[SCHEDULING AGENT] PlanAheadAgent: Removed date {date} from meal plan")
             elif op in ("modify", "add") and meal:
-                meal_parts = [p.strip() for p in re.split(r"\s+and\s+", meal, flags=re.IGNORECASE) if p.strip()]
+                # The meal value from LLM-structured intent is a single dish name;
+                # do NOT split by " and " — "Fish and Chips" is one dish.
+                meal_parts = [meal.strip()] if meal.strip() else []
                 if not meal_parts:
                     meal_parts = [meal.strip()]
                 if append and mt in slots.get(date, {}):
@@ -1097,7 +1108,8 @@ class PlanAheadAgent:
             meal = intent.get("meal")
             apply_one(op, date, meal, intent.get("append", False), intent.get("meal_time") or "dinner")
 
-        # Build flat meal_plan from slots (backward compat: concat all dishes per date with " and ")
+        # Build flat meal_plan from slots (backward-compat legacy string for storage layer).
+        # meal_plan_slots is the authoritative structure; meal_plan is derived only.
         plan: Dict[str, str] = {}
         for d, s in slots.items():
             all_dishes: List[str] = []
@@ -1227,7 +1239,11 @@ class PlanAheadAgent:
         try:
             data = json.loads(response_text.strip())
         except json.JSONDecodeError:
-            logger.warning("[SCHEDULING AGENT] parse_structured_response: JSON decode failed")
+            snippet = response_text.strip()[:300].replace("\n", "\\n")
+            logger.warning(
+                f"[SCHEDULING AGENT] parse_structured_response: JSON decode failed. "
+                f"Response snippet: {snippet!r}"
+            )
             return None
 
         meal_entries = data.get("meal_entries")
@@ -1253,7 +1269,16 @@ class PlanAheadAgent:
                 if not name:
                     continue
                 dish_names.append(name)
-                ings = [i.strip() for i in (dish.get("ingredients") or []) if isinstance(i, str) and i.strip()]
+                # Accept both string format ["pasta"] and object format [{"name": "pasta"}].
+                raw_ings = dish.get("ingredients") or []
+                ings = []
+                for i in raw_ings:
+                    if isinstance(i, str) and i.strip():
+                        ings.append(i.strip())
+                    elif isinstance(i, dict):
+                        n = (i.get("name") or "").strip()
+                        if n:
+                            ings.append(n)
                 if ings:
                     dish_ingredients[name] = ings
             if dish_names:

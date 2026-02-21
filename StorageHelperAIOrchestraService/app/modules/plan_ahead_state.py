@@ -2,7 +2,7 @@
 Plan Ahead State Manager: Stores and retrieves meal planning state per user.
 Uses in-memory storage keyed by owner_id. For production, consider Redis or DB.
 """
-from typing import Dict, Any, Optional, List, Union
+from typing import Dict, Any, Optional, List, Set, Union
 from datetime import datetime, timezone
 import logging
 
@@ -33,9 +33,16 @@ def get_plan_state(owner_id: int) -> Dict[str, Any]:
             "schedule_id": state.get("schedule_id"),
             "meal_plan_slots": state.get("meal_plan_slots", {}),
             "dish_ingredients": state.get("dish_ingredients", {}),
+            "is_draft": state.get("is_draft", False),
+            # Date strings that were already in DB when the recommend draft was created.
+            # Used at confirm time to detect dates the user deleted via the Web UI.
+            "draft_base_db_dates": state.get("draft_base_db_dates", set()),
             "updated_at": state.get("updated_at"),
         }
-    return {"meal_plan": {}, "shopping_list": [], "meal_plan_slots": {}, "dish_ingredients": {}}
+    return {
+        "meal_plan": {}, "shopping_list": [], "meal_plan_slots": {}, "dish_ingredients": {},
+        "is_draft": False, "draft_base_db_dates": set(),
+    }
 
 
 def update_plan_state(
@@ -45,6 +52,8 @@ def update_plan_state(
     schedule_id = _UNSET,  # Use sentinel to distinguish None from unset
     meal_plan_slots: Optional[Dict[str, Dict[str, Any]]] = None,
     dish_ingredients: Optional[Dict[str, List[str]]] = None,
+    is_draft = _UNSET,  # True = draft (not saved to DB); False = confirmed
+    draft_base_db_dates: Optional[Set[str]] = None,  # snapshot of DB dates at draft creation
     merge: bool = True,
 ) -> Dict[str, Any]:
     """
@@ -114,10 +123,20 @@ def update_plan_state(
         else:
             current["schedule_id"] = schedule_id
 
+    if is_draft is not _UNSET:
+        current["is_draft"] = bool(is_draft)
+
+    if draft_base_db_dates is not None:
+        current["draft_base_db_dates"] = set(draft_base_db_dates)
+
     current["updated_at"] = datetime.now(timezone.utc)
     _plan_states[owner_id] = current
-    
-    logger.info(f"Updated plan state for user {owner_id}: {len(current.get('meal_plan', {}))} meals, {len(current.get('shopping_list', []))} items")
+
+    draft_flag = current.get("is_draft", False)
+    logger.info(
+        f"Updated plan state for user {owner_id}: {len(current.get('meal_plan', {}))} meals, "
+        f"{len(current.get('shopping_list', []))} items, is_draft={draft_flag}"
+    )
     return current
 
 
