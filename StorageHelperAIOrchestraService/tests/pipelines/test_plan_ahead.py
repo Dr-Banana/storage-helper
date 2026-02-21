@@ -1,135 +1,179 @@
 """
-Tests for PLAN_AHEAD pipeline methods - Core functionality only
+Tests for PLAN_AHEAD pipeline — new schema-based architecture.
+
+Covers:
+- compute_shopping_list: deterministic ingredient aggregation
+- parse_structured_response: structured LLM JSON → internal state
 """
+import json
 import pytest
-from datetime import datetime, timezone
-from app.pipelines.chat import ChatPipeline
+from app.agents.scheduling_agent import compute_shopping_list, PlanAheadAgent
 
 
-class TestApplyPlanModification:
-    """Tests for _apply_plan_modification method"""
+class TestComputeShoppingList:
+    """Tests for the deterministic compute_shopping_list function."""
 
-    def test_remove_existing_date(self):
-        """Should remove meal from existing date"""
-        pipeline = ChatPipeline()
-        meal_plan = {"2026-02-10": "Pasta", "2026-02-11": "Pizza"}
-        
-        intent = {
-            "operation": "remove",
-            "date": "2026-02-10"
+    def test_basic_aggregation(self):
+        """Ingredients from multiple dishes are merged into a sorted unique list."""
+        dish_ingredients = {
+            "Pasta": ["pasta", "tomato", "garlic"],
+            "Pizza": ["flour", "tomato", "cheese"],
         }
-        
-        result = pipeline._apply_plan_modification(meal_plan, [], intent)
-        
-        assert "2026-02-10" not in result
-        assert result == {"2026-02-11": "Pizza"}
+        result = compute_shopping_list(dish_ingredients)
+        assert result == sorted({"pasta", "tomato", "garlic", "flour", "cheese"})
 
-    def test_modify_existing_date(self):
-        """Should modify meal for existing date"""
-        pipeline = ChatPipeline()
-        meal_plan = {"2026-02-10": "Pasta"}
-        
-        intent = {
-            "operation": "modify",
-            "date": "2026-02-10",
-            "meal": "Lasagna"
+    def test_deduplication(self):
+        """Duplicate ingredients across dishes appear only once."""
+        dish_ingredients = {
+            "DishA": ["onion", "garlic"],
+            "DishB": ["garlic", "ginger"],
         }
-        
-        result = pipeline._apply_plan_modification(meal_plan, [], intent)
-        assert result["2026-02-10"] == "Lasagna"
+        result = compute_shopping_list(dish_ingredients)
+        assert result.count("garlic") == 1
+        assert set(result) == {"onion", "garlic", "ginger"}
 
-    def test_modify_non_existent_date_adds_meal(self):
-        """Should add meal when modifying non-existent date (Bug Fix #14)"""
-        pipeline = ChatPipeline()
-        meal_plan = {"2026-02-10": "Pasta"}
-        
-        intent = {
-            "operation": "modify",
-            "date": "2026-02-12",  # Date doesn't exist
-            "meal": "Pizza"
+    def test_empty_input(self):
+        """Empty dish_ingredients returns empty list."""
+        assert compute_shopping_list({}) == []
+
+    def test_dish_with_no_ingredients(self):
+        """Dishes with empty ingredient lists are handled gracefully."""
+        dish_ingredients = {
+            "EmptyDish": [],
+            "Salad": ["lettuce", "tomato"],
         }
-        
-        result = pipeline._apply_plan_modification(meal_plan, [], intent)
-        assert result["2026-02-12"] == "Pizza"
+        result = compute_shopping_list(dish_ingredients)
+        assert result == ["lettuce", "tomato"]
 
-    def test_add_new_meal(self):
-        """Should add new meal to plan"""
-        pipeline = ChatPipeline()
-        meal_plan = {"2026-02-10": "Pasta"}
-        
-        intent = {
-            "operation": "add",
-            "date": "2026-02-11",
-            "meal": "Pizza"
+    def test_output_is_sorted(self):
+        """Output is always alphabetically sorted."""
+        dish_ingredients = {
+            "Dish": ["zucchini", "apple", "mango"],
         }
-        
-        result = pipeline._apply_plan_modification(meal_plan, [], intent)
-        assert result["2026-02-11"] == "Pizza"
-        assert result["2026-02-10"] == "Pasta"  # Existing meal preserved
+        result = compute_shopping_list(dish_ingredients)
+        assert result == ["apple", "mango", "zucchini"]
+
+    def test_single_dish(self):
+        """Single dish returns its own ingredient list sorted."""
+        dish_ingredients = {"回锅肉": ["猪肉", "豆瓣酱", "大蒜", "青椒"]}
+        result = compute_shopping_list(dish_ingredients)
+        assert set(result) == {"猪肉", "豆瓣酱", "大蒜", "青椒"}
+        assert len(result) == 4
 
 
-class TestPlanAheadIntegration:
-    """Integration tests for PLAN_AHEAD workflows"""
+class TestParseStructuredResponse:
+    """Tests for PlanAheadAgent.parse_structured_response."""
 
-    @pytest.mark.asyncio
-    async def test_plan_ahead_full_workflow_add_remove(self):
-        """Test complete add + remove workflow"""
-        pipeline = ChatPipeline()
-        
-        # Start with empty plan
-        meal_plan = {}
-        
-        # Add meal
-        add_intent = {
-            "operation": "add",
-            "date": "2026-02-10",
-            "meal": "Pasta"
+    def _agent(self):
+        return PlanAheadAgent(gemini_api_url="http://fake")
+
+    def _make_response(self, action="add", meal_entries=None, user_message="OK",
+                       target_date=None, meal_time=None):
+        payload = {
+            "action": action,
+            "user_message": user_message,
+            "meal_entries": meal_entries or [],
         }
-        meal_plan = pipeline._apply_plan_modification(meal_plan, [], add_intent)
-        assert meal_plan["2026-02-10"] == "Pasta"
-        
-        # Remove meal
-        remove_intent = {
-            "operation": "remove",
-            "date": "2026-02-10"
-        }
-        meal_plan = pipeline._apply_plan_modification(meal_plan, [], remove_intent)
-        assert "2026-02-10" not in meal_plan
+        if target_date:
+            payload["target_date"] = target_date
+        if meal_time:
+            payload["meal_time"] = meal_time
+        return json.dumps(payload)
 
-    @pytest.mark.asyncio
-    async def test_plan_ahead_modify_workflow(self):
-        """Test modify workflow"""
-        pipeline = ChatPipeline()
-        
-        meal_plan = {"2026-02-10": "Pasta", "2026-02-11": "Pizza"}
-        
-        # Modify existing
-        modify_intent = {
-            "operation": "modify",
-            "date": "2026-02-10",
-            "meal": "Lasagna"
-        }
-        meal_plan = pipeline._apply_plan_modification(meal_plan, [], modify_intent)
-        assert meal_plan["2026-02-10"] == "Lasagna"
-        assert meal_plan["2026-02-11"] == "Pizza"  # Unchanged
+    def test_basic_parse(self):
+        """A valid structured response is parsed into internal state."""
+        agent = self._agent()
+        raw = self._make_response(
+            action="add",
+            target_date="2026-02-27",
+            meal_time="lunch",
+            meal_entries=[
+                {
+                    "date": "2026-02-27",
+                    "meal_time": "lunch",
+                    "dishes": [
+                        {"name": "回锅肉", "ingredients": [{"name": "猪肉"}, {"name": "豆瓣酱"}]}
+                    ],
+                }
+            ],
+        )
+        result = agent.parse_structured_response(raw)
+        assert result is not None
+        assert result["action"] == "add"
+        assert "2026-02-27" in result["meal_plan"]
+        assert "回锅肉" in result["meal_plan_slots"]["2026-02-27"]["lunch"]
+        assert "回锅肉" in result["dish_ingredients"]
+        assert set(result["dish_ingredients"]["回锅肉"]) == {"猪肉", "豆瓣酱"}
 
-    @pytest.mark.asyncio
-    async def test_empty_plan_operations(self):
-        """Test operations on empty plan"""
-        pipeline = ChatPipeline()
-        
-        meal_plan = {}
-        
-        # Remove from empty plan (should not error)
-        remove_intent = {"operation": "remove", "date": "2026-02-10"}
-        result = pipeline._apply_plan_modification(meal_plan, [], remove_intent)
-        assert result == {}
-        
-        # Add to empty plan
-        add_intent = {
-            "operation": "add",
-            "date": "2026-02-10",
-            "meal": "Pasta"
-        }
-        result = pipeline._apply_plan_modification(meal_plan, [], add_intent)
-        assert result["2026-02-10"] == "Pasta"
+    def test_shopping_list_is_computed_programmatically(self):
+        """shopping_list is computed from dish_ingredients, not taken from LLM output."""
+        agent = self._agent()
+        raw = self._make_response(
+            action="add",
+            meal_entries=[
+                {
+                    "date": "2026-02-27",
+                    "meal_time": "dinner",
+                    "dishes": [
+                        {"name": "Pasta", "ingredients": [{"name": "pasta"}, {"name": "tomato"}]}
+                    ],
+                }
+            ],
+        )
+        result = agent.parse_structured_response(raw)
+        assert result is not None
+        assert set(result["shopping_list"]) == {"pasta", "tomato"}
+
+    def test_multiple_dates_and_dishes(self):
+        """Multiple meal_entries across dates are all captured."""
+        agent = self._agent()
+        raw = self._make_response(
+            action="add",
+            meal_entries=[
+                {
+                    "date": "2026-02-20",
+                    "meal_time": "dinner",
+                    "dishes": [{"name": "DishA", "ingredients": [{"name": "ing1"}]}],
+                },
+                {
+                    "date": "2026-02-21",
+                    "meal_time": "lunch",
+                    "dishes": [{"name": "DishB", "ingredients": [{"name": "ing2"}]}],
+                },
+            ],
+        )
+        result = agent.parse_structured_response(raw)
+        assert result is not None
+        assert "2026-02-20" in result["meal_plan"]
+        assert "2026-02-21" in result["meal_plan"]
+        assert set(result["shopping_list"]) == {"ing1", "ing2"}
+
+    def test_invalid_json_returns_none(self):
+        """Non-JSON response returns None gracefully."""
+        agent = self._agent()
+        result = agent.parse_structured_response("not valid json {{{")
+        assert result is None
+
+    def test_missing_meal_entries_returns_none(self):
+        """Response without meal_entries returns None."""
+        agent = self._agent()
+        raw = json.dumps({"action": "add", "user_message": "OK"})
+        result = agent.parse_structured_response(raw)
+        assert result is None
+
+    def test_view_action_preserved(self):
+        """action=view is preserved in the parsed result."""
+        agent = self._agent()
+        raw = self._make_response(
+            action="view",
+            meal_entries=[
+                {
+                    "date": "2026-02-20",
+                    "meal_time": "dinner",
+                    "dishes": [{"name": "Stir Fry", "ingredients": [{"name": "beef"}]}],
+                }
+            ],
+        )
+        result = agent.parse_structured_response(raw)
+        assert result is not None
+        assert result["action"] == "view"

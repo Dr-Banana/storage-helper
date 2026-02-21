@@ -2,7 +2,7 @@
 Plan Ahead State Manager: Stores and retrieves meal planning state per user.
 Uses in-memory storage keyed by owner_id. For production, consider Redis or DB.
 """
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Union
 from datetime import datetime, timezone
 import logging
 
@@ -43,13 +43,13 @@ def update_plan_state(
     meal_plan: Optional[Dict[str, str]] = None,
     shopping_list: Optional[list] = None,
     schedule_id = _UNSET,  # Use sentinel to distinguish None from unset
-    meal_plan_slots: Optional[Dict[str, Dict[str, str]]] = None,
+    meal_plan_slots: Optional[Dict[str, Dict[str, Any]]] = None,
     dish_ingredients: Optional[Dict[str, List[str]]] = None,
     merge: bool = True,
 ) -> Dict[str, Any]:
     """
     Update plan state for a user.
-    meal_plan_slots: date -> { breakfast?, lunch?, dinner?, snack? } for storing lunch/breakfast/dinner.
+    meal_plan_slots: date -> { breakfast?, lunch?, dinner? } where values are List[str] (Phase 2 format).
     dish_ingredients: dish_name -> list of ingredient names for per-dish display (can be updated via chat).
     """
     current = _plan_states.get(owner_id, {})

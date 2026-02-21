@@ -1122,11 +1122,12 @@ class PipelineStorage:
         meal_plan: Dict[str, str],
         shopping_list: List[str],
         dish_ingredients: Optional[Dict[str, List[str]]] = None,
-        meal_plan_slots: Optional[Dict[str, Dict[str, str]]] = None,
+        meal_plan_slots: Optional[Dict[str, Any]] = None,
     ) -> Dict:
         """
-        Convert to Feature system format. When meal_plan_slots is provided (date -> { breakfast?, lunch?, dinner?, snack? }),
-        build one meal per slot with correct mealTime; otherwise use meal_plan (all as dinner).
+        Convert to Feature system format.
+        meal_plan_slots values may be List[str] (Phase 2 format) or str (legacy " and "-joined).
+        When meal_plan_slots is provided, builds one meal per slot; otherwise uses meal_plan (all dinner).
         """
         import time
         import random
@@ -1137,40 +1138,52 @@ class PipelineStorage:
             rand_str = ''.join(random.choices('abcdefghijklmnopqrstuvwxyz0123456789', k=8))
             return f"{prefix}_{timestamp}_{rand_str}"
 
-        def build_dishes_for_meal_text(meal_text: str, ingredients_pool: list, dish_ingredients: Optional[Dict[str, List[str]]], only_slot_today: bool = False) -> list:
-            """only_slot_today: True when this date has only one meal slot (e.g. just dinner). When False and dish_ingredients is None, never assign whole pool - each slot would wrongly get all ingredients."""
-            meal_stripped = (meal_text or "").strip()
-            # If dish_ingredients has the full meal as key (e.g. "煎蛋 and hashbrown and 面包片"), use it as one dish with those ingredients
-            if dish_ingredients and meal_stripped in dish_ingredients:
-                ing_list = [{"name": n, "quantity": "", "category": "other"} for n in dish_ingredients[meal_stripped]]
-                return [{"id": generate_id("dish"), "name": meal_stripped, "ingredients": ing_list, "servings": None, "prepTime": None, "cookTime": None}]
-            dish_names = re.split(r'\s+and\s+|\s+with\s+|,\s+', meal_text, flags=re.IGNORECASE)
-            dish_names = [name.strip() for name in dish_names if name.strip()]
+        def build_dishes_for_names(
+            dish_names: List[str],
+            ingredients_pool: list,
+            dish_ingredients: Optional[Dict[str, List[str]]],
+            only_slot_today: bool = False,
+        ) -> list:
+            """Build feature-format dish list from a list of dish names."""
             dishes = []
             for dish_name in dish_names:
-                cleaned_name = re.sub(r'\b(one|two|three|four|five|a|an)\s+', '', dish_name, flags=re.IGNORECASE).strip() or dish_name.strip()
-                if dish_ingredients and cleaned_name in dish_ingredients:
-                    ing_list = [{"name": n, "quantity": "", "category": "other"} for n in dish_ingredients[cleaned_name]]
+                cleaned = re.sub(r'\b(one|two|three|four|five|a|an)\s+', '', dish_name, flags=re.IGNORECASE).strip() or dish_name.strip()
+                if not cleaned:
+                    continue
+                if dish_ingredients and cleaned in dish_ingredients:
+                    ing_list = [{"name": n, "quantity": "", "category": "other"} for n in dish_ingredients[cleaned]]
                 elif dish_ingredients:
-                    # dish_ingredients exists but this dish has no entry - use empty; do NOT assign whole pool
                     ing_list = []
                 elif only_slot_today and len(dish_names) == 1:
-                    # Single slot for the day and no dish_ingredients: use pool (backward compat)
                     ing_list = ingredients_pool.copy()
                 else:
-                    # Multiple slots today or multi-dish: do NOT assign whole pool to avoid ingredients leaking across meals
                     ing_list = []
                 dishes.append({
                     "id": generate_id("dish"),
-                    "name": cleaned_name,
+                    "name": cleaned,
                     "ingredients": ing_list,
                     "servings": None,
                     "prepTime": None,
-                    "cookTime": None
+                    "cookTime": None,
                 })
-            if not dishes:
-                dishes = [{"id": generate_id("dish"), "name": meal_text.strip(), "ingredients": ingredients_pool.copy(), "servings": None, "prepTime": None, "cookTime": None}]
+            if not dishes and dish_names:
+                dishes = [{
+                    "id": generate_id("dish"),
+                    "name": dish_names[0].strip(),
+                    "ingredients": [],
+                    "servings": None,
+                    "prepTime": None,
+                    "cookTime": None,
+                }]
             return dishes
+
+        def slot_to_dish_names(slot_val: Any) -> List[str]:
+            """Normalise slot value to a list of dish name strings."""
+            if isinstance(slot_val, list):
+                return [s.strip() for s in slot_val if s and s.strip()]
+            if isinstance(slot_val, str) and slot_val.strip():
+                return [p.strip() for p in re.split(r'\s+and\s+|\s+with\s+|,\s+', slot_val, flags=re.IGNORECASE) if p.strip()]
+            return []
 
         now_iso = datetime.now(timezone.utc).isoformat()
         ingredients_pool = [{"name": item, "quantity": "", "category": "other"} for item in shopping_list]
@@ -1180,23 +1193,26 @@ class PipelineStorage:
         if meal_plan_slots:
             for date_str in sorted(meal_plan_slots.keys()):
                 slots = meal_plan_slots.get(date_str) or {}
-                num_slots_with_content = sum(1 for mt in slot_order if (slots.get(mt) or "").strip())
+                num_slots_with_content = sum(1 for mt in slot_order if slot_to_dish_names(slots.get(mt)))
                 only_slot_today = num_slots_with_content == 1
                 meals = []
                 for meal_time in slot_order:
-                    meal_text = (slots.get(meal_time) or "").strip()
-                    if not meal_text:
+                    dish_names = slot_to_dish_names(slots.get(meal_time))
+                    if not dish_names:
                         continue
-                    dishes = build_dishes_for_meal_text(meal_text, ingredients_pool, dish_ingredients, only_slot_today=only_slot_today)
+                    dishes = build_dishes_for_names(dish_names, ingredients_pool, dish_ingredients, only_slot_today=only_slot_today)
                     meals.append({"id": generate_id("meal"), "mealTime": meal_time, "dishes": dishes})
                 if meals:
                     daily_plans.append({"date": date_str, "meals": meals})
         else:
             for date_str, meal_text in sorted(meal_plan.items()):
-                dishes = build_dishes_for_meal_text(meal_text, ingredients_pool, dish_ingredients, only_slot_today=True)
+                dish_names = slot_to_dish_names(meal_text)
+                if not dish_names:
+                    dish_names = [meal_text.strip()]
+                dishes = build_dishes_for_names(dish_names, ingredients_pool, dish_ingredients, only_slot_today=True)
                 daily_plans.append({
                     "date": date_str,
-                    "meals": [{"id": generate_id("meal"), "mealTime": "dinner", "dishes": dishes}]
+                    "meals": [{"id": generate_id("meal"), "mealTime": "dinner", "dishes": dishes}],
                 })
 
         _summary = [{"date": p.get("date"), "meals": [(m.get("mealTime"), [d.get("name") for d in m.get("dishes", [])]) for m in p.get("meals", [])]} for p in daily_plans]
@@ -1211,15 +1227,18 @@ class PipelineStorage:
         return {"features": [meal_plan_feature]}
     
     @staticmethod
-    def _extract_meal_plan_from_schedule(schedule: Dict[str, Any]) -> Tuple[Dict[str, str], List[str], Dict[str, List[str]], Dict[str, Dict[str, str]]]:
-        """Extract meal_plan (flat), shopping_list, dish_ingredients, and meal_plan_slots (date -> mealTime -> dishes text) from schedule metadata."""
+    def _extract_meal_plan_from_schedule(
+        schedule: Dict[str, Any],
+    ) -> Tuple[Dict[str, str], List[str], Dict[str, List[str]], Dict[str, Dict[str, List[str]]]]:
+        """Extract meal_plan (flat), shopping_list, dish_ingredients, and
+        meal_plan_slots (date -> mealTime -> List[str]) from schedule metadata."""
         meta = schedule.get("metadata") or {}
         if not isinstance(meta, dict):
             return {}, [], {}, {}
-        schedule_mp = {}
-        schedule_sl = meta.get("shopping_list") or []
+        schedule_mp: Dict[str, str] = {}
+        schedule_sl: List[str] = meta.get("shopping_list") or []
         dish_ingredients: Dict[str, List[str]] = {}
-        meal_plan_slots: Dict[str, Dict[str, str]] = {}
+        meal_plan_slots: Dict[str, Dict[str, List[str]]] = {}
 
         if isinstance(meta.get("meal_plan"), dict):
             schedule_mp = meta.get("meal_plan")
@@ -1232,12 +1251,13 @@ class PipelineStorage:
                             continue
                         if date_str not in meal_plan_slots:
                             meal_plan_slots[date_str] = {}
-                        all_dish_names = []
+                        all_dish_names: List[str] = []
                         for m in plan["meals"]:
                             meal_time = m.get("mealTime") or "dinner"
-                            dish_names = [d.get("name") for d in m.get("dishes", []) if d.get("name")]
+                            dish_names: List[str] = [d.get("name") for d in m.get("dishes", []) if d.get("name")]
                             if dish_names:
-                                meal_plan_slots[date_str][meal_time] = " and ".join(dish_names)
+                                # Store as List[str] (Phase 2 format)
+                                meal_plan_slots[date_str][meal_time] = dish_names
                                 all_dish_names.extend(dish_names)
                             for d in m.get("dishes", []):
                                 name = d.get("name")
@@ -1303,9 +1323,20 @@ class PipelineStorage:
                     sub_dish_ingredients = None
                     if dish_ingredients:
                         import re
-                        dish_names = re.split(r'\s+and\s+|\s+with\s+|,\s+', meal_text, flags=re.IGNORECASE)
-                        dish_names = [n.strip() for n in dish_names if n.strip()]
-                        # Include keys that match split names OR the full meal_text (e.g. "煎蛋 and hashbrown and 面包片")
+                        # Prefer dish names from slots (List[str] format) over splitting meal_text
+                        date_slot = single_date_slots.get(date_str) or {}
+                        dish_names_from_slots: List[str] = []
+                        for mt_val in date_slot.values():
+                            if isinstance(mt_val, list):
+                                dish_names_from_slots.extend(mt_val)
+                            elif isinstance(mt_val, str):
+                                dish_names_from_slots.extend([p.strip() for p in re.split(r'\s+and\s+', mt_val) if p.strip()])
+                        if dish_names_from_slots:
+                            dish_names = dish_names_from_slots
+                        else:
+                            dish_names = re.split(r'\s+and\s+|\s+with\s+|,\s+', meal_text, flags=re.IGNORECASE)
+                            dish_names = [n.strip() for n in dish_names if n.strip()]
+                        # Include keys that match split names OR the full meal_text
                         sub_dish_ingredients = {k: v for k, v in dish_ingredients.items() if k in dish_names or (meal_text and k.strip() == meal_text.strip())}
                     # Use only this date's ingredients as shopping_list so we don't attach other days' ingredients to this schedule (e.g. pancake getting burger/拉面 ingredients)
                     date_shopping_list = []
