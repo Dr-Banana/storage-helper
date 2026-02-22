@@ -1,6 +1,8 @@
 import { Outlet, Link, useLocation, useNavigate } from 'react-router-dom'
-import { useEffect, useState } from 'react'
+import { useEffect, useState, useCallback } from 'react'
 import ChatInterface from './ChatInterface'
+import { MealPlanDetailDrawer } from '../pages/SchedulePage'
+import type { Schedule } from '../api/scheduleService'
 import {
   Home,
   FileText,
@@ -34,6 +36,39 @@ const Layout = () => {
   const location = useLocation()
   const navigate = useNavigate()
   const [isChatOpen, setIsChatOpen] = useState(false)
+
+  // ── Meal Plan 只读抽屉（与 Chat 面板完全对称的 flex 兄弟模式）──────────────
+  const [mealDrawerData, setMealDrawerData] = useState<{ schedule: Schedule; date: string } | null>(null);
+  const [isMealDrawerOpen, setIsMealDrawerOpen] = useState(false);
+
+  useEffect(() => {
+    const openHandler = (e: Event) => {
+      const detail = (e as CustomEvent<{ schedule: Schedule; date: string }>).detail;
+      setMealDrawerData(detail);
+      // 双 rAF 确保 CSS transition 能感知到初始 translate-x-full
+      requestAnimationFrame(() => requestAnimationFrame(() => {
+        setIsMealDrawerOpen(true);
+      }));
+    };
+    const closeHandler = () => setIsMealDrawerOpen(false);
+    window.addEventListener('meal-drawer-open', openHandler);
+    window.addEventListener('meal-drawer-close', closeHandler);
+    return () => {
+      window.removeEventListener('meal-drawer-open', openHandler);
+      window.removeEventListener('meal-drawer-close', closeHandler);
+    };
+  }, []);
+
+  const handleMealDrawerClose = useCallback(() => {
+    setIsMealDrawerOpen(false);
+  }, []);
+
+  const handleMealDrawerEdit = useCallback(() => {
+    if (mealDrawerData) {
+      window.dispatchEvent(new CustomEvent('meal-drawer-edit-requested', { detail: mealDrawerData }));
+    }
+    setIsMealDrawerOpen(false);
+  }, [mealDrawerData]);
 
   // Open chat panel when any component fires the 'open-chat' event
   useEffect(() => {
@@ -96,6 +131,35 @@ const Layout = () => {
           </div>
         </main>
 
+        {/* Meal Plan 只读抽屉（与 Chat 完全对称）
+            - 移动端：fixed 全屏，从右侧滑入
+            - 桌面端（sm+）：flex 行内列，宽度从 0 过渡到 w-[420px] */}
+        <div
+          className={[
+            'fixed inset-0 z-50 flex flex-col overflow-hidden',
+            'transition-transform duration-300 ease-in-out',
+            isMealDrawerOpen ? 'translate-x-0' : 'translate-x-full pointer-events-none',
+            'sm:relative sm:inset-auto sm:z-auto sm:translate-x-0 sm:pointer-events-auto',
+            'sm:transition-[width] sm:overflow-hidden sm:border-l sm:border-stone-200',
+            isMealDrawerOpen ? 'sm:w-[420px]' : 'sm:w-0 sm:border-l-0',
+          ].join(' ')}
+          onTransitionEnd={(e) => {
+            // 仅在自身 transition 结束且已关闭时卸载内容，避免闪烁
+            if (e.target === e.currentTarget && !isMealDrawerOpen) {
+              setMealDrawerData(null);
+            }
+          }}
+        >
+          {mealDrawerData && (
+            <MealPlanDetailDrawer
+              schedule={mealDrawerData.schedule}
+              date={mealDrawerData.date}
+              onClose={handleMealDrawerClose}
+              onEdit={handleMealDrawerEdit}
+            />
+          )}
+        </div>
+
         {/* 聊天侧边栏
             - 移动端：fixed 全屏覆盖（从右侧滑入）
             - 桌面端（sm+）：flex 行内列，宽度从 0 过渡到 w-96 */}
@@ -118,7 +182,11 @@ const Layout = () => {
 
       {/* ── 底部导航栏 ── */}
       <nav
-        className={`fixed bottom-0 left-0 z-30 bg-white border-t border-stone-100 transition-[right] duration-300 ease-in-out ${isChatOpen ? 'right-0 sm:right-96' : 'right-0'}`}
+        className={`fixed bottom-0 left-0 z-30 bg-white border-t border-stone-100 transition-[right] duration-300 ease-in-out ${
+          isChatOpen ? 'right-0 sm:right-96' :
+          isMealDrawerOpen ? 'right-0 sm:right-[420px]' :
+          'right-0'
+        }`}
         style={{ paddingBottom: 'env(safe-area-inset-bottom, 0px)' }}
       >
         <div className="relative flex items-stretch justify-around h-16">
@@ -168,13 +236,25 @@ const Layout = () => {
         </div>
       </nav>
 
-      {/* ── AI 助手 FAB（聊天关闭时显示）── */}
+      {/* ── AI 助手 FAB（聊天关闭时显示；meal drawer 开启时移动端隐藏、桌面端向左偏移）── */}
       {!isChatOpen && (
         <button
           onClick={() => { setIsChatOpen(true); }}
           aria-label="Open AI Assistant"
-          className="fixed z-40 w-14 h-14 bg-home-primary-600 text-white rounded-full shadow-lg shadow-home-primary-600/30 flex items-center justify-center hover:scale-105 hover:bg-home-primary-700 transition-all right-4 sm:right-6"
-          style={{ bottom: 'calc(4rem + env(safe-area-inset-bottom, 0px))' }}
+          className={[
+            'fixed z-40 w-14 h-14 bg-home-primary-600 text-white rounded-full',
+            'shadow-lg shadow-home-primary-600/30',
+            'items-center justify-center hover:scale-105 hover:bg-home-primary-700',
+            'right-4 sm:right-6', // 默认位置（drawer 开时被 inline style 覆盖）
+            // 移动端 meal drawer 全屏时隐藏；桌面端始终显示
+            isMealDrawerOpen ? 'hidden sm:flex' : 'flex',
+          ].join(' ')}
+          style={{
+            bottom: 'calc(4rem + env(safe-area-inset-bottom, 0px))',
+            // 桌面端：drawer 开时平滑移到抽屉左侧（420px + 24px gap）
+            ...(isMealDrawerOpen ? { right: 'calc(420px + 1.5rem)' } : {}),
+            transition: 'right 300ms ease-in-out',
+          }}
         >
           <Sparkles size={24} />
         </button>

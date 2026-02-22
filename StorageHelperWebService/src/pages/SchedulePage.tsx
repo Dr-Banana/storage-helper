@@ -1,8 +1,8 @@
 import React, { useState, useEffect, useCallback, useRef, useMemo, memo } from 'react';
 import {
   Calendar, Plus, Edit2, Trash2, CheckCircle2, Circle,
-  ChevronLeft, ChevronRight, Utensils, ShoppingBag, X,
-  ChefHat, ArrowRight, Sparkles, LayoutGrid, Rows, GripHorizontal,
+  ChevronLeft, ChevronRight, ChevronDown, Utensils, ShoppingBag, X,
+  ChefHat, ArrowRight, Sparkles, LayoutGrid, Rows, GripHorizontal, Clock,
 } from 'lucide-react';
 import ScheduleService, { Schedule, CreateScheduleRequest } from '../api/scheduleService';
 import clsx from 'clsx';
@@ -326,6 +326,18 @@ const SchedulePage: React.FC = () => {
       window.removeEventListener('schedule-updated', handleScheduleUpdate);
       clearInterval(timer);
     };
+  }, []);
+
+  // 监听 Layout 层派发的"抽屉编辑请求"事件，打开编辑 Modal
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const { schedule, date } = (e as CustomEvent<{ schedule: Schedule; date: string }>).detail;
+      setEditingSchedule(schedule);
+      setSelectedDate(date);
+      setShowModal(true);
+    };
+    window.addEventListener('meal-drawer-edit-requested', handler);
+    return () => window.removeEventListener('meal-drawer-edit-requested', handler);
   }, []);
 
   useEffect(() => {
@@ -808,19 +820,31 @@ const SchedulePage: React.FC = () => {
         {!loading && viewingDaySchedules.length === 0 && (
           <div className="bg-white rounded-2xl p-8 text-center border border-dashed border-stone-200">
             <ChefHat size={32} className="mx-auto text-stone-300 mb-3" />
-            <p className="text-stone-400 text-sm">Nothing planned for this day.</p>
-            <button
-              onClick={() => {
-                const [y, m, d] = viewingDate.split('-').map(Number);
-                const localDate = new Date(y, m - 1, d);
-                window.dispatchEvent(new CustomEvent('open-chat', {
-                  detail: { message: `Can you suggest a dinner plan for ${localDate.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' })}?` }
-                }));
-              }}
-              className="mt-4 text-stone-700 font-bold text-sm underline underline-offset-2"
-            >
-              Let AI suggest a dinner?
-            </button>
+            <p className="text-stone-600 font-semibold text-sm">Nothing planned for this day.</p>
+            <p className="text-stone-400 text-xs mt-1">Start with AI or add it yourself.</p>
+            <div className="flex items-center justify-center gap-3 mt-5">
+              <button
+                onClick={() => {
+                  const [y, m, d] = viewingDate.split('-').map(Number);
+                  const localDate = new Date(y, m - 1, d);
+                  window.dispatchEvent(new CustomEvent('open-chat', {
+                    detail: { message: `Can you plan meals for ${localDate.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' })}? Include breakfast, lunch, and dinner with ingredients.` }
+                  }));
+                }}
+                className="flex items-center gap-2 px-4 py-2.5 bg-stone-800 text-white rounded-xl text-sm font-bold active:scale-95 transition-all shadow-sm"
+              >
+                <Sparkles size={14} /> Auto-Plan with AI
+              </button>
+              <button
+                onClick={() => {
+                  setEditingSchedule(null);
+                  setShowModal(true);
+                }}
+                className="flex items-center gap-2 px-4 py-2.5 bg-white border border-stone-200 text-stone-700 rounded-xl text-sm font-bold active:scale-95 transition-all"
+              >
+                <Plus size={14} strokeWidth={3} /> Manual Entry
+              </button>
+            </div>
           </div>
         )}
 
@@ -829,7 +853,7 @@ const SchedulePage: React.FC = () => {
           const mpf = getMealPlanFeature(schedule);
           const isMealPlan = !!mpf;
 
-          // 标题和副标题
+          // 标题：优先用 schedule.title，fallback 拼菜名
           let title = schedule.title;
           let subtitle = new Date(schedule.scheduled_time).toLocaleTimeString('en-US', {
             hour: '2-digit',
@@ -841,8 +865,12 @@ const SchedulePage: React.FC = () => {
             const dayPlan = mpf.plans.find(p => p.date === viewingDate);
             if (dayPlan) {
               meals = dayPlan.meals;
-              const dishCount = dayPlan.meals.reduce((s, m) => s + m.dishes.length, 0);
-              title = `${dishCount} dish${dishCount !== 1 ? 'es' : ''}`;
+              const allDishNames = dayPlan.meals.flatMap(m => m.dishes.map(d => d.name).filter(Boolean));
+              if (!title || title === 'Meal Plan') {
+                title = allDishNames.length > 0
+                  ? allDishNames.slice(0, 3).join(' · ') + (allDishNames.length > 3 ? ' …' : '')
+                  : 'Meal Plan';
+              }
               subtitle = dayPlan.meals.map(m => MEAL_META[m.mealTime].label).join(' · ');
             }
           }
@@ -860,10 +888,26 @@ const SchedulePage: React.FC = () => {
 
           const gradKey = Math.min(schedule.priority, 2) as 0 | 1 | 2;
 
+          const openDrawer = () => {
+            window.dispatchEvent(new CustomEvent('meal-drawer-open', {
+              detail: { schedule, date: viewingDate },
+            }));
+          };
+          const openEdit = (e: React.MouseEvent) => {
+            e.stopPropagation();
+            setEditingSchedule(schedule);
+            setSelectedDate(isMealPlan ? viewingDate : null);
+            setShowModal(true);
+          };
+
           return (
             <div
               key={`${schedule.id}-${viewingDate}`}
-              className="card-base overflow-hidden group animate-slide-up"
+              onClick={isMealPlan ? openDrawer : undefined}
+              className={clsx(
+                'card-base overflow-hidden group animate-slide-up',
+                isMealPlan && 'cursor-pointer active:scale-[0.99] transition-transform',
+              )}
             >
               {/* 顶部彩色条 */}
               <div
@@ -881,47 +925,63 @@ const SchedulePage: React.FC = () => {
               >
                 <div className="flex items-start justify-between mb-2">
                   <div className="flex-1 min-w-0">
-                    {/* 标签 */}
-                    <span className="inline-block px-2 py-0.5 rounded-md bg-white/70 text-stone-500 text-[10px] font-bold uppercase tracking-wider mb-1 border border-stone-100/80">
-                      {isMealPlan ? '🍽 Meal Plan' : subtitle}
-                    </span>
+                    {/* 标签行 */}
+                    <div className="flex items-center gap-1.5 mb-1">
+                      <span className="inline-block px-2 py-0.5 rounded-md bg-white/70 text-stone-500 text-[10px] font-bold uppercase tracking-wider border border-stone-100/80">
+                        {isMealPlan ? '🍽 Meal Plan' : subtitle}
+                      </span>
+                      {isMealPlan && (
+                        <span className="text-[10px] text-orange-400 font-semibold">Tap to view menu →</span>
+                      )}
+                    </div>
                     <h4
                       className={clsx(
-                        'text-lg font-bold text-stone-800 leading-tight truncate',
+                        'text-base font-bold text-stone-800 leading-tight',
                         schedule.status === 'completed' && 'line-through opacity-50',
                       )}
                     >
                       {title}
                     </h4>
                     {isMealPlan && subtitle && (
-                      <p className="text-xs text-stone-500 mt-0.5">{subtitle}</p>
+                      <p className="text-xs text-stone-400 mt-0.5">{subtitle}</p>
                     )}
                   </div>
-                  <button
-                    onClick={() => {
-                      setEditingSchedule(schedule);
-                      setSelectedDate(isMealPlan ? viewingDate : null);
-                      setShowModal(true);
-                    }}
-                    className="ml-3 w-8 h-8 rounded-full bg-white/70 flex items-center justify-center text-stone-400 group-hover:text-stone-700 transition-colors flex-shrink-0 border border-stone-100"
-                  >
-                    <Edit2 size={14} />
-                  </button>
+                  {/* meal plan 卡片的编辑只在抽屉内操作；普通日程保留编辑按钮 */}
+                  {!isMealPlan && (
+                    <button
+                      onClick={openEdit}
+                      className="ml-3 w-8 h-8 rounded-full bg-white/70 flex items-center justify-center text-stone-400 group-hover:text-stone-700 transition-colors flex-shrink-0 border border-stone-100"
+                    >
+                      <Edit2 size={14} />
+                    </button>
+                  )}
                 </div>
 
-                {/* 餐食详情：显示各餐时段的菜品标签 */}
+                {/* 餐食预览：每个时段独立白色块 + 菜品 pill */}
                 {isMealPlan && meals.length > 0 && (
-                  <div className="space-y-2 mt-3">
-                    {meals.map(meal => (
-                      <div key={meal.id}>
-                        <span className="text-xs font-semibold text-stone-500 mr-2">
-                          {MEAL_META[meal.mealTime].icon} {MEAL_META[meal.mealTime].label}
-                        </span>
-                        <span className="text-xs text-stone-600">
-                          {meal.dishes.map(d => d.name).filter(Boolean).join(', ') || 'No dishes yet'}
-                        </span>
-                      </div>
-                    ))}
+                  <div className="grid grid-cols-1 gap-1.5 mt-3">
+                    {meals.map(meal => {
+                      const dishNames = meal.dishes.map(d => d.name).filter(Boolean);
+                      return (
+                        <div key={meal.id} className="flex items-start gap-2.5 bg-white/70 rounded-xl px-3 py-2 border border-orange-100/60">
+                          <span className="text-base leading-none mt-0.5 flex-shrink-0">{MEAL_META[meal.mealTime].icon}</span>
+                          <div className="flex-1 min-w-0">
+                            <span className="text-[10px] font-bold text-orange-500 uppercase tracking-wider">{MEAL_META[meal.mealTime].label}</span>
+                            {dishNames.length > 0 ? (
+                              <div className="flex flex-wrap gap-1 mt-1">
+                                {dishNames.map((name, i) => (
+                                  <span key={i} className="text-xs text-stone-700 font-medium bg-stone-100 px-2 py-0.5 rounded-full leading-relaxed">
+                                    {name}
+                                  </span>
+                                ))}
+                              </div>
+                            ) : (
+                              <p className="text-xs text-stone-400 italic mt-0.5">No dishes yet</p>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })}
                   </div>
                 )}
 
@@ -990,6 +1050,7 @@ const SchedulePage: React.FC = () => {
           } : undefined}
         />
       )}
+
     </div>
   );
 };
@@ -1035,7 +1096,11 @@ const DishEditor: React.FC<{
   onChange: (dish: Dish) => void;
   onRemove: () => void;
 }> = memo(({ dish, onChange, onRemove }) => {
+  // 食材默认折叠，减少表单层级压迫感
+  const [showIngredients, setShowIngredients] = useState(dish.ingredients.length > 0);
+
   const addIngredient = useCallback(() => {
+    setShowIngredients(true);
     onChange({ ...dish, ingredients: [...dish.ingredients, { name: '', quantity: '' }] });
   }, [dish, onChange]);
 
@@ -1050,40 +1115,56 @@ const DishEditor: React.FC<{
   }, [dish, onChange]);
 
   return (
-    <div className="bg-stone-50 rounded-xl border border-stone-100 p-4 mb-3">
-      <div className="flex items-center gap-2 mb-3">
+    <div className="bg-stone-50 rounded-xl border border-stone-100 p-3 mb-3">
+      <div className="flex items-center gap-2">
         <input
           type="text"
           value={dish.name}
           onChange={e => onChange({ ...dish, name: e.target.value })}
           placeholder="Dish name (e.g. Pasta Carbonara)"
-          className="flex-1 bg-transparent text-base font-bold text-stone-800 placeholder:text-stone-400 focus:outline-none"
+          className="flex-1 bg-transparent text-sm font-bold text-stone-800 placeholder:text-stone-400 focus:outline-none"
         />
-        <button type="button" onClick={onRemove} className="p-1.5 text-stone-300 hover:text-red-400 transition-colors">
-          <Trash2 size={15} />
+        <button
+          type="button"
+          onClick={onRemove}
+          className="p-1.5 text-stone-300 hover:text-red-400 transition-colors flex-shrink-0"
+        >
+          <Trash2 size={14} />
         </button>
       </div>
 
-      <div className="bg-white rounded-lg border border-stone-100 px-3 pb-1">
-        <label className="flex items-center gap-1.5 text-xs font-bold text-stone-400 pt-2 pb-1">
-          <ShoppingBag size={11} /> Ingredients
-        </label>
-        {dish.ingredients.map((ing, idx) => (
-          <IngredientInput
-            key={idx}
-            ingredient={ing}
-            onChange={i => updateIngredient(idx, i)}
-            onRemove={() => removeIngredient(idx)}
-          />
-        ))}
-        <button
-          type="button"
-          onClick={addIngredient}
-          className="flex items-center gap-1 text-xs text-emerald-600 hover:text-emerald-800 font-semibold py-2"
-        >
-          <Plus size={12} strokeWidth={3} /> Add ingredient
-        </button>
-      </div>
+      {/* 食材折叠面板 */}
+      <button
+        type="button"
+        onClick={() => setShowIngredients(p => !p)}
+        className="flex items-center gap-1.5 mt-2 text-[11px] font-semibold text-stone-400 hover:text-stone-600 transition-colors"
+      >
+        <ShoppingBag size={10} />
+        {dish.ingredients.length > 0
+          ? `${dish.ingredients.length} ingredient${dish.ingredients.length !== 1 ? 's' : ''}`
+          : 'Add ingredients'}
+        <ChevronDown size={11} className={clsx('transition-transform', showIngredients && 'rotate-180')} />
+      </button>
+
+      {showIngredients && (
+        <div className="mt-2 bg-white rounded-lg border border-stone-100 px-3 pb-1">
+          {dish.ingredients.map((ing, idx) => (
+            <IngredientInput
+              key={idx}
+              ingredient={ing}
+              onChange={i => updateIngredient(idx, i)}
+              onRemove={() => removeIngredient(idx)}
+            />
+          ))}
+          <button
+            type="button"
+            onClick={addIngredient}
+            className="flex items-center gap-1 text-xs text-emerald-600 hover:text-emerald-800 font-semibold py-2"
+          >
+            <Plus size={12} strokeWidth={3} /> Add ingredient
+          </button>
+        </div>
+      )}
     </div>
   );
 });
@@ -1371,7 +1452,8 @@ const ScheduleModal: React.FC<ScheduleModalProps> = ({
     });
   }, [schedule?.id, schedule?.title]);
 
-  const [isMealPlanMode, setIsMealPlanMode] = useState(() => !!getMealPlanFeature(schedule || null));
+  // 新建时默认开启 meal plan 模式，直接进入编辑状态；编辑时保持原值
+  const [isMealPlanMode, setIsMealPlanMode] = useState(() => schedule ? !!getMealPlanFeature(schedule) : true);
   const [mealPlanFeature, setMealPlanFeature] = useState<MealPlanFeature>(() =>
     getMealPlanFeature(schedule || null) || createEmptyMealPlanFeature(),
   );
@@ -1508,17 +1590,14 @@ const ScheduleModal: React.FC<ScheduleModalProps> = ({
                   />
                 </div>
               ) : (
-                <div className="h-48 flex flex-col items-center justify-center text-center p-6 bg-stone-50 rounded-2xl border border-dashed border-stone-200 text-stone-400">
-                  <ChefHat size={36} className="mb-3 opacity-20" />
-                  <p className="text-sm font-medium">Meal planning disabled</p>
-                  <button
-                    type="button"
-                    onClick={() => setIsMealPlanMode(true)}
-                    className="mt-2 text-xs text-stone-700 font-bold hover:underline"
-                  >
-                    Enable to add Menu &amp; Grocery list
-                  </button>
-                </div>
+                <button
+                  type="button"
+                  onClick={() => setIsMealPlanMode(true)}
+                  className="w-full flex items-center gap-3 px-4 py-3 bg-stone-50 border border-dashed border-stone-200 rounded-2xl text-stone-500 hover:border-orange-300 hover:bg-orange-50/40 hover:text-orange-600 transition-all group"
+                >
+                  <ChefHat size={18} className="opacity-40 group-hover:opacity-70 flex-shrink-0" />
+                  <span className="text-sm font-semibold">Enable Meal Plan — add menu &amp; grocery list</span>
+                </button>
               )}
             </div>
           </form>
@@ -1587,6 +1666,168 @@ const ScheduleModal: React.FC<ScheduleModalProps> = ({
           </div>
         </div>
 
+      </div>
+    </div>
+  );
+};
+
+// ─── DishReadCard ─────────────────────────────────────────────────────────────
+
+const DishReadCard: React.FC<{
+  dish: Dish;
+  expanded: boolean;
+  onToggle: () => void;
+}> = memo(({ dish, expanded, onToggle }) => {
+  const hasIngredients = dish.ingredients.filter(i => i.name).length > 0;
+  const hasTiming = dish.prepTime || dish.cookTime;
+
+  return (
+    <div className="bg-white rounded-2xl border border-stone-100 overflow-hidden shadow-sm">
+      <button
+        type="button"
+        onClick={hasIngredients ? onToggle : undefined}
+        className={clsx(
+          'w-full flex items-center gap-3 px-4 py-3.5 text-left',
+          hasIngredients ? 'cursor-pointer hover:bg-stone-50 transition-colors' : 'cursor-default',
+        )}
+      >
+        <div className="w-9 h-9 bg-orange-50 rounded-xl flex items-center justify-center border border-orange-100 flex-shrink-0">
+          <Utensils size={15} className="text-orange-400" />
+        </div>
+        <div className="flex-1 min-w-0">
+          <p className="text-sm font-bold text-stone-800 leading-snug">{dish.name || 'Unnamed dish'}</p>
+          <div className="flex items-center gap-2 mt-0.5">
+            {hasIngredients && (
+              <span className="text-[11px] text-stone-400">
+                {dish.ingredients.filter(i => i.name).length} ingredients
+              </span>
+            )}
+            {hasTiming && (
+              <span className="flex items-center gap-0.5 text-[11px] text-stone-400">
+                <Clock size={10} />
+                {dish.prepTime ? `${dish.prepTime}m prep` : ''}{dish.prepTime && dish.cookTime ? ' · ' : ''}{dish.cookTime ? `${dish.cookTime}m cook` : ''}
+              </span>
+            )}
+          </div>
+        </div>
+        {hasIngredients && (
+          <ChevronDown
+            size={16}
+            className={clsx('text-stone-300 transition-transform flex-shrink-0', expanded && 'rotate-180')}
+          />
+        )}
+      </button>
+
+      {expanded && hasIngredients && (
+        <div className="border-t border-stone-100 px-4 py-3 bg-stone-50/50">
+          <p className="text-[10px] font-bold text-stone-400 uppercase tracking-wider mb-2 flex items-center gap-1">
+            <ShoppingBag size={9} /> Ingredients
+          </p>
+          <div className="grid grid-cols-2 gap-x-4 gap-y-1.5">
+            {dish.ingredients.filter(i => i.name).map((ing, i) => (
+              <div key={i} className="flex items-center justify-between gap-2">
+                <span className="text-xs text-stone-700 truncate">{ing.name}</span>
+                {ing.quantity && (
+                  <span className="text-xs text-stone-400 flex-shrink-0 font-medium">{ing.quantity}</span>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+});
+
+// ─── MealPlanDetailDrawer ─────────────────────────────────────────────────────
+// 纯内容组件：不管理定位/动画，由 Layout 层的 flex 兄弟容器负责。
+// 渲染为 h-full flex-col，填充 Layout 提供的容器。
+
+export const MealPlanDetailDrawer: React.FC<{
+  schedule: Schedule;
+  date: string;
+  onClose: () => void;
+  onEdit: () => void;
+}> = ({ schedule, date, onClose, onEdit }) => {
+  const mpf = getMealPlanFeature(schedule);
+  const dayPlan = mpf?.plans.find(p => p.date === date);
+  const [expandedDish, setExpandedDish] = useState<string | null>(null);
+
+  const sortedMeals = useMemo(() => {
+    if (!dayPlan) return [];
+    const order = { breakfast: 0, lunch: 1, dinner: 2, snack: 3 };
+    return [...dayPlan.meals].sort((a, b) => order[a.mealTime] - order[b.mealTime]);
+  }, [dayPlan]);
+
+  const dateLabel = useMemo(() => {
+    const [y, m, d] = date.split('-').map(Number);
+    return new Date(y, m - 1, d).toLocaleDateString('en-US', {
+      weekday: 'long', month: 'long', day: 'numeric',
+    });
+  }, [date]);
+
+  const totalDishes = sortedMeals.reduce((s, m) => s + m.dishes.length, 0);
+
+  return (
+    <div className="flex flex-col h-full bg-[#FAF9F6]">
+      {/* ── 顶部标题栏（与 Layout header 完全对齐）── */}
+      <div className="flex-shrink-0 h-14 flex items-center gap-1 px-2 bg-[#FAF9F6]/95 backdrop-blur-md border-b border-stone-200/60">
+        <button
+          onClick={onClose}
+          className="w-10 h-10 flex items-center justify-center rounded-full hover:bg-stone-100 text-stone-600 transition-colors flex-shrink-0"
+        >
+          <ChevronLeft size={22} />
+        </button>
+        <div className="flex-1 min-w-0 px-1">
+          <h2 className="text-base font-bold text-stone-800 leading-tight truncate">{dateLabel}</h2>
+          <p className="text-[11px] text-orange-500 font-semibold leading-none mt-0.5">
+            🍽 {sortedMeals.length} meal{sortedMeals.length !== 1 ? 's' : ''} · {totalDishes} dish{totalDishes !== 1 ? 'es' : ''}
+          </p>
+        </div>
+        <button
+          onClick={onEdit}
+          className="flex-shrink-0 flex items-center gap-1.5 px-3 py-1.5 bg-stone-800 text-white rounded-xl text-xs font-bold active:scale-95 transition-all hover:bg-stone-900 mr-1"
+        >
+          <Edit2 size={13} /> Edit
+        </button>
+      </div>
+
+      {/* ── 内容滚动区 ── */}
+      <div className="flex-1 overflow-y-auto px-5 py-5 space-y-7 custom-scrollbar">
+        {!dayPlan || sortedMeals.length === 0 ? (
+          <div className="text-center py-16 text-stone-400">
+            <Utensils size={32} className="mx-auto mb-3 opacity-30" />
+            <p className="text-sm font-medium">No meals planned for this day.</p>
+          </div>
+        ) : (
+          sortedMeals.map(meal => (
+            <div key={meal.id}>
+              <div className="flex items-center gap-2 mb-3 sticky top-0 bg-[#FAF9F6]/95 backdrop-blur-sm py-1.5 z-10 -mx-1 px-1">
+                <span className="text-2xl leading-none">{MEAL_META[meal.mealTime].icon}</span>
+                <h3 className="text-base font-bold text-stone-700">{MEAL_META[meal.mealTime].label}</h3>
+                <div className="flex-1 h-px bg-stone-200" />
+                <span className="text-xs text-stone-400 flex-shrink-0">
+                  {meal.dishes.length} dish{meal.dishes.length !== 1 ? 'es' : ''}
+                </span>
+              </div>
+              {meal.dishes.length === 0 ? (
+                <p className="text-sm text-stone-400 italic pl-1">No dishes added yet</p>
+              ) : (
+                <div className="space-y-2">
+                  {meal.dishes.map(dish => (
+                    <DishReadCard
+                      key={dish.id}
+                      dish={dish}
+                      expanded={expandedDish === dish.id}
+                      onToggle={() => setExpandedDish(prev => prev === dish.id ? null : dish.id)}
+                    />
+                  ))}
+                </div>
+              )}
+            </div>
+          ))
+        )}
+        <div className="h-6" />
       </div>
     </div>
   );
