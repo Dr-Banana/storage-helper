@@ -7,7 +7,7 @@ import {
   Home,
   FileText,
   User,
-  MapPin,
+  Package,
   Calendar,
   ChevronLeft,
   Sparkles,
@@ -17,7 +17,7 @@ const routeTitles: Record<string, string> = {
   '/documents': 'Documents',
   '/schedule':  'Schedule',
   '/profile':   'Profile',
-  '/locations': 'Locations',
+  '/locations': 'Storage',
   '/upload':    'Upload',
   '/search':    'Search',
 }
@@ -26,7 +26,7 @@ const navigation = [
   { name: 'Home',      label: 'Home',      href: '/',          icon: Home },
   { name: 'Documents', label: 'Documents', href: '/documents', icon: FileText },
   { name: 'Schedule',  label: 'Schedule',  href: '/schedule',  icon: Calendar },
-  { name: 'Locations', label: 'Locations', href: '/locations', icon: MapPin },
+  { name: 'Storage',   label: 'Storage',   href: '/locations', icon: Package },
   { name: 'Profile',   label: 'Profile',   href: '/profile',   icon: User },
 ]
 

@@ -283,7 +283,7 @@ const UploadPage = () => {
   }
 
   return (
-    <div className="max-w-4xl mx-auto">
+    <div className="max-w-4xl mx-auto px-4 py-6">
       <h1 className="text-3xl font-bold text-home-text-dark mb-6">Upload Document</h1>
 
       {/* Processing Overlay */}
@@ -651,20 +651,20 @@ const UploadPage = () => {
           )}
 
           {/* Confirmation Buttons */}
-          <div className="flex gap-4 pt-4 border-t border-home-primary-200">
+          <div className="flex flex-col sm:flex-row gap-3 pt-4 border-t border-home-primary-200">
             <button
               onClick={handleConfirm}
               disabled={confirming || !selectedCategoryId}
-              className="btn-primary flex-1 disabled:opacity-50 disabled:cursor-not-allowed"
+              className="btn-primary w-full sm:flex-1 disabled:opacity-50 disabled:cursor-not-allowed py-4 text-base font-bold"
             >
-              {confirming ? 'Uploading...' : 'Confirm and Upload to Database'}
+              {confirming ? 'Saving…' : '✅  Save to Library'}
             </button>
             <button
               onClick={handleCancelConfirmation}
               disabled={confirming}
-              className="btn-secondary disabled:opacity-50 disabled:cursor-not-allowed"
+              className="btn-secondary w-full sm:w-auto disabled:opacity-50 disabled:cursor-not-allowed py-4 text-base"
             >
-              Cancel
+              Start Over
             </button>
           </div>
         </div>
@@ -711,13 +711,13 @@ const UploadPage = () => {
 
       {/* Upload button (only show if not in confirmation step) */}
       {files.length > 0 && !showConfirmation && (
-        <div className="flex gap-4">
+        <div className="flex flex-col sm:flex-row gap-3">
           <button
             onClick={handleUpload}
             disabled={uploading || !userId}
-            className="btn-primary flex-1 disabled:opacity-50 disabled:cursor-not-allowed"
+            className="btn-primary w-full sm:flex-1 disabled:opacity-50 disabled:cursor-not-allowed py-4 text-base font-bold"
           >
-            {uploading ? 'Processing...' : 'Start AI Processing (Preview)'}
+            {uploading ? 'Processing…' : '✨  Start AI Processing'}
           </button>
           <button
             onClick={() => {
@@ -728,9 +728,9 @@ const UploadPage = () => {
               setShowConfirmation(false)
             }}
             disabled={uploading}
-            className="btn-secondary disabled:opacity-50 disabled:cursor-not-allowed"
+            className="btn-secondary w-full sm:w-auto disabled:opacity-50 disabled:cursor-not-allowed py-4 text-base"
           >
-            Clear
+            Clear All
           </button>
         </div>
       )}

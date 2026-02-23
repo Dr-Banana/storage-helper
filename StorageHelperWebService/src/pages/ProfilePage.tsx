@@ -137,13 +137,13 @@ const ProfilePage = () => {
           <div className="w-20 h-20 bg-home-primary-100 rounded-full flex items-center justify-center flex-shrink-0">
             <User className="text-home-primary-600" size={40} />
           </div>
-          <div className="flex-1">
-            <h2 className="text-2xl font-bold text-home-text-dark mb-2">{userDisplayName || user.display_name}</h2>
-            <div className="flex items-center gap-2 text-home-text-light">
-              <Mail size={16} />
-              <span>{userEmail || user.email}</span>
+          <div className="flex-1 min-w-0">
+            <h2 className="text-2xl font-bold text-home-text-dark mb-2 truncate">{userDisplayName || user.display_name}</h2>
+            <div className="flex items-center gap-2 text-home-text-light min-w-0">
+              <Mail size={16} className="flex-shrink-0" />
+              <span className="truncate">{userEmail || user.email}</span>
             </div>
-            <p className="text-sm text-home-text-light mt-2">User ID: {userId}</p>
+            <p className="text-sm text-home-text-light mt-2 truncate">User ID: {userId}</p>
           </div>
         </div>
 

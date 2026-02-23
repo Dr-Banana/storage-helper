@@ -461,7 +461,7 @@ const SchedulePage: React.FC = () => {
     if (active) {
       active.scrollIntoView({ behavior: 'smooth', inline: 'center', block: 'nearest' });
     }
-  }, [viewingDate]);
+  }, [viewingDate, viewMode]);
 
   // ── CRUD handlers ──────────────────────────────────────────────────────────
 
