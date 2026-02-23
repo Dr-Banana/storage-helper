@@ -51,7 +51,7 @@ def update_plan_state(
     shopping_list: Optional[list] = None,
     schedule_id = _UNSET,  # Use sentinel to distinguish None from unset
     meal_plan_slots: Optional[Dict[str, Dict[str, Any]]] = None,
-    dish_ingredients: Optional[Dict[str, List[str]]] = None,
+    dish_ingredients: Optional[Dict[str, List[Any]]] = None,
     is_draft = _UNSET,  # True = draft (not saved to DB); False = confirmed
     draft_base_db_dates: Optional[Set[str]] = None,  # snapshot of DB dates at draft creation
     merge: bool = True,
@@ -89,7 +89,17 @@ def update_plan_state(
         if dish_ingredients is not None:
             cur_di = current.get("dish_ingredients", {})
             for dish_name, ing_list in dish_ingredients.items():
-                cur_di[dish_name] = list(set(cur_di.get(dish_name, []) + (ing_list or [])))
+                # Merge by ingredient name — supports both new dict and legacy str formats.
+                existing: Dict[str, Any] = {}
+                for i in cur_di.get(dish_name, []):
+                    key = i.get("name") if isinstance(i, dict) else i
+                    if key:
+                        existing[key] = i
+                for item in (ing_list or []):
+                    key = item.get("name") if isinstance(item, dict) else item
+                    if key:
+                        existing[key] = item
+                cur_di[dish_name] = list(existing.values())
             current["dish_ingredients"] = cur_di
         elif "dish_ingredients" not in current:
             current["dish_ingredients"] = {}

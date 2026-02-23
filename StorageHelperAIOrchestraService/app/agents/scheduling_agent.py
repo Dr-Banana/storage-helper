@@ -68,7 +68,21 @@ PLAN_AHEAD_RESPONSE_SCHEMA: Dict[str, Any] = {
                             "type": "object",
                             "properties": {
                                 "name": {"type": "string"},
-                                "ingredients": {"type": "array", "items": {"type": "string"}},
+                                "ingredients": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "object",
+                                        "properties": {
+                                            "name":     {"type": "string"},
+                                            "category": {
+                                                "type": "string",
+                                                "enum": ["vegetable", "protein", "dairy", "grain", "spice", "other"],
+                                            },
+                                            "quantity": {"type": "string"},
+                                        },
+                                        "required": ["name", "category"],
+                                    },
+                                },
                             },
                             "required": ["name", "ingredients"],
                         },
@@ -82,12 +96,31 @@ PLAN_AHEAD_RESPONSE_SCHEMA: Dict[str, Any] = {
 }
 
 
-def compute_shopping_list(dish_ingredients: Dict[str, List[str]]) -> List[str]:
-    """Compute shopping list from dish_ingredients map. Deterministic — no LLM needed."""
-    all_items: set = set()
+def compute_shopping_list(dish_ingredients: Dict[str, List[Any]]) -> List[Dict[str, str]]:
+    """
+    Compute deduplicated shopping list from dish_ingredients map.
+    Supports both new dict format {"name":..,"category":..,"quantity":..}
+    and legacy plain-string format for backward compatibility.
+    Returns a list of dicts sorted by name.
+    """
+    seen: Dict[str, Dict[str, str]] = {}
     for ings in (dish_ingredients or {}).values():
-        all_items.update(i.strip() for i in (ings or []) if i and i.strip())
-    return sorted(all_items)
+        for ing in (ings or []):
+            if isinstance(ing, dict):
+                name = (ing.get("name") or "").strip()
+                if not name:
+                    continue
+                if name not in seen:
+                    seen[name] = {
+                        "name": name,
+                        "category": ing.get("category") or "other",
+                        "quantity": ing.get("quantity") or "",
+                    }
+            elif isinstance(ing, str) and ing.strip():
+                name = ing.strip()
+                if name not in seen:
+                    seen[name] = {"name": name, "category": "other", "quantity": ""}
+    return sorted(seen.values(), key=lambda x: x["name"])
 
 
 # ---------------------------------------------------------------------------
@@ -1253,7 +1286,7 @@ class PlanAheadAgent:
 
         # Build meal_plan_slots: date -> meal_time -> List[str]
         meal_plan_slots: Dict[str, Dict[str, List[str]]] = {}
-        dish_ingredients: Dict[str, List[str]] = {}
+        dish_ingredients: Dict[str, List[Dict[str, str]]] = {}
 
         for entry in meal_entries:
             date_str = (entry.get("date") or "").strip()
@@ -1269,16 +1302,21 @@ class PlanAheadAgent:
                 if not name:
                     continue
                 dish_names.append(name)
-                # Accept both string format ["pasta"] and object format [{"name": "pasta"}].
+                # Accept new dict format [{"name":..,"category":..,"quantity":..}]
+                # and legacy string format ["pasta"] for backward compatibility.
                 raw_ings = dish.get("ingredients") or []
-                ings = []
+                ings: List[Dict[str, str]] = []
                 for i in raw_ings:
-                    if isinstance(i, str) and i.strip():
-                        ings.append(i.strip())
-                    elif isinstance(i, dict):
-                        n = (i.get("name") or "").strip()
-                        if n:
-                            ings.append(n)
+                    if isinstance(i, dict):
+                        ing_name = (i.get("name") or "").strip()
+                        if ing_name:
+                            ings.append({
+                                "name":     ing_name,
+                                "category": i.get("category") or "other",
+                                "quantity": i.get("quantity") or "",
+                            })
+                    elif isinstance(i, str) and i.strip():
+                        ings.append({"name": i.strip(), "category": "other", "quantity": ""})
                 if ings:
                     dish_ingredients[name] = ings
             if dish_names:

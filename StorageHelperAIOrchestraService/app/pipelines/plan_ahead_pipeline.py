@@ -129,7 +129,11 @@ class PlanAheadPipeline:
                     for d in dishes:
                         ings = dish_ingredients.get(d)
                         if ings:
-                            dish_strs.append(f"{d} [ingredients: {', '.join(ings)}]")
+                            ing_names = [
+                                i["name"] if isinstance(i, dict) else i
+                                for i in ings if i
+                            ]
+                            dish_strs.append(f"{d} [ingredients: {', '.join(ing_names)}]")
                         else:
                             dish_strs.append(d)
                     ctx += f"\n{date_str} {mt}: {', '.join(dish_strs)}"
@@ -180,8 +184,10 @@ class PlanAheadPipeline:
         ctx += "\n   - For unchanged dates, copy them exactly (same dishes + same ingredients)."
         ctx += "\n   - For changed dates, apply the user's modification."
         ctx += (
-            "\n   - Each dish MUST include ingredients"
-            " (use known ones from above, or suggest typical ones for new dishes)."
+            "\n   - Each dish MUST include ingredients as an array of objects."
+            " Each ingredient object MUST have 'name', 'category' (from the list below), and an optional 'quantity' (e.g. '200g', '2 pieces', '1 tbsp')."
+            "\n     category values: vegetable (all veg, fruit, mushroom, tofu), protein (meat, poultry, seafood, egg),"
+            " dairy (milk, cheese, butter), grain (rice, noodles, bread, flour), spice (salt, sugar, oil, sauce, herb), other."
         )
         ctx += "\n   - If user removes a date, omit it from meal_entries entirely."
         ctx += "\n4. Write a brief, friendly message in 'user_message' (match user's language)."
@@ -489,9 +495,14 @@ class PlanAheadPipeline:
             }
             db_di = old_state.get("dish_ingredients") or {}
             server_di = server_state.get("dish_ingredients") or {}
-            merged_di: Dict[str, List[str]] = {}
+            merged_di: Dict[str, List[Any]] = {}
             for k in set(db_di) | set(server_di):
-                merged_di[k] = list(set((db_di.get(k) or []) + (server_di.get(k) or [])))
+                by_name: Dict[str, Any] = {}
+                for item in (db_di.get(k) or []) + (server_di.get(k) or []):
+                    key = item.get("name") if isinstance(item, dict) else item
+                    if key:
+                        by_name[key] = item
+                merged_di[k] = list(by_name.values())
             update_plan_state(
                 owner_id=owner_id,
                 meal_plan=db_mp,

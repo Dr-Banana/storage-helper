@@ -14,8 +14,20 @@ from app.agents.scheduling_agent import compute_shopping_list, PlanAheadAgent
 from app.pipelines.plan_ahead_pipeline import PlanAheadPipeline
 
 
+def _names(items) -> list:
+    """Extract ingredient names from a list of dicts or strings."""
+    return [i["name"] if isinstance(i, dict) else i for i in items]
+
+
+def _name_set(items) -> set:
+    return set(_names(items))
+
+
 class TestComputeShoppingList:
-    """Tests for the deterministic compute_shopping_list function."""
+    """Tests for the deterministic compute_shopping_list function.
+
+    compute_shopping_list now returns List[Dict] with keys name/category/quantity.
+    """
 
     def test_basic_aggregation(self):
         """Ingredients from multiple dishes are merged into a sorted unique list."""
@@ -24,7 +36,7 @@ class TestComputeShoppingList:
             "Pizza": ["flour", "tomato", "cheese"],
         }
         result = compute_shopping_list(dish_ingredients)
-        assert result == sorted({"pasta", "tomato", "garlic", "flour", "cheese"})
+        assert _names(result) == sorted({"pasta", "tomato", "garlic", "flour", "cheese"})
 
     def test_deduplication(self):
         """Duplicate ingredients across dishes appear only once."""
@@ -33,8 +45,8 @@ class TestComputeShoppingList:
             "DishB": ["garlic", "ginger"],
         }
         result = compute_shopping_list(dish_ingredients)
-        assert result.count("garlic") == 1
-        assert set(result) == {"onion", "garlic", "ginger"}
+        assert _names(result).count("garlic") == 1
+        assert _name_set(result) == {"onion", "garlic", "ginger"}
 
     def test_empty_input(self):
         """Empty dish_ingredients returns empty list."""
@@ -47,7 +59,7 @@ class TestComputeShoppingList:
             "Salad": ["lettuce", "tomato"],
         }
         result = compute_shopping_list(dish_ingredients)
-        assert result == ["lettuce", "tomato"]
+        assert _names(result) == ["lettuce", "tomato"]
 
     def test_output_is_sorted(self):
         """Output is always alphabetically sorted."""
@@ -55,13 +67,13 @@ class TestComputeShoppingList:
             "Dish": ["zucchini", "apple", "mango"],
         }
         result = compute_shopping_list(dish_ingredients)
-        assert result == ["apple", "mango", "zucchini"]
+        assert _names(result) == ["apple", "mango", "zucchini"]
 
     def test_single_dish(self):
         """Single dish returns its own ingredient list sorted."""
         dish_ingredients = {"回锅肉": ["猪肉", "豆瓣酱", "大蒜", "青椒"]}
         result = compute_shopping_list(dish_ingredients)
-        assert set(result) == {"猪肉", "豆瓣酱", "大蒜", "青椒"}
+        assert _name_set(result) == {"猪肉", "豆瓣酱", "大蒜", "青椒"}
         assert len(result) == 4
 
 
@@ -107,7 +119,7 @@ class TestParseStructuredResponse:
         assert "2026-02-27" in result["meal_plan"]
         assert "回锅肉" in result["meal_plan_slots"]["2026-02-27"]["lunch"]
         assert "回锅肉" in result["dish_ingredients"]
-        assert set(result["dish_ingredients"]["回锅肉"]) == {"猪肉", "豆瓣酱"}
+        assert _name_set(result["dish_ingredients"]["回锅肉"]) == {"猪肉", "豆瓣酱"}
 
     def test_shopping_list_is_computed_programmatically(self):
         """shopping_list is computed from dish_ingredients, not taken from LLM output."""
@@ -126,7 +138,7 @@ class TestParseStructuredResponse:
         )
         result = agent.parse_structured_response(raw)
         assert result is not None
-        assert set(result["shopping_list"]) == {"pasta", "tomato"}
+        assert _name_set(result["shopping_list"]) == {"pasta", "tomato"}
 
     def test_multiple_dates_and_dishes(self):
         """Multiple meal_entries across dates are all captured."""
@@ -150,7 +162,7 @@ class TestParseStructuredResponse:
         assert result is not None
         assert "2026-02-20" in result["meal_plan"]
         assert "2026-02-21" in result["meal_plan"]
-        assert set(result["shopping_list"]) == {"ing1", "ing2"}
+        assert _name_set(result["shopping_list"]) == {"ing1", "ing2"}
 
     def test_invalid_json_returns_none(self):
         """Non-JSON response returns None gracefully."""
@@ -213,34 +225,34 @@ class TestIngredientFormatCompat:
         """Standard string array format is parsed into dish_ingredients."""
         result = self._parse(["pasta", "tomato"])
         assert result is not None
-        assert set(result["dish_ingredients"]["TestDish"]) == {"pasta", "tomato"}
-        assert set(result["shopping_list"]) == {"pasta", "tomato"}
+        assert _name_set(result["dish_ingredients"]["TestDish"]) == {"pasta", "tomato"}
+        assert _name_set(result["shopping_list"]) == {"pasta", "tomato"}
 
     def test_name_dict_ingredients(self):
         """Object format [{'name': 'x'}] is parsed identically to string format."""
         result = self._parse([{"name": "pasta"}, {"name": "tomato"}])
         assert result is not None
-        assert set(result["dish_ingredients"]["TestDish"]) == {"pasta", "tomato"}
-        assert set(result["shopping_list"]) == {"pasta", "tomato"}
+        assert _name_set(result["dish_ingredients"]["TestDish"]) == {"pasta", "tomato"}
+        assert _name_set(result["shopping_list"]) == {"pasta", "tomato"}
 
     def test_mixed_format_ingredients(self):
         """A mix of strings and dicts in the same list is handled gracefully."""
         result = self._parse(["lettuce", {"name": "tomato"}, "olive oil"])
         assert result is not None
-        assert set(result["dish_ingredients"]["TestDish"]) == {"lettuce", "tomato", "olive oil"}
+        assert _name_set(result["dish_ingredients"]["TestDish"]) == {"lettuce", "tomato", "olive oil"}
 
     def test_empty_name_dict_skipped(self):
         """Dict objects with empty or missing 'name' field are skipped."""
         result = self._parse([{"name": ""}, {"name": "garlic"}, {}])
         assert result is not None
-        assert result["dish_ingredients"]["TestDish"] == ["garlic"]
+        assert _names(result["dish_ingredients"]["TestDish"]) == ["garlic"]
 
     def test_chinese_ingredients_both_formats(self):
         """Chinese ingredient names work in both formats."""
         result_str = self._parse(["猪肉", "豆瓣酱"])
         result_dict = self._parse([{"name": "猪肉"}, {"name": "豆瓣酱"}])
-        assert set(result_str["dish_ingredients"]["TestDish"]) == {"猪肉", "豆瓣酱"}
-        assert set(result_dict["dish_ingredients"]["TestDish"]) == {"猪肉", "豆瓣酱"}
+        assert _name_set(result_str["dish_ingredients"]["TestDish"]) == {"猪肉", "豆瓣酱"}
+        assert _name_set(result_dict["dish_ingredients"]["TestDish"]) == {"猪肉", "豆瓣酱"}
 
 
 class TestApplyPlanModification:

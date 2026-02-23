@@ -3,9 +3,15 @@ import {
   Calendar, Plus, Edit2, Trash2, CheckCircle2, Circle,
   ChevronLeft, ChevronRight, ChevronDown, Utensils, ShoppingBag, X,
   ChefHat, ArrowRight, Sparkles, LayoutGrid, Rows, GripHorizontal, Clock,
+  ShoppingCart, Check,
 } from 'lucide-react';
 import ScheduleService, { Schedule, CreateScheduleRequest } from '../api/scheduleService';
 import clsx from 'clsx';
+import {
+  GroceryCategory,
+  CATEGORY_META,
+  resolveIngredientCategory,
+} from '../utils/ingredientCategory';
 
 // ─── Feature System Types ────────────────────────────────────────────────────
 
@@ -108,6 +114,70 @@ const MEAL_META = {
   snack:     { label: 'Snack',     icon: '🍪' },
 } as const;
 
+// ─── Grocery List Helpers ─────────────────────────────────────────────────────
+
+interface GroceryItem {
+  name: string;
+  quantity?: string;
+  category: GroceryCategory;
+  checked: boolean;
+}
+
+const getGroceryDateRange = (days: number): { start: string; end: string; startLabel: string; endLabel: string } => {
+  const startObj = new Date();
+  const endObj = new Date(startObj);
+  endObj.setDate(startObj.getDate() + days - 1);
+  return {
+    start:      toDateKey(startObj),
+    end:        toDateKey(endObj),
+    startLabel: startObj.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }),
+    endLabel:   endObj.toLocaleDateString('en-US',   { month: 'short', day: 'numeric' }),
+  };
+};
+
+const computeGroceryList = (schedules: Schedule[], days: number): GroceryItem[] => {
+  const { start, end } = getGroceryDateRange(days);
+  const seen = new Map<string, GroceryItem>();
+
+  for (const schedule of schedules) {
+    const mpf = getMealPlanFeature(schedule);
+    if (!mpf) continue;
+    for (const plan of mpf.plans) {
+      if (plan.date < start || plan.date > end) continue;
+      for (const meal of plan.meals) {
+        for (const dish of meal.dishes) {
+          for (const ing of dish.ingredients) {
+            const key = ing.name.trim().toLowerCase();
+            if (!key) continue;
+            if (!seen.has(key)) {
+              seen.set(key, {
+                name: ing.name.trim(),
+                quantity: ing.quantity,
+                category: resolveIngredientCategory(ing.category),
+                checked: false,
+              });
+            } else {
+              // Merge quantities if both present
+              const existing = seen.get(key)!;
+              if (ing.quantity && existing.quantity && existing.quantity !== ing.quantity) {
+                existing.quantity = `${existing.quantity}, ${ing.quantity}`;
+              } else if (ing.quantity && !existing.quantity) {
+                existing.quantity = ing.quantity;
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+  return Array.from(seen.values()).sort((a, b) => {
+    const oa = CATEGORY_META[a.category].order;
+    const ob = CATEGORY_META[b.category].order;
+    return oa !== ob ? oa - ob : a.name.localeCompare(b.name);
+  });
+};
+
 // ─── SchedulePage ─────────────────────────────────────────────────────────────
 
 const SchedulePage: React.FC = () => {
@@ -126,6 +196,24 @@ const SchedulePage: React.FC = () => {
 
   // 'week' = horizontal day strip, 'month' = full grid
   const [viewMode, setViewMode] = useState<'week' | 'month'>('week');
+
+  // ── Grocery List Drawer ──────────────────────────────────────────────────────
+  const [showGrocery, setShowGrocery] = useState(false);
+  const [groceryDays, setGroceryDays] = useState<number>(3);
+  const [groceryChecked, setGroceryChecked] = useState<Set<string>>(new Set());
+
+  const groceryItems = useMemo(
+    () => computeGroceryList(schedules, groceryDays),
+    [schedules, groceryDays],
+  );
+
+  const toggleGroceryItem = useCallback((key: string) => {
+    setGroceryChecked(prev => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key); else next.add(key);
+      return next;
+    });
+  }, []);
 
   const fetchSchedulesRef = useRef<(silent?: boolean, force?: boolean) => Promise<void>>();
   const isInitialLoadRef = useRef(true);
@@ -540,6 +628,16 @@ const SchedulePage: React.FC = () => {
               : <><Rows size={13} /> Week</>
             }
           </button>
+
+          {/* Grocery list button */}
+          <button
+            onClick={() => { setShowGrocery(true); setGroceryChecked(new Set()); }}
+            className="flex-shrink-0 flex items-center gap-1 px-2.5 py-1.5 bg-orange-50 border border-orange-200 rounded-xl text-orange-600 font-medium text-xs shadow-sm active:scale-95 transition-all hover:bg-orange-100"
+            title="Grocery List"
+          >
+            <ShoppingCart size={13} />
+            <span className="hidden sm:inline">Grocery</span>
+          </button>
         </div>
 
         {/* Row 2: status filters — only in week view, separate row so Row 1 never shifts */}
@@ -934,16 +1032,15 @@ const SchedulePage: React.FC = () => {
                         <span className="text-[10px] text-orange-400 font-semibold">Tap to view menu →</span>
                       )}
                     </div>
-                    <h4
-                      className={clsx(
-                        'text-base font-bold text-stone-800 leading-tight',
-                        schedule.status === 'completed' && 'line-through opacity-50',
-                      )}
-                    >
-                      {title}
-                    </h4>
-                    {isMealPlan && subtitle && (
-                      <p className="text-xs text-stone-400 mt-0.5">{subtitle}</p>
+                    {!isMealPlan && (
+                      <h4
+                        className={clsx(
+                          'text-base font-bold text-stone-800 leading-tight',
+                          schedule.status === 'completed' && 'line-through opacity-50',
+                        )}
+                      >
+                        {title}
+                      </h4>
                     )}
                   </div>
                   {/* meal plan 卡片的编辑只在抽屉内操作；普通日程保留编辑按钮 */}
@@ -995,6 +1092,17 @@ const SchedulePage: React.FC = () => {
         })}
         </div>
       )}
+
+      {/* ── Grocery list drawer ── */}
+      <GroceryListDrawer
+        open={showGrocery}
+        onClose={() => setShowGrocery(false)}
+        days={groceryDays}
+        onDaysChange={setGroceryDays}
+        items={groceryItems}
+        checked={groceryChecked}
+        onToggle={toggleGroceryItem}
+      />
 
       {/* ── 模态弹窗 ── */}
       {showModal && (
@@ -1830,6 +1938,226 @@ export const MealPlanDetailDrawer: React.FC<{
         <div className="h-6" />
       </div>
     </div>
+  );
+};
+
+// ─── GroceryListDrawer ────────────────────────────────────────────────────────
+
+interface GroceryListDrawerProps {
+  open: boolean;
+  onClose: () => void;
+  days: number;
+  onDaysChange: (d: number) => void;
+  items: GroceryItem[];
+  checked: Set<string>;
+  onToggle: (key: string) => void;
+}
+
+const GroceryListDrawer: React.FC<GroceryListDrawerProps> = ({
+  open, onClose, days, onDaysChange, items, checked, onToggle,
+}) => {
+  // Group items by category
+  const grouped = useMemo(() => {
+    const map = new Map<GroceryCategory, GroceryItem[]>();
+    for (const item of items) {
+      const arr = map.get(item.category) ?? [];
+      arr.push(item);
+      map.set(item.category, arr);
+    }
+    return map;
+  }, [items]);
+
+  const totalCount   = items.length;
+  const checkedCount = items.filter(i => checked.has(i.name.toLowerCase())).length;
+  const { startLabel, endLabel } = useMemo(() => getGroceryDateRange(days), [days]);
+
+  return (
+    <>
+      {/* Backdrop */}
+      <div
+        className={clsx(
+          'fixed inset-0 z-40 bg-black/30 backdrop-blur-[2px] transition-opacity duration-300',
+          open ? 'opacity-100 pointer-events-auto' : 'opacity-0 pointer-events-none',
+        )}
+        onClick={onClose}
+      />
+
+      {/* Drawer panel — slides in from the right */}
+      <div
+        className={clsx(
+          'fixed top-0 right-0 h-full z-50 w-full max-w-sm bg-[#FAF9F6] shadow-2xl',
+          'flex flex-col transition-transform duration-300 ease-out',
+          open ? 'translate-x-0' : 'translate-x-full',
+        )}
+      >
+        {/* ── Header ── */}
+        <div className="flex items-center gap-3 px-4 pt-5 pb-4 border-b border-stone-200">
+          <div className="w-9 h-9 rounded-xl bg-orange-100 flex items-center justify-center flex-shrink-0">
+            <ShoppingCart size={18} className="text-orange-500" />
+          </div>
+          <div className="flex-1 min-w-0">
+            <h2 className="text-base font-bold text-stone-800 leading-tight">Grocery List</h2>
+            {totalCount > 0 && (
+              <p className="text-xs text-stone-400 mt-0.5">
+                {checkedCount}/{totalCount} items checked
+              </p>
+            )}
+          </div>
+          <button
+            onClick={onClose}
+            className="w-8 h-8 flex items-center justify-center rounded-full hover:bg-stone-200 text-stone-400 transition-colors"
+          >
+            <X size={18} />
+          </button>
+        </div>
+
+        {/* ── Duration slider ── */}
+        <div className="px-5 py-4 border-b border-stone-100 bg-white">
+          <div className="flex items-end justify-between mb-3">
+            <div>
+              <p className="text-[10px] font-bold text-stone-400 uppercase tracking-wider">Plan ahead</p>
+              <p className="text-sm font-bold text-stone-800 mt-0.5">
+                {days === 1 ? 'Just Today' : `${days} Days`}
+              </p>
+            </div>
+            <div className="text-right">
+              <p className="text-[10px] text-stone-400 font-medium uppercase tracking-wider">Covering</p>
+              <p className="text-xs font-bold text-orange-600 bg-orange-50 px-2 py-0.5 rounded-lg inline-block mt-0.5 border border-orange-100">
+                {days === 1 ? startLabel : `${startLabel} – ${endLabel}`}
+              </p>
+            </div>
+          </div>
+
+          <div className="relative">
+            <input
+              type="range"
+              min="1"
+              max="7"
+              value={days}
+              onChange={e => onDaysChange(parseInt(e.target.value))}
+              className="w-full h-1.5 bg-stone-200 rounded-lg appearance-none cursor-pointer accent-orange-500"
+            />
+            <div className="flex justify-between px-0.5 mt-1.5 text-[10px] font-semibold text-stone-300 select-none">
+              <span>1D</span>
+              <span>2D</span>
+              <span>3D</span>
+              <span>4D</span>
+              <span>5D</span>
+              <span>6D</span>
+              <span>7D</span>
+            </div>
+          </div>
+        </div>
+
+        {/* ── Scrollable content ── */}
+        <div className="flex-1 overflow-y-auto px-4 py-3">
+          {totalCount === 0 ? (
+            <div className="flex flex-col items-center justify-center h-full gap-3 text-stone-400 py-16">
+              <ShoppingCart size={40} strokeWidth={1.2} />
+              <p className="text-sm font-medium text-center">
+                No ingredients found for this period.
+              </p>
+              <p className="text-xs text-center text-stone-300 max-w-[200px]">
+                Add meal plans to see your grocery list here.
+              </p>
+            </div>
+          ) : (
+            <div className="space-y-5">
+              {(Object.keys(CATEGORY_META) as GroceryCategory[])
+                .filter(cat => grouped.has(cat))
+                .map(cat => {
+                  const catItems = grouped.get(cat)!;
+                  const meta = CATEGORY_META[cat];
+                  return (
+                    <div key={cat}>
+                      {/* Category header */}
+                      <div className="flex items-center gap-2 mb-2">
+                        <span className="text-base leading-none">{meta.emoji}</span>
+                        <span className="text-xs font-bold text-stone-500 uppercase tracking-wider">
+                          {meta.label}
+                        </span>
+                        <div className="flex-1 h-px bg-stone-200" />
+                        <span className="text-[10px] text-stone-300">
+                          {catItems.filter(i => checked.has(i.name.toLowerCase())).length}/{catItems.length}
+                        </span>
+                      </div>
+
+                      {/* Items */}
+                      <div className="space-y-0.5">
+                        {catItems.map(item => {
+                          const key = item.name.toLowerCase();
+                          const isChecked = checked.has(key);
+                          return (
+                            <button
+                              key={key}
+                              onClick={() => onToggle(key)}
+                              className={clsx(
+                                'w-full flex items-center gap-3 px-3 py-2.5 rounded-xl transition-all text-left',
+                                isChecked
+                                  ? 'bg-stone-100 opacity-60'
+                                  : 'bg-white hover:bg-orange-50 shadow-sm shadow-stone-100',
+                              )}
+                            >
+                              {/* Checkbox */}
+                              <div className={clsx(
+                                'w-5 h-5 rounded-md border-2 flex-shrink-0 flex items-center justify-center transition-all',
+                                isChecked
+                                  ? 'bg-orange-500 border-orange-500'
+                                  : 'border-stone-300',
+                              )}>
+                                {isChecked && <Check size={12} strokeWidth={3} className="text-white" />}
+                              </div>
+
+                              {/* Name */}
+                              <span className={clsx(
+                                'flex-1 text-sm font-medium',
+                                isChecked ? 'line-through text-stone-400' : 'text-stone-700',
+                              )}>
+                                {item.name}
+                              </span>
+
+                              {/* Quantity badge */}
+                              {item.quantity && (
+                                <span className={clsx(
+                                  'text-xs px-2 py-0.5 rounded-full flex-shrink-0',
+                                  isChecked
+                                    ? 'bg-stone-200 text-stone-400'
+                                    : 'bg-orange-100 text-orange-600 font-medium',
+                                )}>
+                                  {item.quantity}
+                                </span>
+                              )}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  );
+                })}
+
+              {/* Progress summary */}
+              {checkedCount > 0 && (
+                <div className="py-3 px-4 rounded-xl bg-green-50 border border-green-100 flex items-center gap-3">
+                  <div className="w-8 h-8 rounded-full bg-green-100 flex items-center justify-center flex-shrink-0">
+                    <Check size={16} className="text-green-600" strokeWidth={2.5} />
+                  </div>
+                  <div>
+                    <p className="text-sm font-semibold text-green-700">
+                      {checkedCount === totalCount ? 'All done! 🎉' : `${checkedCount} of ${totalCount} collected`}
+                    </p>
+                    <p className="text-xs text-green-500">
+                      {checkedCount === totalCount ? 'Ready to check out.' : `${totalCount - checkedCount} remaining`}
+                    </p>
+                  </div>
+                </div>
+              )}
+
+              <div className="h-4" />
+            </div>
+          )}
+        </div>
+      </div>
+    </>
   );
 };
 

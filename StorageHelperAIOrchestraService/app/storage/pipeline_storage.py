@@ -1151,7 +1151,13 @@ class PipelineStorage:
                 if not cleaned:
                     continue
                 if dish_ingredients and cleaned in dish_ingredients:
-                    ing_list = [{"name": n, "quantity": "", "category": "other"} for n in dish_ingredients[cleaned]]
+                    raw = dish_ingredients[cleaned]
+                    ing_list = [
+                        item if isinstance(item, dict)
+                        else {"name": item, "quantity": "", "category": "other"}
+                        for item in raw
+                        if item
+                    ]
                 elif dish_ingredients:
                     ing_list = []
                 elif only_slot_today and len(dish_names) == 1:
@@ -1186,7 +1192,12 @@ class PipelineStorage:
             return []
 
         now_iso = datetime.now(timezone.utc).isoformat()
-        ingredients_pool = [{"name": item, "quantity": "", "category": "other"} for item in shopping_list]
+        ingredients_pool = [
+            item if isinstance(item, dict)
+            else {"name": item, "quantity": "", "category": "other"}
+            for item in (shopping_list or [])
+            if item
+        ]
         daily_plans = []
         slot_order = ["breakfast", "lunch", "dinner", "snack"]
 
