@@ -1,10 +1,12 @@
 import { useState, useEffect, useCallback } from 'react'
 import { Link } from 'react-router-dom'
-import { MapPin, FileText, Plus, Edit2, Trash2, X, ChevronRight, Search, Clock } from 'lucide-react'
+import { MapPin, FileText, Plus, Edit2, Trash2, X, ChevronRight, Search, Clock, Camera } from 'lucide-react'
 import { locationService, documentService, categoryService, Document, StorageLocation } from '../api/services'
 import { getApiBaseUrl } from '../api/client'
 import { useAuth } from '../contexts/AuthContext'
 import CategoryIcon from '../components/CategoryIcon'
+import { Camera as CapCamera, CameraResultType, CameraSource } from '@capacitor/camera'
+import { Capacitor } from '@capacitor/core'
 
 const _API_ORIGIN = getApiBaseUrl().replace(/\/api\/?$/, '')
 const toAbsoluteUrl = (url: string | null | undefined): string =>
@@ -77,6 +79,7 @@ const Modal = ({ show, onClose, title, children }: { show: boolean; onClose: () 
 
 const LocationsPage = () => {
   const { userId } = useAuth()
+  const isNativeMobile = Capacitor.isNativePlatform()
   const [locations, setLocations] = useState<StorageLocation[]>([])
   const [loading, setLoading] = useState(true)
   const [showCreateModal, setShowCreateModal] = useState(false)
@@ -208,6 +211,34 @@ const LocationsPage = () => {
         return
       }
       setSelectedFile(file)
+    }
+  }
+
+  const handleTakeLocationPhoto = async () => {
+    try {
+      const photo = await CapCamera.getPhoto({
+        resultType: CameraResultType.DataUrl,
+        source: CameraSource.Camera,
+        quality: 90,
+        allowEditing: false,
+      })
+      if (photo.dataUrl) {
+        const res = await fetch(photo.dataUrl)
+        const blob = await res.blob()
+        const mimeType = blob.type || 'image/jpeg'
+        const ext = mimeType.split('/')[1] || 'jpg'
+        const file = new File([blob], `location_${Date.now()}.${ext}`, { type: mimeType })
+        setSelectedFile(file)
+        setFormError(null)
+      }
+    } catch (error: any) {
+      const cancelled =
+        error?.message === 'User cancelled photos app' ||
+        error?.message === 'No image picked'
+      if (!cancelled) {
+        console.error('Camera error:', error)
+        setFormError('Unable to access camera. Please check camera permissions in Settings.')
+      }
     }
   }
 
@@ -385,26 +416,26 @@ const LocationsPage = () => {
                     <div className="w-12 h-12 bg-home-primary-50 text-home-primary-600 rounded-xl flex items-center justify-center group-hover:scale-110 transition-transform duration-300">
                       <MapPin size={24} />
                     </div>
-                    <div className="flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity" onClick={e => e.stopPropagation()}>
+                    <div className="flex gap-1 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity" onClick={e => e.stopPropagation()}>
                       <button
                         onClick={(e) => {
                           e.stopPropagation();
                           handleEdit(location);
                         }}
-                        className="p-2 text-home-text-light hover:text-home-primary-600 hover:bg-home-primary-50 rounded-lg transition-colors"
+                        className="p-2.5 text-home-text-light hover:text-home-primary-600 hover:bg-home-primary-50 active:bg-home-primary-100 rounded-lg transition-colors"
                         title="Edit location"
                       >
-                        <Edit2 size={18} />
+                        <Edit2 size={20} />
                       </button>
                       <button
                         onClick={(e) => {
                           e.stopPropagation();
                           handleDelete(location);
                         }}
-                        className="p-2 text-home-text-light hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors"
+                        className="p-2.5 text-home-text-light hover:text-red-600 hover:bg-red-50 active:bg-red-100 rounded-lg transition-colors"
                         title="Delete location"
                       >
-                        <Trash2 size={18} />
+                        <Trash2 size={20} />
                       </button>
                     </div>
                   </div>
@@ -561,6 +592,17 @@ const LocationsPage = () => {
               <label className="block text-sm font-medium text-home-text-dark mb-1">
                 Location Photo (Optional)
               </label>
+              {isNativeMobile && (
+                <button
+                  type="button"
+                  onClick={handleTakeLocationPhoto}
+                  disabled={uploadingImage || submitting}
+                  className="w-full flex items-center justify-center gap-2 bg-home-primary-500 hover:bg-home-primary-600 active:bg-home-primary-700 text-white font-semibold py-3 rounded-lg mb-2 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  <Camera size={20} />
+                  Take Photo
+                </button>
+              )}
               <input
                 type="file"
                 accept="image/*"
@@ -569,8 +611,8 @@ const LocationsPage = () => {
                 disabled={uploadingImage || submitting}
               />
               {selectedFile && (
-                <p className="text-sm text-green-600 mt-1">
-                  ✓ {selectedFile.name}
+                <p className="text-sm text-green-600 mt-1 flex items-center gap-1">
+                  <span>✓</span> {selectedFile.name}
                 </p>
               )}
             </div>
@@ -633,6 +675,17 @@ const LocationsPage = () => {
               <label className="block text-sm font-medium text-home-text-dark mb-1">
                 Location Photo (Optional)
               </label>
+              {isNativeMobile && (
+                <button
+                  type="button"
+                  onClick={handleTakeLocationPhoto}
+                  disabled={uploadingImage || submitting}
+                  className="w-full flex items-center justify-center gap-2 bg-home-primary-500 hover:bg-home-primary-600 active:bg-home-primary-700 text-white font-semibold py-3 rounded-lg mb-2 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  <Camera size={20} />
+                  Take Photo
+                </button>
+              )}
               <input
                 type="file"
                 accept="image/*"
@@ -641,8 +694,8 @@ const LocationsPage = () => {
                 disabled={uploadingImage || submitting}
               />
               {selectedFile && (
-                <p className="text-sm text-green-600 mt-1">
-                  ✓ {selectedFile.name}
+                <p className="text-sm text-green-600 mt-1 flex items-center gap-1">
+                  <span>✓</span> {selectedFile.name}
                 </p>
               )}
             </div>

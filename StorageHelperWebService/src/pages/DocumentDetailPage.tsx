@@ -22,6 +22,7 @@ const DocumentDetailPage = () => {
   const [category, setCategory] = useState<DocumentCategory | null>(null)
   const [storageLocation, setStorageLocation] = useState<StorageLocation | null>(null)
   const [deleting, setDeleting] = useState(false)
+  const [showDeleteModal, setShowDeleteModal] = useState(false)
   const [editing, setEditing] = useState(false)
   const [saving, setSaving] = useState(false)
   const [selectedCategoryId, setSelectedCategoryId] = useState<number | null>(null)
@@ -63,13 +64,15 @@ const DocumentDetailPage = () => {
     loadData()
   }, [userId])
 
-  const handleDelete = async () => {
-    if (!id || !window.confirm('Are you sure you want to delete this document? This action cannot be undone.')) {
-      return
-    }
+  const handleDelete = () => {
+    setShowDeleteModal(true)
+  }
 
+  const handleDeleteConfirm = async () => {
+    if (!id) return
     try {
       setDeleting(true)
+      setShowDeleteModal(false)
       await documentService.delete(parseInt(id))
       navigate('/documents')
     } catch (error) {
@@ -290,12 +293,12 @@ const DocumentDetailPage = () => {
                   return document.title
                 })()}
               </h1>
-              <div className="flex gap-2 flex-shrink-0">
+              <div className="flex gap-2 w-full sm:w-auto flex-shrink-0">
                 {!editing ? (
                   <>
                     <button
                       onClick={handleStartEdit}
-                      className="btn-secondary flex items-center gap-2 flex-1 sm:flex-none justify-center"
+                      className="btn-secondary flex items-center gap-2 flex-1 sm:flex-none justify-center py-3 sm:py-2"
                     >
                       <Edit2 size={18} />
                       Edit
@@ -303,7 +306,7 @@ const DocumentDetailPage = () => {
                     <button
                       onClick={handleDelete}
                       disabled={deleting}
-                      className="btn-danger flex items-center gap-2 flex-1 sm:flex-none justify-center"
+                      className="btn-danger flex items-center gap-2 flex-1 sm:flex-none justify-center py-3 sm:py-2 disabled:opacity-50"
                     >
                       <Trash2 size={18} />
                       {deleting ? 'Deleting...' : 'Delete'}
@@ -314,7 +317,7 @@ const DocumentDetailPage = () => {
                     <button
                       onClick={handleSave}
                       disabled={saving}
-                      className="btn-primary flex items-center gap-2 flex-1 sm:flex-none justify-center"
+                      className="btn-primary flex items-center gap-2 flex-1 sm:flex-none justify-center py-3 sm:py-2 disabled:opacity-50"
                     >
                       <Save size={18} />
                       {saving ? 'Saving...' : 'Save'}
@@ -322,7 +325,7 @@ const DocumentDetailPage = () => {
                     <button
                       onClick={handleCancelEdit}
                       disabled={saving}
-                      className="btn-secondary flex items-center gap-2 flex-1 sm:flex-none justify-center"
+                      className="btn-secondary flex items-center gap-2 flex-1 sm:flex-none justify-center py-3 sm:py-2 disabled:opacity-50"
                     >
                       <X size={18} />
                       Cancel
@@ -551,6 +554,41 @@ const DocumentDetailPage = () => {
         <div className="card text-center py-12">
           <FileText className="mx-auto mb-4 text-home-primary-300" size={48} />
           <p className="text-home-text-light">No file preview available</p>
+        </div>
+      )}
+
+      {/* Delete Confirmation Modal */}
+      {showDeleteModal && (
+        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-end sm:items-center justify-center p-4">
+          <div className="bg-white rounded-2xl shadow-2xl w-full sm:max-w-sm">
+            <div className="p-6">
+              <div className="flex items-center gap-3 mb-3">
+                <div className="w-10 h-10 bg-red-100 rounded-full flex items-center justify-center flex-shrink-0">
+                  <Trash2 className="text-red-600" size={20} />
+                </div>
+                <h2 className="text-lg font-bold text-home-text-dark">Delete Document</h2>
+              </div>
+              <p className="text-home-text-light text-sm mb-6">
+                Are you sure you want to delete this document? This action cannot be undone.
+              </p>
+              <div className="flex flex-col gap-3">
+                <button
+                  onClick={handleDeleteConfirm}
+                  disabled={deleting}
+                  className="w-full py-3 rounded-xl bg-red-600 hover:bg-red-700 active:bg-red-800 text-white font-semibold transition-colors disabled:opacity-50"
+                >
+                  {deleting ? 'Deleting...' : 'Yes, Delete'}
+                </button>
+                <button
+                  onClick={() => setShowDeleteModal(false)}
+                  disabled={deleting}
+                  className="w-full py-3 rounded-xl bg-home-background-dark hover:bg-home-primary-100 text-home-text-dark font-semibold transition-colors"
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          </div>
         </div>
       )}
     </div>
