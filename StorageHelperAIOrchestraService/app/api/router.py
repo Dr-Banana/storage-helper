@@ -415,6 +415,12 @@ async def confirm_and_upload_document(
                 if location_id is None and request.recommendation:
                     location_id = request.recommendation.get("location_id") or request.recommendation.get("suggested_location_id")
                 
+                # Receipts are distributed across item locations — the parent document
+                # itself should not be pinned to any single location.
+                rec_category_code = (request.recommendation or {}).get("category_code", "")
+                if rec_category_code.upper() in ("RECEIPT", "REC"):
+                    location_id = -1
+
                 # Normalize location_id: None means no location, convert to -1
                 if location_id is None:
                     location_id = -1

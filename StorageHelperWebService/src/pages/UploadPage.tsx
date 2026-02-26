@@ -220,7 +220,9 @@ const UploadPage = () => {
                   const rec = result.recommendation || {}
                   setSelectedCategoryId(rec.category_id || null)
                   
-                  const recommendedLocationId = rec.location_id
+                  // Receipts are distributed by item — no single location for the parent document
+                  const isReceipt = ["RECEIPT", "REC"].includes((rec.category_code || "").toUpperCase())
+                  const recommendedLocationId = isReceipt ? -1 : rec.location_id
                   setSelectedLocationId(recommendedLocationId === -1 || !recommendedLocationId ? -1 : recommendedLocationId)
                   
                   // Reload categories to ensure we have the latest
@@ -493,7 +495,7 @@ const UploadPage = () => {
                 <div>
                   <p className="text-xs text-home-text-light mb-1">Recommended Location</p>
                   <p className="text-sm font-medium text-home-text-dark">
-                    {selectedCategoryId && (categories.find(c => c.id === selectedCategoryId)?.code === 'REC' || categories.find(c => c.id === selectedCategoryId)?.code === 'RECEIPT') ? (
+                    {["RECEIPT", "REC"].includes((ingestionResult.recommendation.category_code || "").toUpperCase()) ? (
                       <span className="text-home-primary-600 flex items-center gap-1">
                         <FileText size={14} />
                         Distributed by Item (see table)
@@ -521,6 +523,7 @@ const UploadPage = () => {
                     metadata={ingestionResult.recommendation.metadata} 
                     categoryCode={ingestionResult.recommendation.category_code}
                     isEditing={true}
+                    availableLocations={locations.map(l => ({ id: l.id, name: l.name }))}
                     ingestionMetadata={{
                       ocr_text: ingestionResult.page_results?.[0]?.ocr_text,
                       vision_understanding: ingestionResult.vision_understanding,
@@ -609,7 +612,10 @@ const UploadPage = () => {
             </select>
           </div>
 
-          {/* Location Selection */}
+          {/* Location Selection — hidden for receipts (items are distributed individually) */}
+          {!["RECEIPT", "REC"].includes(
+            (ingestionResult.recommendation.category_code || "").toUpperCase()
+          ) && (
           <div className="mb-4">
             <label className="block text-sm font-medium text-home-text-dark mb-2">
               Storage Location
@@ -643,6 +649,7 @@ const UploadPage = () => {
               </div>
             )}
           </div>
+          )}
 
           {/* Page Results Preview */}
           {ingestionResult.page_results && ingestionResult.page_results.length > 0 && (

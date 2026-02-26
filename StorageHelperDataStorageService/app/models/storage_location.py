@@ -2,7 +2,7 @@
 Database model for StorageLocation
 """
 from datetime import datetime
-from sqlalchemy import Column, Integer, String, Text, DateTime, func, ForeignKey
+from sqlalchemy import Column, Integer, String, Text, DateTime, JSON, func, ForeignKey
 from sqlalchemy.orm import relationship
 
 from app.core.database import Base
@@ -17,6 +17,8 @@ class StorageLocation(Base):
     name = Column(String(100), nullable=False, index=True)  # e.g. "Bedroom desk, left drawer #2"
     description = Column(Text, nullable=True)
     photo_url = Column(Text, nullable=True)
+    # Auto-updated profile: {top_categories, top_sub_tags, dominant_category, item_count, last_updated}
+    content_analysis = Column(JSON, nullable=True)
     created_at = Column(DateTime, default=func.now(), nullable=False)
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now(), nullable=False)
 

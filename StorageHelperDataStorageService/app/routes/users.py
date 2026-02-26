@@ -351,24 +351,41 @@ def get_user_locations(user_id: int, db: Session = Depends(get_db)):
                 detail=f"User with ID {user_id} not found"
             )
         
-        # Get all storage locations for the user
+        # Get all storage locations for the user, with document counts in one query
         from app.models.storage_location import StorageLocation
-        
-        locations = db.query(StorageLocation).filter(
-            StorageLocation.user_id == user_id
-        ).all()
-        
+        from app.models.document import Document
+        from sqlalchemy import func
+
+        count_subq = (
+            db.query(
+                Document.current_location_id.label("loc_id"),
+                func.count(Document.id).label("doc_count"),
+            )
+            .filter(Document.owner_id == user_id)
+            .group_by(Document.current_location_id)
+            .subquery()
+        )
+
+        rows = (
+            db.query(StorageLocation, func.coalesce(count_subq.c.doc_count, 0).label("doc_count"))
+            .outerjoin(count_subq, StorageLocation.id == count_subq.c.loc_id)
+            .filter(StorageLocation.user_id == user_id)
+            .all()
+        )
+
         return {
             "user_id": user_id,
-            "total": len(locations),
+            "total": len(rows),
             "locations": [
                 {
                     "id": loc.id,
                     "name": loc.name,
                     "description": loc.description,
-                    "photo_url": _convert_to_accessible_url(loc.photo_url) if loc.photo_url else None
+                    "photo_url": _convert_to_accessible_url(loc.photo_url) if loc.photo_url else None,
+                    "document_count": doc_count,
+                    "content_analysis": loc.content_analysis,
                 }
-                for loc in locations
+                for loc, doc_count in rows
             ]
         }
     except HTTPException:
@@ -574,6 +591,32 @@ def update_user_location(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to update user location: {str(e)}"
         )
+
+
+@router.post(
+    "/{user_id}/locations/{location_id}/analyze",
+    response_model=dict,
+    summary="Refresh the intelligence profile of a location",
+    description="Re-analyses all documents in the location and updates content_analysis."
+)
+def analyze_location_intelligence(
+    user_id: int,
+    location_id: int,
+    current_user_id: Annotated[int, Depends(get_current_user_id)],
+    db: Session = Depends(get_db)
+):
+    from app.services.document_service import DocumentService
+    try:
+        profile = DocumentService.analyze_location(db, location_id)
+        db.commit()
+        if profile is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Location not found")
+        return {"location_id": location_id, "content_analysis": profile}
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
 
 
 @router.get(

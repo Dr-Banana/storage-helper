@@ -437,35 +437,273 @@ class DocumentService:
             raise ValueError(f"File upload failed: {str(e)}")
 
     @staticmethod
-    def _get_or_create_location_by_name(db: Session, owner_id: int, location_name: str) -> Optional[int]:
+    def _parse_location_tags(description: Optional[str]) -> list:
+        """Extract tags (lowercase) from '[Tags: Spices, Flour] ...' — used for matching."""
+        if not description:
+            return []
+        import re
+        match = re.search(r'\[Tags:\s*([^\]]+)\]', description, re.IGNORECASE)
+        if not match:
+            return []
+        return [t.strip().lower() for t in match.group(1).split(',') if t.strip()]
+
+    @staticmethod
+    def _parse_location_tags_cased(description: Optional[str]) -> list:
+        """Extract tags preserving original case from '[Tags: Spices, Flour] ...'."""
+        if not description:
+            return []
+        import re
+        match = re.search(r'\[Tags:\s*([^\]]+)\]', description, re.IGNORECASE)
+        if not match:
+            return []
+        return [t.strip() for t in match.group(1).split(',') if t.strip()]
+
+    @staticmethod
+    def _parse_excl_tags(description: Optional[str]) -> list:
+        """Extract explicitly excluded tags (original case) from '[Excl: Snacks, ...]'."""
+        if not description:
+            return []
+        import re
+        match = re.search(r'\[Excl:\s*([^\]]+)\]', description, re.IGNORECASE)
+        if not match:
+            return []
+        return [t.strip() for t in match.group(1).split(',') if t.strip()]
+
+    @staticmethod
+    def _strip_description_markers(description: Optional[str]) -> str:
+        """Strip [Tags: ...] and [Excl: ...] markers, returning plain text only."""
+        if not description:
+            return ''
+        import re
+        text = re.sub(r'\[Tags:[^\]]*\]\s*', '', description, flags=re.IGNORECASE)
+        text = re.sub(r'\[Excl:[^\]]*\]\s*', '', text, flags=re.IGNORECASE)
+        return text.strip()
+
+    @staticmethod
+    def _rebuild_description(tags: list, excl_tags: list, free_text: str) -> str:
+        """Rebuild a description string from its component parts."""
+        tag_part = f"[Tags: {', '.join(tags)}] " if tags else ""
+        excl_part = f"[Excl: {', '.join(excl_tags)}] " if excl_tags else ""
+        return (tag_part + excl_part + free_text.strip()).strip()
+
+    @staticmethod
+    def _match_location_by_tag(db: Session, owner_id: int, sub_category: Optional[str],
+                               storage_suggestion: Optional[str]) -> Optional[int]:
         """
-        Helper to find a location by name or create it if it doesn't exist.
+        Level-1: Find the best location by matching sub_category tag.
+
+        Priority within Level-1:
+          1a. Manual [Tags: ...] in description (user-curated, highest trust)
+          1b. content_analysis.top_sub_tags (auto-learned from history, fallback)
+
+        When multiple matches, prefer the one whose name aligns with storage_suggestion.
+        """
+        if not sub_category:
+            return None
+        tag_target = sub_category.strip().lower()
+        all_locations = db.query(StorageLocation).filter(
+            StorageLocation.user_id == owner_id
+        ).all()
+
+        manual_candidates = []
+        learned_candidates = []
+
+        for loc in all_locations:
+            manual_tags = DocumentService._parse_location_tags(loc.description)
+            if tag_target in manual_tags:
+                manual_candidates.append(loc)
+                continue
+            # Fall back to learned tags from content_analysis
+            analysis = loc.content_analysis or {}
+            learned_tags = [t.lower() for t in analysis.get("top_sub_tags", [])]
+            if tag_target in learned_tags:
+                learned_candidates.append(loc)
+
+        candidates = manual_candidates if manual_candidates else learned_candidates
+        if not candidates:
+            return None
+
+        if len(candidates) == 1:
+            source = "manual" if manual_candidates else "learned"
+            logger.info(
+                f"[Location L1] {source} tag '{sub_category}' -> location_id={candidates[0].id}"
+            )
+            return candidates[0].id
+
+        # Ambiguity: prefer candidate whose name aligns with storage_suggestion
+        if storage_suggestion:
+            hint = storage_suggestion.lower()
+            for loc in candidates:
+                if hint in loc.name.lower() or loc.name.lower() in hint:
+                    return loc.id
+        return candidates[0].id
+
+    @staticmethod
+    def _match_location_by_name(db: Session, owner_id: int, location_name: str) -> Optional[int]:
+        """
+        Level-2: Case-insensitive substring matching between storage_suggestion
+        and existing location names (more lenient than ilike exact match).
+        Handles 'Freezer' matching 'My Freezer' or 'Deep Freezer'.
         """
         if not location_name:
             return None
-            
+        name_lower = location_name.lower()
+        all_locations = db.query(StorageLocation).filter(
+            StorageLocation.user_id == owner_id
+        ).all()
+        for loc in all_locations:
+            loc_name_lower = loc.name.lower()
+            if name_lower in loc_name_lower or loc_name_lower in name_lower:
+                return loc.id
+        return None
+
+    @staticmethod
+    def _resolve_location(db: Session, owner_id: int, storage_suggestion: str,
+                          sub_category: Optional[str] = None) -> Optional[int]:
+        """
+        Two-level location routing (no auto-creation):
+          Level 1 — Tag match (highest priority): match sub_category against location
+                    [Tags: ...] in description (manual) or content_analysis.top_sub_tags (learned).
+          Level 2 — Name match (fallback): case-insensitive substring match between
+                    storage_suggestion and existing location names.
+
+        Returns None when no existing location matches — the caller is responsible
+        for using the receipt's own location as the final fallback.
+        """
+        if not storage_suggestion:
+            return None
         try:
-            # 1. Try to find existing location (case-insensitive)
-            location = db.query(StorageLocation).filter(
-                StorageLocation.user_id == owner_id,
-                StorageLocation.name.ilike(location_name)
-            ).first()
-            
-            if location:
-                return location.id
-            
-            # 2. Not found, auto-create it
-            logger.info(f"Auto-creating missing storage location: '{location_name}' for user {owner_id}")
-            new_location = StorageLocation(
-                user_id=owner_id,
-                name=location_name,
-                description=f"Auto-created location for {location_name} storage"
+            # Level 1: tag-based matching
+            matched_id = DocumentService._match_location_by_tag(
+                db, owner_id, sub_category, storage_suggestion
             )
-            db.add(new_location)
-            db.flush() # Get new_location.id
-            return new_location.id
+            if matched_id:
+                logger.info(
+                    f"[Location L1] Tag match sub_category='{sub_category}' -> location_id={matched_id}"
+                )
+                return matched_id
+
+            # Level 2: name substring matching
+            matched_id = DocumentService._match_location_by_name(db, owner_id, storage_suggestion)
+            if matched_id:
+                logger.info(
+                    f"[Location L2] Name match '{storage_suggestion}' -> location_id={matched_id}"
+                )
+                return matched_id
+
+            # No match — caller falls back to receipt's location
+            logger.info(
+                f"[Location] No match for suggestion='{storage_suggestion}' sub='{sub_category}', "
+                f"falling back to receipt location"
+            )
+            return None
         except Exception as e:
-            logger.error(f"Failed to get/create location '{location_name}': {e}")
+            logger.error(f"Failed to resolve location '{storage_suggestion}': {e}")
+            return None
+
+    @staticmethod
+    def analyze_location(db: Session, location_id: int) -> Optional[dict]:
+        """
+        Build / refresh the content_analysis profile for a location.
+
+        Profile schema:
+        {
+            "item_count": 12,
+            "top_categories": ["MEAT", "DAIRY"],          # by frequency, up to 3
+            "top_sub_tags":   ["Spices", "Baking"],        # from doc_metadata.sub_category, up to 3
+            "dominant_category": "MEAT",
+            "last_updated": "2026-02-23"
+        }
+        """
+        try:
+            from datetime import date
+            from collections import Counter
+            from sqlalchemy import func as sqlfunc
+
+            location = db.query(StorageLocation).filter(
+                StorageLocation.id == location_id
+            ).first()
+            if not location:
+                return None
+
+            from sqlalchemy import or_ as sql_or
+            docs = (
+                db.query(Document, DocumentCategory.code.label("cat_code"))
+                .outerjoin(DocumentCategory, Document.category_id == DocumentCategory.id)
+                .filter(Document.current_location_id == location_id)
+                # Exclude receipt parent documents but keep items with no category (NULL join).
+                # Without the NULL guard, "NULL NOT IN (...)" evaluates to NULL in SQL,
+                # silently dropping uncategorised items from the count.
+                .filter(sql_or(
+                    Document.category_id == None,
+                    ~DocumentCategory.code.in_(["RECEIPT", "REC"])
+                ))
+                .all()
+            )
+
+            item_count = len(docs)
+            cat_counter: Counter = Counter()
+            sub_counter: Counter = Counter()
+
+            for doc, cat_code in docs:
+                if cat_code:
+                    cat_counter[cat_code.upper()] += 1
+                if doc.doc_metadata:
+                    sub = doc.doc_metadata.get("sub_category")
+                    if sub:
+                        sub_counter[sub] += 1
+
+            ai_top_tags = [t for t, _ in sub_counter.most_common(3)]
+
+            profile = {
+                "item_count": item_count,
+                "top_categories": [c for c, _ in cat_counter.most_common(3)],
+                "top_sub_tags": ai_top_tags,
+                "dominant_category": cat_counter.most_common(1)[0][0] if cat_counter else None,
+                "last_updated": date.today().isoformat(),
+            }
+
+            location.content_analysis = profile
+            from sqlalchemy.orm.attributes import flag_modified
+            flag_modified(location, "content_analysis")
+
+            # Merge AI-detected tags directly into location.description [Tags: ...].
+            # This unifies manual and AI tags into a single source of truth.
+            # Respect [Excl: ...] — never re-add tags the user explicitly dismissed.
+            existing_tags = DocumentService._parse_location_tags_cased(location.description)
+            excl_tags = DocumentService._parse_excl_tags(location.description)
+            free_text = DocumentService._strip_description_markers(location.description)
+
+            existing_lower = {t.lower() for t in existing_tags}
+            excl_lower = {t.lower() for t in excl_tags}
+
+            merged_tags = list(existing_tags)
+            added = []
+            for ai_tag in ai_top_tags:
+                if ai_tag.lower() not in existing_lower and ai_tag.lower() not in excl_lower:
+                    merged_tags.append(ai_tag)
+                    existing_lower.add(ai_tag.lower())
+                    added.append(ai_tag)
+
+            if added:
+                location.description = DocumentService._rebuild_description(
+                    merged_tags, excl_tags, free_text
+                )
+                flag_modified(location, "description")
+                logger.info(
+                    f"[Intelligence] Location {location_id} AI merged tags {added} into description"
+                )
+
+            db.add(location)
+            db.flush()
+            logger.info(
+                f"[Intelligence] Location {location_id} profile updated: "
+                f"dominant={profile['dominant_category']}, items={item_count}, "
+                f"ai_tags={ai_top_tags}"
+            )
+            return profile
+        except Exception as e:
+            logger.error(f"Failed to analyze location {location_id}: {e}", exc_info=True)
             return None
 
     @staticmethod
@@ -538,17 +776,16 @@ class DocumentService:
             # Normalize location_id: -1 means no location, convert to None
             normalized_location_id = None if location_id == -1 else location_id
             
-            # 🎯 AUTO-CREATE LOCATION LOGIC:
+            # 🎯 LOCATION RESOLUTION LOGIC:
             # If no location_id is provided (or it's -1) and we have an AI storage suggestion,
-            # create the location automatically.
+            # try to resolve an existing location by tag or name match (no auto-creation).
             if normalized_location_id is None and metadata and metadata.get("storage_suggestion"):
                 suggestion = metadata.get("storage_suggestion")
-                # Don't auto-create if it's "Other"
                 if suggestion and suggestion != "Other":
-                    created_id = DocumentService._get_or_create_location_by_name(db, owner_id, suggestion)
-                    if created_id:
-                        normalized_location_id = created_id
-                        logger.info(f"Automatically assigned document to new/existing location: {suggestion} (ID: {created_id})")
+                    resolved_id = DocumentService._resolve_location(db, owner_id, suggestion)
+                    if resolved_id:
+                        normalized_location_id = resolved_id
+                        logger.info(f"Resolved document location via suggestion '{suggestion}' -> ID: {resolved_id}")
 
             # Track item IDs created
             item_ids = []
@@ -912,13 +1149,16 @@ class DocumentService:
                      if loc:
                          item_location_name = loc.name
                 elif storage_suggestion and storage_suggestion != "Other":
-                    # Use helper to find or create the location
-                    created_id = DocumentService._get_or_create_location_by_name(db, receipt_doc.owner_id, storage_suggestion)
-                    if created_id:
-                        item_location_id = created_id
+                    sub_category = item_data.get("sub_category")
+                    resolved_id = DocumentService._resolve_location(
+                        db, receipt_doc.owner_id, storage_suggestion, sub_category=sub_category
+                    )
+                    if resolved_id:
+                        item_location_id = resolved_id
                         # Get the name for metadata update
-                        matched_loc = db.query(StorageLocation).filter(StorageLocation.id == created_id).first()
+                        matched_loc = db.query(StorageLocation).filter(StorageLocation.id == resolved_id).first()
                         item_location_name = matched_loc.name if matched_loc else storage_suggestion
+                    # If resolved_id is None, item_location_id stays as receipt_doc.current_location_id (receipt's location)
                 
                 # Update item_data in the metadata list so it reflects the matched/created location
                 if item_location_id:
@@ -943,12 +1183,14 @@ class DocumentService:
                     "source_receipt_id": receipt_doc.id,
                     "is_food": item_data.get("is_food", True),
                     "quantity": str(item_data.get("quantity") or "1"),
-                    "unit": item_data.get("unit"), # Include unit
+                    "unit": item_data.get("unit"),
                     "purchase_date": purchase_date_str,
                     "expiry_date": expiry_date_str,
                     "status": "unopened",
                     "original_text": original_text,
-                    "suggested_storage": storage_suggestion # Store AI suggestion even if not matched to a location_id
+                    "suggested_storage": storage_suggestion,
+                    # sub_category is used by analyze_location to build top_sub_tags
+                    "sub_category": item_data.get("sub_category"),
                 }
 
                 if item_doc:
@@ -1010,6 +1252,19 @@ class DocumentService:
             db.flush()
             items_count = len(item_ids)
             logger.info(f"Processed {items_count} item documents for receipt {receipt_doc.id} (ids: {item_ids})")
+
+            # Refresh content_analysis for every distinct location that received items
+            affected_location_ids = {
+                item.get("location_id") for item in items_data if item.get("location_id")
+            }
+            logger.info(
+                f"[Intelligence] Triggering analyze_location for {len(affected_location_ids)} location(s): "
+                f"{affected_location_ids} | item sub_categories: "
+                f"{[item.get('sub_category') for item in items_data]}"
+            )
+            for loc_id in affected_location_ids:
+                DocumentService.analyze_location(db, loc_id)
+
             return item_ids
             
         except Exception as e:

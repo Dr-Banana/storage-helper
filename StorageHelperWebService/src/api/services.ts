@@ -52,12 +52,22 @@ export interface DocumentCategory {
   description?: string
 }
 
+export interface LocationContentAnalysis {
+  item_count: number
+  top_categories: string[]      // e.g. ["MEAT", "DAIRY"]
+  top_sub_tags: string[]        // e.g. ["Spices", "Baking"]
+  dominant_category: string | null
+  last_updated: string          // ISO date string
+}
+
 export interface StorageLocation {
   id: number
   name: string
   description?: string
   photo_url?: string
   parent_id?: number
+  document_count?: number
+  content_analysis?: LocationContentAnalysis
 }
 
 export interface Event {
@@ -601,6 +611,15 @@ export const locationService = {
     await apiClient.put(`/users/${userId}/locations/${locationId}`, data)
   },
   
+  /**
+   * Refresh the intelligence profile for a location
+   * POST /api/users/{user_id}/locations/{location_id}/analyze
+   */
+  analyze: async (userId: number, locationId: number): Promise<LocationContentAnalysis | null> => {
+    const res = await apiClient.post(`/users/${userId}/locations/${locationId}/analyze`, {})
+    return res.data?.content_analysis ?? null
+  },
+
   /**
    * Delete a location for a user
    * DELETE /api/users/{user_id}/locations/{location_id}

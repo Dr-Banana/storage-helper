@@ -65,6 +65,25 @@ class StorageType(str, Enum):
     PANTRY = "Pantry"
     OTHER = "Other"
 
+# Standard sub-category tags used for fine-grained location matching.
+# These are surfaced to users as quick-pick tags on Location cards.
+LOCATION_SUB_TAGS: List[str] = [
+    "Meat",
+    "Dairy",
+    "Produce",
+    "Frozen",
+    "Drinks",
+    "Snacks",
+    "Condiments",
+    "Spices",
+    "Grains",
+    "Baking",
+    "Pantry",
+    "Supplements",
+    "Cleaning",
+    "Other",
+]
+
 class ReceiptItem(BaseModel):
     original_text: str = Field(..., description="Raw text from receipt line, e.g., 'KS ORG SPIN'")
     product_name: str = Field(..., description="Full expanded name, e.g., 'Kirkland Signature Organic Spinach'")
@@ -74,6 +93,27 @@ class ReceiptItem(BaseModel):
     is_food: bool = Field(..., description="True if edible/cooking ingredient, False for cleaning/household")
     estimated_shelf_life_days: int = Field(..., description="Estimated days until expiry based on food type. 365 for non-perishables.")
     storage_suggestion: StorageType = Field(..., description="Best place to store this item")
+    sub_category: Optional[str] = Field(
+        None,
+        description=(
+            "Fine-grained sub-category tag used for smart location routing. "
+            "Choose exactly one from: Meat, Dairy, Produce, Frozen, Drinks, Snacks, "
+            "Condiments, Spices, Grains, Baking, Pantry, Supplements, Cleaning, Other. "
+            "Map from item category: "
+            "Meat/Seafood -> Meat; Dairy/Egg -> Dairy; Fruit/Vegetable (raw/fresh) -> Produce; "
+            "Frozen -> Frozen; Beverage -> Drinks; Snack -> Snacks; "
+            "Seasoning (sauce/vinegar/ketchup) -> Condiments; "
+            "Seasoning (pepper/salt/spice/herb) -> Spices; "
+            "Pantry (rice/pasta/oats/quinoa) -> Grains; "
+            "Pantry (flour/yeast/baking soda) -> Baking; "
+            "Pantry (canned/dry/packaged) -> Pantry; "
+            "Household (cleaning/soap/paper) -> Cleaning; "
+            "Household (vitamins/protein powder) -> Supplements. "
+            "CRITICAL: Packaged baked goods/desserts that happen to contain fruit in the name "
+            "(mango cake, strawberry mochi, lemon tart) -> Snacks, NOT Produce. "
+            "Produce is ONLY for raw/unprocessed fruits and vegetables."
+        )
+    )
 
 class ReceiptResult(BaseModel):
     merchant: Optional[str] = Field(None, description="Store name detected from header")
@@ -145,6 +185,39 @@ Store Context: Use the store name (usually at the top) to infer brands and produ
 3. **CATEGORIZE & LOCATE**:
    - Assign a strict category: Fruit, Vegetable, Meat, Seafood, Dairy, Egg, Pantry, Seasoning, Snack, Beverage, Frozen, or Household.
    - Suggest a storage location: Fridge, Freezer, Pantry, or Other.
+     Storage guidance:
+     • Pantry → dry goods, grains, canned, packaged snacks, cookies, cakes, pastries,
+                candy, chips, non-perishables, beverages (sealed/shelf-stable).
+     • Fridge → fresh meat, dairy, eggs, cut fruit/vegetables, leftovers,
+                cream-based desserts (cheesecake, mousse cake), opened beverages.
+     • Freezer → frozen meals, ice cream, raw meat for long storage.
+     • Other  → non-food household items.
+     IMPORTANT: A "mango cake", "strawberry cake", or similar packaged baked good
+     → storage_suggestion = Pantry (it is shelf-stable, NOT a fresh dairy-cream cake).
+   - Assign a `sub_category` tag (exactly one) from this fixed list:
+     Meat, Dairy, Produce, Frozen, Drinks, Snacks, Condiments, Spices, Grains, Baking, Pantry, Supplements, Cleaning, Other.
+     This tag drives smart shelf routing — pick the MOST SPECIFIC match:
+     Meat     → any meat, poultry, seafood, fish, shellfish.
+     Dairy    → milk, cheese, yogurt, butter, eggs, cream.
+     Produce  → fresh or pantry vegetables and fruits (apple, banana, carrot, onion, potato, garlic).
+     Frozen   → anything stored in a freezer (frozen meals, ice cream, frozen vegetables).
+     Drinks   → soda, juice, coffee, tea, water, alcohol, any beverage.
+     Snacks   → chips, nuts, chocolate, crackers, cookies, candy, cakes, mochi, pastries,
+                packaged desserts, energy bars. (Any packaged sweet treat = Snacks, NOT Produce.)
+     Condiments → soy sauce, ketchup, mayo, vinegar, hot sauce, salad dressing, oyster sauce.
+     Spices   → pepper, salt, cumin, cinnamon, any dry spice or herb.
+     Grains   → rice, pasta, oats, quinoa, noodles, cereal.
+     Baking   → flour, yeast, cocoa powder, baking soda, sugar, baking mixes.
+     Pantry   → canned goods, dry staples, packaged/processed foods at room temperature.
+     Supplements → protein powder, vitamins, health supplements, medicine.
+     Cleaning → detergent, soap, paper towels, cleaning sprays, household supplies.
+     Other → anything that doesn't fit above.
+
+     CRITICAL sub_category rules:
+     - "Mango cake", "strawberry mochi", "lemon tart" → Snacks (it is a PACKAGED SNACK, not Produce).
+     - Only assign Produce for raw, unprocessed fruits and vegetables.
+     - A product name containing a fruit/vegetable word (mango, strawberry, lemon) does NOT
+       make it Produce if it is a processed/packaged food (cake, juice drink, candy, jam).
 
 4. **ESTIMATE EXPIRY (The "Smart" Part)**:
    - Receipts do not have expiry dates. You MUST estimate `estimated_shelf_life_days` based on the product type and common food safety standards.

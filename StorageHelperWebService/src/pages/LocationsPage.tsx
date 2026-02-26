@@ -1,12 +1,187 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, memo, useMemo } from 'react'
 import { Link } from 'react-router-dom'
-import { MapPin, FileText, Plus, Edit2, Trash2, X, ChevronRight, Search, Clock, Camera } from 'lucide-react'
+import { MapPin, FileText, Plus, Edit2, Trash2, X, ChevronRight, Search, Clock, Camera, Tag } from 'lucide-react'
 import { locationService, documentService, categoryService, Document, StorageLocation } from '../api/services'
 import { getApiBaseUrl } from '../api/client'
 import { useAuth } from '../contexts/AuthContext'
 import CategoryIcon from '../components/CategoryIcon'
 import { Camera as CapCamera, CameraResultType, CameraSource } from '@capacitor/camera'
 import { Capacitor } from '@capacitor/core'
+
+// Pre-compiled regex — avoids rebuilding on every parseTags call
+const TAG_REGEX = /\[Tags:\s*([^\]]+)\]/i
+const EXCL_REGEX = /\[Excl:\s*([^\]]+)\]/i
+
+// ── Tag system ────────────────────────────────────────────────────────────────
+const LOCATION_TAGS = [
+  'Meat', 'Dairy', 'Produce', 'Frozen',
+  'Drinks', 'Snacks', 'Condiments', 'Spices',
+  'Grains', 'Baking', 'Pantry', 'Supplements', 'Cleaning', 'Other',
+] as const
+
+type LocationTag = typeof LOCATION_TAGS[number]
+
+const TAG_COLORS: Record<LocationTag, { bg: string; text: string; border: string }> = {
+  Meat:        { bg: 'bg-red-50',     text: 'text-red-700',     border: 'border-red-200'    },
+  Dairy:       { bg: 'bg-blue-50',    text: 'text-blue-700',    border: 'border-blue-200'   },
+  Produce:     { bg: 'bg-green-50',   text: 'text-green-700',   border: 'border-green-200'  },
+  Frozen:      { bg: 'bg-cyan-50',    text: 'text-cyan-700',    border: 'border-cyan-200'   },
+  Drinks:      { bg: 'bg-sky-50',     text: 'text-sky-700',     border: 'border-sky-200'    },
+  Snacks:      { bg: 'bg-rose-50',    text: 'text-rose-600',    border: 'border-rose-200'   },
+  Condiments:  { bg: 'bg-orange-50',  text: 'text-orange-700',  border: 'border-orange-200' },
+  Spices:      { bg: 'bg-amber-50',   text: 'text-amber-700',   border: 'border-amber-200'  },
+  Grains:      { bg: 'bg-yellow-50',  text: 'text-yellow-700',  border: 'border-yellow-200' },
+  Baking:      { bg: 'bg-lime-50',    text: 'text-lime-700',    border: 'border-lime-200'   },
+  Pantry:      { bg: 'bg-teal-50',    text: 'text-teal-700',    border: 'border-teal-200'   },
+  Supplements: { bg: 'bg-purple-50',  text: 'text-purple-700',  border: 'border-purple-200' },
+  Cleaning:    { bg: 'bg-slate-50',   text: 'text-slate-600',   border: 'border-slate-200'  },
+  Other:       { bg: 'bg-gray-50',    text: 'text-gray-600',    border: 'border-gray-200'   },
+}
+
+/** Parse `[Tags: Spices, Baking]` from a description string */
+function parseTags(description: string | null | undefined): LocationTag[] {
+  if (!description) return []
+  const match = description.match(TAG_REGEX)
+  if (!match) return []
+  return match[1]
+    .split(',')
+    .map(t => t.trim())
+    .filter((t): t is LocationTag => (LOCATION_TAGS as readonly string[]).includes(t))
+}
+
+/** Parse `[Excl: Snacks, Drinks]` — tags the user explicitly dismissed */
+function parseExcluded(description: string | null | undefined): LocationTag[] {
+  if (!description) return []
+  const match = description.match(EXCL_REGEX)
+  if (!match) return []
+  return match[1]
+    .split(',')
+    .map(t => t.trim())
+    .filter((t): t is LocationTag => (LOCATION_TAGS as readonly string[]).includes(t))
+}
+
+/** Rebuild description string after tag changes, optionally persisting excluded learned tags */
+function serializeDescription(tags: LocationTag[], freeText: string, excluded?: LocationTag[]): string {
+  const tagPart = tags.length > 0 ? `[Tags: ${tags.join(', ')}] ` : ''
+  const exclPart = excluded && excluded.length > 0 ? `[Excl: ${excluded.join(', ')}] ` : ''
+  return (tagPart + exclPart + freeText.trim()).trim()
+}
+
+/** Strip the [Tags: ...] and [Excl: ...] markers and return the plain text portion */
+function stripTagsFromDescription(description: string | null | undefined): string {
+  if (!description) return ''
+  return description
+    .replace(/\[Tags:[^\]]*\]\s*/i, '')
+    .replace(/\[Excl:[^\]]*\]\s*/i, '')
+    .trim()
+}
+
+// ── Memoized location card ────────────────────────────────────────────────────
+interface LocationCardProps {
+  location: StorageLocation
+  docCount: number
+  onView: (loc: StorageLocation) => void
+  onEdit: (loc: StorageLocation) => void
+  onDelete: (loc: StorageLocation) => void
+}
+
+const LocationCard = memo(({ location, docCount, onView, onEdit, onDelete }: LocationCardProps) => {
+  const manualTags = useMemo(() => parseTags(location.description), [location.description])
+  const freeText = useMemo(() => stripTagsFromDescription(location.description), [location.description])
+  const absolutePhotoUrl = useMemo(
+    () => {
+      const url = location.photo_url
+      if (!url) return ''
+      const origin = getApiBaseUrl().replace(/\/api\/?$/, '')
+      return (url.startsWith('http://') || url.startsWith('https://')) ? url : origin + (url.startsWith('/') ? url : '/' + url)
+    },
+    [location.photo_url]
+  )
+
+  // All tags come from description [Tags: ...] — AI writes to it too, so no separate learned set
+  const hasTags = manualTags.length > 0
+
+  return (
+    <div
+      className="group bg-white rounded-2xl border border-home-primary-100 shadow-sm hover:shadow-lg transition-[box-shadow,border-color] duration-200 overflow-hidden flex flex-col cursor-pointer will-change-transform"
+      onClick={() => onView(location)}
+    >
+      <div className="p-6 flex flex-col flex-1">
+        <div className="flex items-start justify-between mb-4">
+          <div className="w-12 h-12 bg-home-primary-50 text-home-primary-600 rounded-xl flex items-center justify-center">
+            <MapPin size={24} />
+          </div>
+          <div className="flex gap-1 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity duration-150" onClick={e => e.stopPropagation()}>
+            <button
+              onClick={(e) => { e.stopPropagation(); onEdit(location) }}
+              className="p-2.5 text-home-text-light hover:text-home-primary-600 hover:bg-home-primary-50 rounded-lg transition-colors"
+              title="Edit location"
+            >
+              <Edit2 size={20} />
+            </button>
+            <button
+              onClick={(e) => { e.stopPropagation(); onDelete(location) }}
+              className="p-2.5 text-home-text-light hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors"
+              title="Delete location"
+            >
+              <Trash2 size={20} />
+            </button>
+          </div>
+        </div>
+
+        <h3 className="text-xl font-bold text-home-text-dark mb-2 group-hover:text-home-primary-600 transition-colors duration-150">
+          {location.name}
+        </h3>
+
+        {/* Tag row — single source of truth from description [Tags: ...] */}
+        {hasTags && (
+          <div className="flex flex-wrap gap-1.5 mb-3">
+            {manualTags.map(tag => {
+              const colors = TAG_COLORS[tag] ?? TAG_COLORS.Other
+              return (
+                <span
+                  key={tag}
+                  className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-semibold border ${colors.bg} ${colors.text} ${colors.border}`}
+                >
+                  <Tag size={9} />
+                  {tag}
+                </span>
+              )
+            })}
+          </div>
+        )}
+
+        {freeText && (
+          <p className="text-sm text-home-text-light mb-3 line-clamp-2">{freeText}</p>
+        )}
+
+        {/* Spacer pushes photo + footer to the bottom */}
+        <div className="flex-1" />
+
+        {absolutePhotoUrl && (
+          <div className="mb-3 rounded-xl overflow-hidden shrink-0 bg-home-background-dark">
+            <img
+              src={absolutePhotoUrl}
+              alt={location.name}
+              loading="lazy"
+              decoding="async"
+              className="w-full aspect-video object-cover block"
+              onError={(e) => { e.currentTarget.style.display = 'none' }}
+            />
+          </div>
+        )}
+
+        <div className="flex items-center justify-between pt-4 border-t border-home-primary-50">
+          <div className="flex items-center gap-2 text-sm font-semibold text-home-primary-600">
+            <FileText size={16} />
+            <span>{docCount} item{docCount !== 1 ? 's' : ''}</span>
+          </div>
+          <ChevronRight size={18} className="text-home-primary-300 group-hover:translate-x-1 transition-transform duration-150" />
+        </div>
+      </div>
+    </div>
+  )
+})
 
 const _API_ORIGIN = getApiBaseUrl().replace(/\/api\/?$/, '')
 const toAbsoluteUrl = (url: string | null | undefined): string =>
@@ -22,11 +197,13 @@ interface LocationFormData {
 const Drawer = ({ show, onClose, title, children }: { show: boolean; onClose: () => void; title: string; children: React.ReactNode }) => {
   return (
     <>
-      {/* Backdrop */}
-      <div 
-        className={`fixed inset-0 bg-black/40 backdrop-blur-sm transition-opacity duration-300 z-[60] ${show ? 'opacity-100' : 'opacity-0 pointer-events-none'}`}
-        onClick={onClose}
-      />
+      {/* Backdrop — only mount when visible to avoid backdrop-blur compositing during normal scroll */}
+      {show && (
+        <div
+          className="fixed inset-0 bg-black/40 backdrop-blur-sm z-[60]"
+          onClick={onClose}
+        />
+      )}
       {/* Drawer Content */}
       <div className={`fixed top-0 right-0 h-full w-full max-w-lg bg-home-background-light shadow-2xl transition-transform duration-500 ease-in-out z-[70] transform ${show ? 'translate-x-0' : 'translate-x-full'}`}>
         <div className="flex flex-col h-full">
@@ -94,6 +271,7 @@ const LocationsPage = () => {
     description: '',
     photo_url: ''
   })
+  const [formTags, setFormTags] = useState<LocationTag[]>([])
   const [selectedFile, setSelectedFile] = useState<File | null>(null)
   const [uploadingImage, setUploadingImage] = useState(false)
   const [formError, setFormError] = useState<string | null>(null)
@@ -120,14 +298,13 @@ const LocationsPage = () => {
     }
   }, [userId])
 
-  const loadDocsForLocation = async (location: StorageLocation) => {
+  const loadDocsForLocation = useCallback(async (location: StorageLocation) => {
     if (!userId) return
     try {
       setLoadingDocs(true)
       setSelectedLocationForDocs(location)
       const response = await locationService.getLocationDocuments(userId, location.id)
       
-      // Fetch full document details for each ID
       const fullDocs = await Promise.all(
         response.document_ids.map(async (id: number) => {
           try {
@@ -142,7 +319,6 @@ const LocationsPage = () => {
           }
         })
       )
-      
       setDocsInLocation(fullDocs.filter(d => d !== null) as (Document & { category_code?: string })[])
     } catch (error) {
       console.error('Failed to load docs for location:', error)
@@ -150,26 +326,19 @@ const LocationsPage = () => {
     } finally {
       setLoadingDocs(false)
     }
-  }
+  }, [userId, allCategories])
 
-  const loadLocations = async (userId: number) => {
+  const loadLocations = async (uid: number) => {
     try {
       setLoading(true)
-      const response = await locationService.getByUserId(userId)
+      const response = await locationService.getByUserId(uid)
+      // document_count is now embedded in each location — no extra API calls needed
+      const counts: { [key: number]: number } = {}
+      response.locations.forEach(loc => {
+        counts[loc.id] = loc.document_count ?? 0
+      })
       setLocations(response.locations)
-      
-      // Load document counts for each location
-      const docCounts: { [key: number]: number } = {}
-      for (const location of response.locations) {
-        try {
-          const docsResponse = await locationService.getLocationDocuments(userId, location.id)
-          docCounts[location.id] = docsResponse.total
-        } catch (error) {
-          console.error(`Failed to load documents for location ${location.id}:`, error)
-          docCounts[location.id] = 0
-        }
-      }
-      setLocationDocuments(docCounts)
+      setLocationDocuments(counts)
     } catch (error) {
       console.error('Failed to load locations:', error)
       setLocations([])
@@ -180,28 +349,39 @@ const LocationsPage = () => {
 
   const handleCreate = () => {
     setFormData({ name: '', description: '', photo_url: '' })
+    setFormTags([])
     setSelectedFile(null)
     setFormError(null)
     setShowCreateModal(true)
   }
 
-  const handleEdit = (location: StorageLocation) => {
+  const handleEdit = useCallback((location: StorageLocation) => {
     setEditingLocation(location)
+    // All tags (manual + AI-added) live in description [Tags: ...] — no merging needed
+    const existingTags = parseTags(location.description)
+    const freeText = stripTagsFromDescription(location.description)
+    setFormTags(existingTags)
     setFormData({
       name: location.name,
-      description: location.description || '',
+      description: freeText,
       photo_url: location.photo_url || ''
     })
     setSelectedFile(null)
     setFormError(null)
     setShowEditModal(true)
-  }
+  }, [])
 
-  const handleDelete = async (location: StorageLocation) => {
+  const toggleFormTag = useCallback((tag: LocationTag) => {
+    setFormTags(prev =>
+      prev.includes(tag) ? prev.filter(t => t !== tag) : [...prev, tag]
+    )
+  }, [])
+
+  const handleDelete = useCallback((location: StorageLocation) => {
     setDeletingLocation(location)
     setDeleteError(null)
     setShowDeleteModal(true)
-  }
+  }, [])
 
   const handleImageSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
@@ -274,7 +454,7 @@ const LocationsPage = () => {
       
       await locationService.create(userId, {
         name: formData.name.trim(),
-        description: formData.description.trim() || undefined,
+        description: serializeDescription(formTags, formData.description) || undefined,
         photo_url: photoUrl
       })
       setShowCreateModal(false)
@@ -301,13 +481,15 @@ const LocationsPage = () => {
       setSubmitting(true)
       setFormError(null)
       
-      let photoUrl: string | undefined = formData.photo_url
+      // Only send photo_url when a new file is explicitly selected.
+      // Sending the API-converted URL back would cause double-encoding in the backend.
+      let newPhotoUrl: string | undefined = undefined
       
       if (selectedFile) {
         try {
           setUploadingImage(true)
           const uploadResult = await locationService.uploadImage(userId, selectedFile)
-          photoUrl = uploadResult.image_url
+          newPhotoUrl = uploadResult.image_url
           setUploadingImage(false)
         } catch (imageError: any) {
           console.error('Failed to upload image:', imageError)
@@ -318,10 +500,20 @@ const LocationsPage = () => {
         }
       }
       
+      // Compute dismissed tags: tags that were in description when edit opened, now removed.
+      // These go into [Excl: ...] so the AI won't re-add them automatically.
+      const tagsAtOpen = parseTags(editingLocation.description)
+      const removedByUser = tagsAtOpen.filter(t => !formTags.includes(t))
+      const existingExcluded = parseExcluded(editingLocation.description)
+      // Union of previous exclusions + newly removed; subtract any the user re-added
+      const finalExcluded = [...new Set([...existingExcluded, ...removedByUser])]
+        .filter((t): t is LocationTag => !formTags.includes(t as LocationTag))
+      // Always send description (even empty string) so the backend clears tags
+      // when the user removes all of them. Sending `undefined` would be skipped.
       await locationService.update(userId, editingLocation.id, {
         name: formData.name.trim(),
-        description: formData.description.trim() || undefined,
-        photo_url: photoUrl
+        description: serializeDescription(formTags, formData.description, finalExcluded),
+        ...(newPhotoUrl !== undefined && { photo_url: newPhotoUrl }),
       })
       setShowEditModal(false)
       setEditingLocation(null)
@@ -403,72 +595,16 @@ const LocationsPage = () => {
         </div>
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-          {locations.map((location) => {
-            const docCount = locationDocuments[location.id] || 0
-            return (
-              <div 
-                key={location.id} 
-                className="group bg-white rounded-2xl border border-home-primary-100 shadow-sm hover:shadow-home-lg transition-all duration-300 overflow-hidden flex flex-col cursor-pointer"
-                onClick={() => loadDocsForLocation(location)}
-              >
-                <div className="p-6">
-                  <div className="flex items-start justify-between mb-4">
-                    <div className="w-12 h-12 bg-home-primary-50 text-home-primary-600 rounded-xl flex items-center justify-center group-hover:scale-110 transition-transform duration-300">
-                      <MapPin size={24} />
-                    </div>
-                    <div className="flex gap-1 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity" onClick={e => e.stopPropagation()}>
-                      <button
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          handleEdit(location);
-                        }}
-                        className="p-2.5 text-home-text-light hover:text-home-primary-600 hover:bg-home-primary-50 active:bg-home-primary-100 rounded-lg transition-colors"
-                        title="Edit location"
-                      >
-                        <Edit2 size={20} />
-                      </button>
-                      <button
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          handleDelete(location);
-                        }}
-                        className="p-2.5 text-home-text-light hover:text-red-600 hover:bg-red-50 active:bg-red-100 rounded-lg transition-colors"
-                        title="Delete location"
-                      >
-                        <Trash2 size={20} />
-                      </button>
-                    </div>
-                  </div>
-                  <h3 className="text-xl font-bold text-home-text-dark mb-2 group-hover:text-home-primary-600 transition-colors">
-                    {location.name}
-                  </h3>
-                  {location.description && (
-                    <p className="text-sm text-home-text-light mb-4 line-clamp-2">
-                      {location.description}
-                    </p>
-                  )}
-                  {location.photo_url && (
-                    <div className="mb-4 rounded-xl overflow-hidden aspect-video bg-home-background-dark">
-                      <img
-                        src={toAbsoluteUrl(location.photo_url)}
-                        alt={location.name}
-                        className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500"
-                        onLoad={(e) => { e.currentTarget.style.display = '' }}
-                        onError={(e) => { e.currentTarget.style.display = 'none' }}
-                      />
-                    </div>
-                  )}
-                  <div className="flex items-center justify-between pt-4 border-t border-home-primary-50">
-                    <div className="flex items-center gap-2 text-sm font-semibold text-home-primary-600">
-                      <FileText size={16} />
-                      <span>{docCount} item{docCount !== 1 ? 's' : ''}</span>
-                    </div>
-                    <ChevronRight size={18} className="text-home-primary-300 group-hover:translate-x-1 transition-transform" />
-                  </div>
-                </div>
-              </div>
-            )
-          })}
+          {locations.map((location) => (
+            <LocationCard
+              key={location.id}
+              location={location}
+              docCount={locationDocuments[location.id] || 0}
+              onView={loadDocsForLocation}
+              onEdit={handleEdit}
+              onDelete={handleDelete}
+            />
+          ))}
         </div>
       )}
 
@@ -576,16 +712,43 @@ const LocationsPage = () => {
                 placeholder="e.g., Bedroom desk, left drawer #2"
               />
             </div>
+            {/* Tag Picker */}
+            <div>
+              <label className="block text-sm font-medium text-home-text-dark mb-1.5 flex items-center gap-1.5">
+                <Tag size={14} className="text-home-primary-400" />
+                Smart Tags <span className="font-normal text-home-text-light text-xs">(used for automatic item routing)</span>
+              </label>
+              <div className="flex flex-wrap gap-2">
+                {LOCATION_TAGS.map(tag => {
+                  const active = formTags.includes(tag)
+                  const colors = TAG_COLORS[tag]
+                  return (
+                    <button
+                      key={tag}
+                      type="button"
+                      onClick={() => toggleFormTag(tag)}
+                      className={`px-2.5 py-1 rounded-full text-xs font-semibold border transition-all ${
+                        active
+                          ? `${colors.bg} ${colors.text} ${colors.border} ring-2 ring-offset-1 ring-current`
+                          : 'bg-gray-50 text-gray-400 border-gray-200 hover:border-gray-300'
+                      }`}
+                    >
+                      {tag}
+                    </button>
+                  )
+                })}
+              </div>
+            </div>
             <div>
               <label className="block text-sm font-medium text-home-text-dark mb-1">
-                Description
+                Description <span className="font-normal text-home-text-light text-xs">(optional)</span>
               </label>
               <textarea
                 value={formData.description}
                 onChange={handleDescriptionChange}
                 className="input w-full"
-                rows={3}
-                placeholder="Optional description"
+                rows={2}
+                placeholder="e.g., Top shelf of kitchen cabinet"
               />
             </div>
             <div>
@@ -659,16 +822,43 @@ const LocationsPage = () => {
                 placeholder="e.g., Bedroom desk, left drawer #2"
               />
             </div>
+            {/* Tag Picker */}
+            <div>
+              <label className="block text-sm font-medium text-home-text-dark mb-1.5 flex items-center gap-1.5">
+                <Tag size={14} className="text-home-primary-400" />
+                Smart Tags <span className="font-normal text-home-text-light text-xs">(used for automatic item routing)</span>
+              </label>
+              <div className="flex flex-wrap gap-2">
+                {LOCATION_TAGS.map(tag => {
+                  const active = formTags.includes(tag)
+                  const colors = TAG_COLORS[tag]
+                  return (
+                    <button
+                      key={tag}
+                      type="button"
+                      onClick={() => toggleFormTag(tag)}
+                      className={`px-2.5 py-1 rounded-full text-xs font-semibold border transition-all ${
+                        active
+                          ? `${colors.bg} ${colors.text} ${colors.border} ring-2 ring-offset-1 ring-current`
+                          : 'bg-gray-50 text-gray-400 border-gray-200 hover:border-gray-300'
+                      }`}
+                    >
+                      {tag}
+                    </button>
+                  )
+                })}
+              </div>
+            </div>
             <div>
               <label className="block text-sm font-medium text-home-text-dark mb-1">
-                Description
+                Description <span className="font-normal text-home-text-light text-xs">(optional)</span>
               </label>
               <textarea
                 value={formData.description}
                 onChange={handleDescriptionChange}
                 className="input w-full"
-                rows={3}
-                placeholder="Optional description"
+                rows={2}
+                placeholder="e.g., Top shelf of kitchen cabinet"
               />
             </div>
             <div>

@@ -52,6 +52,18 @@ else:
 # Create all tables
 Base.metadata.create_all(bind=engine)
 
+# Column-level migrations for existing databases (create_all only adds NEW tables)
+try:
+    from sqlalchemy import text as _sql_text
+    with engine.connect() as _conn:
+        _conn.execute(_sql_text(
+            "ALTER TABLE storage_location ADD COLUMN IF NOT EXISTS content_analysis JSON"
+        ))
+        _conn.commit()
+    logger.info("DB migration: storage_location.content_analysis column ensured")
+except Exception as _e:
+    logger.warning(f"DB migration check skipped: {_e}")
+
 # Initialize Google OAuth service with client ID from environment
 # Try multiple sources: system env, then settings
 google_client_id = os.getenv("GOOGLE_CLIENT_ID") or getattr(settings, "GOOGLE_CLIENT_ID", None)

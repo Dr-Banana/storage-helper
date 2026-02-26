@@ -1,6 +1,11 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { Trash2, Sparkles, Plus, ChevronRight } from 'lucide-react';
 
+interface AvailableLocation {
+  id: number;
+  name: string;
+}
+
 interface MetadataViewerProps {
   metadata: Record<string, any>;
   categoryCode?: string;
@@ -12,6 +17,7 @@ interface MetadataViewerProps {
     cleaned_text?: string | null;
     page_results?: Array<{ ocr_text?: string | null }>;
   };
+  availableLocations?: AvailableLocation[];
 }
 
 const MetadataViewer: React.FC<MetadataViewerProps> = ({ 
@@ -19,7 +25,8 @@ const MetadataViewer: React.FC<MetadataViewerProps> = ({
   categoryCode, 
   isEditing = false,
   onMetadataChange,
-  ingestionMetadata
+  ingestionMetadata,
+  availableLocations,
 }) => {
   if (!metadata || Object.keys(metadata).length === 0) return null;
 
@@ -31,6 +38,7 @@ const MetadataViewer: React.FC<MetadataViewerProps> = ({
         isEditing={isEditing} 
         onMetadataChange={onMetadataChange}
         ingestionMetadata={ingestionMetadata}
+        availableLocations={availableLocations}
       />
     );
   }
@@ -57,7 +65,8 @@ const ReceiptMetadataViewer: React.FC<{
     cleaned_text?: string | null;
     page_results?: Array<{ ocr_text?: string | null }>;
   };
-}> = ({ metadata, isEditing, onMetadataChange, ingestionMetadata }) => {
+  availableLocations?: AvailableLocation[];
+}> = ({ metadata, isEditing, onMetadataChange, ingestionMetadata, availableLocations }) => {
   const items = metadata.items || [];
   const [highlightedItems, setHighlightedItems] = useState<{ [index: number]: string[] }>({});
   const [previewItems, setPreviewItems] = useState<any[] | null>(null);
@@ -306,6 +315,15 @@ const ReceiptMetadataViewer: React.FC<{
     if (onMetadataChange) {
       const newItems = [...items];
       newItems[index] = { ...newItems[index], [key]: value };
+      onMetadataChange({ ...metadata, items: newItems });
+    }
+  };
+
+  // Update multiple fields of the same item in one shot to avoid stale-snapshot overwrites
+  const handleItemMultiChange = (index: number, patch: Record<string, any>) => {
+    if (onMetadataChange) {
+      const newItems = [...items];
+      newItems[index] = { ...newItems[index], ...patch };
       onMetadataChange({ ...metadata, items: newItems });
     }
   };
@@ -618,14 +636,38 @@ const ReceiptMetadataViewer: React.FC<{
                 </td>
                 <td className="px-4 py-3">
                   {isEditing ? (
-                    <div className="flex flex-col gap-1">
-                      <input 
-                        type="text" 
-                        value={item.storage_suggestion || ''} 
-                        onChange={(e) => handleItemChange(idx, 'storage_suggestion', e.target.value)}
-                        className={`w-full text-sm font-medium border border-home-primary-200 rounded px-1 focus:ring-0 ${getHighlightClass(idx, 'storage_suggestion')}`}
-                        disabled={!!previewItems}
-                      />
+                    <div className={`flex flex-col gap-1 ${getHighlightClass(idx, 'storage_suggestion')}`}>
+                      {availableLocations && availableLocations.length > 0 ? (
+                        <select
+                          value={item.location_id ?? ''}
+                          onChange={(e) => {
+                            const val = e.target.value
+                            if (val === '') {
+                              handleItemMultiChange(idx, { location_id: null, location_name: null })
+                            } else {
+                              const loc = availableLocations.find(l => l.id === parseInt(val))
+                              if (loc) {
+                                handleItemMultiChange(idx, { location_id: loc.id, location_name: loc.name })
+                              }
+                            }
+                          }}
+                          disabled={!!previewItems}
+                          className="w-full text-sm border border-home-primary-200 rounded px-1 py-0.5 focus:ring-0 bg-white"
+                        >
+                          <option value="">— AI: {item.storage_suggestion || 'Not set'}</option>
+                          {availableLocations.map(loc => (
+                            <option key={loc.id} value={loc.id}>{loc.name}</option>
+                          ))}
+                        </select>
+                      ) : (
+                        <input 
+                          type="text" 
+                          value={item.storage_suggestion || ''} 
+                          onChange={(e) => handleItemChange(idx, 'storage_suggestion', e.target.value)}
+                          className="w-full text-sm font-medium border border-home-primary-200 rounded px-1 focus:ring-0"
+                          disabled={!!previewItems}
+                        />
+                      )}
                       {getChangePreview(idx, 'storage_suggestion') && (
                         <span className="text-[10px] text-home-success-600 font-medium italic">
                           {getChangePreview(idx, 'storage_suggestion')}

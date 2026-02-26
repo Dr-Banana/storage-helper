@@ -656,24 +656,102 @@ class RecommendationGenerator:
                     )
                     # logger.debug(f"Extracted metadata for {final_category_code}: {extracted_metadata}")
                     
-                    # 3. Match locations for individual items if it's a receipt
+                    # 3. Match locations for individual items if it's a receipt.
+                    # Two-level routing mirrors the backend _resolve_location logic:
+                    #   Level 1 — tag match: sub_category vs location [Tags: ...] / content_analysis
+                    #   Level 2 — name match: storage_suggestion substring vs location name
                     if final_category_code.upper() in ["RECEIPT", "REC"] and "items" in extracted_metadata and locations:
-                        for item in extracted_metadata["items"]:
-                            item_suggestion = item.get("storage_suggestion")
-                            if item_suggestion:
-                                # Try to match suggestion to existing locations
-                                suggestion_lower = item_suggestion.lower()
-                                matched_loc = None
+                        import re as _re
+
+                        def _parse_tags_from_desc(desc: str) -> list:
+                            m = _re.search(r'\[Tags:\s*([^\]]+)\]', desc or '', _re.IGNORECASE)
+                            return [t.strip().lower() for t in m.group(1).split(',')] if m else []
+
+                        def _parse_excl_from_desc(desc: str) -> set:
+                            m = _re.search(r'\[Excl:\s*([^\]]+)\]', desc or '', _re.IGNORECASE)
+                            return {t.strip().lower() for t in m.group(1).split(',')} if m else set()
+
+                        # Pre-build storage-type buckets for Level 3 fallback.
+                        # Classify each location as fridge, freezer, or pantry based on
+                        # its name keywords. Used when Level 1+2 produce no match.
+                        _FRIDGE_KW = {"fridge", "refrigerator", "冰箱"}
+                        _FREEZER_KW = {"freezer", "freeze", "冷冻", "冷柜"}
+                        _fridge_locs, _freezer_locs, _pantry_locs = [], [], []
+                        for _l in locations:
+                            _n = _l.get("name", "").lower()
+                            if any(k in _n for k in _FRIDGE_KW):
+                                _fridge_locs.append(_l)
+                            elif any(k in _n for k in _FREEZER_KW):
+                                _freezer_locs.append(_l)
+                            else:
+                                _pantry_locs.append(_l)
+
+                        def _resolve_item_loc(sub_cat: str, storage_hint: str):
+                            # Level 1: tag match against [Tags: ...] (manual) then content_analysis (learned)
+                            if sub_cat:
+                                tag_target = sub_cat.strip().lower()
+                                manual_hits, learned_hits = [], []
                                 for loc in locations:
-                                    loc_name = loc.get("name", "").lower()
-                                    if suggestion_lower in loc_name or loc_name in suggestion_lower:
-                                        matched_loc = loc
-                                        break
-                                
-                                if matched_loc:
-                                    item["location_id"] = matched_loc.get("id")
-                                    item["location_name"] = matched_loc.get("name")
-                                    logger.info(f"Matched item '{item.get('product_name')}' to location '{matched_loc.get('name')}'")
+                                    desc = loc.get("description", "")
+                                    if tag_target in _parse_excl_from_desc(desc):
+                                        continue
+                                    if tag_target in _parse_tags_from_desc(desc):
+                                        manual_hits.append(loc)
+                                        continue
+                                    learned = [t.lower() for t in (loc.get("content_analysis") or {}).get("top_sub_tags", [])]
+                                    if tag_target in learned:
+                                        learned_hits.append(loc)
+                                candidates = manual_hits or learned_hits
+                                if candidates:
+                                    if len(candidates) > 1 and storage_hint:
+                                        hint = storage_hint.lower()
+                                        for c in candidates:
+                                            n = c.get("name", "").lower()
+                                            if hint in n or n in hint:
+                                                return c
+                                    return candidates[0]
+                            # Level 2: name substring match on storage_suggestion
+                            if storage_hint:
+                                hint = storage_hint.lower()
+                                for loc in locations:
+                                    n = loc.get("name", "").lower()
+                                    if hint in n or n in hint:
+                                        return loc
+                            # Level 3: storage-type bucket fallback — always pick an existing location
+                            # rather than leaving the item unassigned.
+                            if storage_hint:
+                                hint_upper = storage_hint.upper()
+                                if "FRIDGE" in hint_upper:
+                                    bucket = _fridge_locs or locations
+                                elif "FREEZE" in hint_upper:
+                                    bucket = _freezer_locs or locations
+                                else:
+                                    # Pantry / Other → prefer non-fridge/non-freezer locations
+                                    bucket = _pantry_locs or locations
+                                if bucket:
+                                    return bucket[0]
+                            return locations[0] if locations else None
+
+                        for item in extracted_metadata["items"]:
+                            matched = _resolve_item_loc(
+                                item.get("sub_category", "") or "",
+                                item.get("storage_suggestion", "") or ""
+                            )
+                            if matched:
+                                item["location_id"] = matched.get("id")
+                                item["location_name"] = matched.get("name")
+                                logger.info(
+                                    f"Matched item '{item.get('product_name')}' "
+                                    f"(sub_category={item.get('sub_category')}, "
+                                    f"storage={item.get('storage_suggestion')}) "
+                                    f"-> '{matched.get('name')}'"
+                                )
+                            else:
+                                logger.warning(
+                                    f"No location found for '{item.get('product_name')}' "
+                                    f"(sub_category={item.get('sub_category')}, "
+                                    f"storage={item.get('storage_suggestion')}) — no locations available"
+                                )
 
                     # 4. Assemble results
                     parsed_json["metadata"] = extracted_metadata
