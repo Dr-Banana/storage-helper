@@ -295,7 +295,7 @@ class PlanAheadPipeline:
         last_error: Optional[Exception] = None
         for attempt in range(1, max_attempts + 1):
             try:
-                async with httpx.AsyncClient(timeout=20.0) as client:
+                async with httpx.AsyncClient(timeout=90.0) as client:
                     resp = await client.post(
                         self.gemini_api_url,
                         headers={"Content-Type": "application/json"},
@@ -348,6 +348,14 @@ class PlanAheadPipeline:
                     logger.info(f"[PLAN_AHEAD_PIPELINE] LLM succeeded on attempt {attempt}")
                 return parsed
 
+            except httpx.TimeoutException as e:
+                logger.warning(
+                    f"[PLAN_AHEAD_PIPELINE] LLM attempt {attempt} timed out: {e}",
+                    exc_info=(attempt == max_attempts),
+                )
+                last_error = e
+                if attempt < max_attempts:
+                    await asyncio.sleep(3.0 * attempt)
             except Exception as e:
                 logger.warning(
                     f"[PLAN_AHEAD_PIPELINE] LLM attempt {attempt} failed: {e}",
@@ -659,8 +667,9 @@ class PlanAheadPipeline:
             already_have: List[str] = []
             need_to_buy: List[str] = []
             for ingredient in shopping_list:
-                if ingredient.lower() in inv_names_lower:
-                    already_have.append(ingredient)
+                ing_name = ingredient["name"] if isinstance(ingredient, dict) else ingredient
+                if ing_name.lower() in inv_names_lower:
+                    already_have.append(ing_name)
                 else:
                     need_to_buy.append(ingredient)
             shopping_list = need_to_buy
