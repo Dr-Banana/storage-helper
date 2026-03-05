@@ -2,7 +2,9 @@
 Schedule service layer for business logic
 """
 from sqlalchemy.orm import Session
+from sqlalchemy.orm.attributes import flag_modified
 from sqlalchemy import and_, or_
+import copy
 from datetime import datetime
 from typing import List, Optional
 from app.models.schedule import Schedule
@@ -201,6 +203,108 @@ class ScheduleService:
         db.delete(schedule)
         db.commit()
         return True
+
+    @staticmethod
+    def update_cooking_steps(
+        db: Session,
+        schedule_id: int,
+        user_id: int,
+        dish_name: str,
+        steps: List[str],
+        date: Optional[str] = None,
+        meal_time: Optional[str] = None,
+    ) -> Optional[Schedule]:
+        """Update cooking steps for a specific dish within a schedule's meal plan.
+
+        Searches all meal_plan features for dishes matching `dish_name`
+        (optionally filtered by `date` and `meal_time`) and replaces their
+        `cookingSteps` field.  Returns the updated schedule, or None if not found.
+        """
+        schedule = db.query(Schedule).filter(
+            and_(Schedule.id == schedule_id, Schedule.user_id == user_id)
+        ).first()
+
+        if not schedule or not schedule.extra_data:
+            return None
+
+        extra_data = copy.deepcopy(schedule.extra_data)
+        updated = False
+
+        for feature in extra_data.get("features", []):
+            if feature.get("type") != "meal_plan":
+                continue
+            for day_plan in feature.get("plans", []):
+                if date and day_plan.get("date") != date:
+                    continue
+                for meal in day_plan.get("meals", []):
+                    if meal_time and meal.get("mealTime") != meal_time:
+                        continue
+                    for dish in meal.get("dishes", []):
+                        if dish.get("name", "").strip().lower() == dish_name.strip().lower():
+                            dish["cookingSteps"] = steps
+                            updated = True
+
+        if not updated:
+            # Fallback 1: match by date + meal_time only (name may differ due to LLM reformatting)
+            if date or meal_time:
+                for feature in extra_data.get("features", []):
+                    if feature.get("type") != "meal_plan":
+                        continue
+                    for day_plan in feature.get("plans", []):
+                        if date and day_plan.get("date") != date:
+                            continue
+                        for meal in day_plan.get("meals", []):
+                            if meal_time and meal.get("mealTime") != meal_time:
+                                continue
+                            dishes = meal.get("dishes", [])
+                            if dishes:
+                                # Update the first dish in this slot
+                                dishes[0]["cookingSteps"] = steps
+                                updated = True
+                                logger.info(
+                                    f"[ScheduleService] update_cooking_steps fallback: "
+                                    f"updated first dish '{dishes[0].get('name')}' "
+                                    f"at {date}/{meal_time} (requested: '{dish_name}')"
+                                )
+                                break
+                        if updated:
+                            break
+                    if updated:
+                        break
+
+            # Fallback 2: fuzzy name match anywhere in the schedule (substring)
+            if not updated:
+                dish_lower = dish_name.strip().lower()
+                for feature in extra_data.get("features", []):
+                    if feature.get("type") != "meal_plan":
+                        continue
+                    for day_plan in feature.get("plans", []):
+                        for meal in day_plan.get("meals", []):
+                            for dish in meal.get("dishes", []):
+                                stored = dish.get("name", "").strip().lower()
+                                if stored in dish_lower or dish_lower in stored:
+                                    dish["cookingSteps"] = steps
+                                    updated = True
+                                    logger.info(
+                                        f"[ScheduleService] update_cooking_steps fuzzy match: "
+                                        f"'{dish.get('name')}' ~= '{dish_name}'"
+                                    )
+                                    break
+                            if updated:
+                                break
+                        if updated:
+                            break
+                    if updated:
+                        break
+
+        if not updated:
+            return None
+
+        schedule.extra_data = extra_data
+        flag_modified(schedule, "extra_data")
+        db.commit()
+        db.refresh(schedule)
+        return schedule
 
     @staticmethod
     def get_schedules_by_status(

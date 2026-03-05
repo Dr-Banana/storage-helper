@@ -1,8 +1,8 @@
 import { Outlet, Link, useLocation, useNavigate } from 'react-router-dom'
-import { useEffect, useState, useCallback } from 'react'
+import { useEffect, useState, useCallback, useRef } from 'react'
 import ChatInterface from './ChatInterface'
 import { MealPlanDetailDrawer } from '../pages/SchedulePage'
-import type { Schedule } from '../api/scheduleService'
+import ScheduleService, { type Schedule } from '../api/scheduleService'
 import {
   Home,
   FileText,
@@ -40,6 +40,9 @@ const Layout = () => {
   // ── Meal Plan 只读抽屉（与 Chat 面板完全对称的 flex 兄弟模式）──────────────
   const [mealDrawerData, setMealDrawerData] = useState<{ schedule: Schedule; date: string } | null>(null);
   const [isMealDrawerOpen, setIsMealDrawerOpen] = useState(false);
+  // Keep a ref so the schedule-updated handler always reads the latest value
+  const mealDrawerDataRef = useRef(mealDrawerData);
+  useEffect(() => { mealDrawerDataRef.current = mealDrawerData; }, [mealDrawerData]);
 
   useEffect(() => {
     const openHandler = (e: Event) => {
@@ -59,6 +62,48 @@ const Layout = () => {
     };
   }, []);
 
+  // When a schedule is updated (e.g. AI adds a meal plan or cooking steps),
+  // refresh the drawer's schedule snapshot so it always shows the latest data.
+  useEffect(() => {
+    const handler = async (e: Event) => {
+      const { scheduleId } = (e as CustomEvent<{ scheduleId?: number }>).detail ?? {};
+      const current = mealDrawerDataRef.current;
+      if (!current) return;
+
+      try {
+        if (scheduleId && current.schedule.id === scheduleId) {
+          // Fast path: exact id match — just refresh that one record
+          const fresh = await ScheduleService.getSchedule(scheduleId);
+          setMealDrawerData(prev => prev ? { ...prev, schedule: fresh } : prev);
+        } else {
+          // Slow path: a different (possibly new) schedule was updated.
+          // Query the range for the drawer's date and pick the best meal-plan schedule.
+          const date = current.date;
+          const start = `${date}T00:00:00`;
+          const end   = `${date}T23:59:59`;
+          const schedules = await ScheduleService.getSchedulesByRange(start, end);
+          // Prefer the schedule that already matches, then any meal_plan_draft, then any
+          const best =
+            schedules.find(s => s.id === current.schedule.id) ??
+            schedules.find(s => s.event_type === 'meal_plan_draft') ??
+            schedules.find(s => (s.event_type ?? '').startsWith('meal_plan')) ??
+            null;
+          if (best && best.id !== current.schedule.id) {
+            setMealDrawerData(prev => prev ? { ...prev, schedule: best } : prev);
+          } else if (best) {
+            // Same id but may have stale metadata — refresh it
+            const fresh = await ScheduleService.getSchedule(best.id);
+            setMealDrawerData(prev => prev ? { ...prev, schedule: fresh } : prev);
+          }
+        }
+      } catch {
+        // Silently ignore — worst case user sees stale data until re-opening the drawer
+      }
+    };
+    window.addEventListener('schedule-updated', handler);
+    return () => window.removeEventListener('schedule-updated', handler);
+  }, []);
+
   const handleMealDrawerClose = useCallback(() => {
     setIsMealDrawerOpen(false);
   }, []);
@@ -69,6 +114,7 @@ const Layout = () => {
     }
     setIsMealDrawerOpen(false);
   }, [mealDrawerData]);
+
 
   // Open chat panel when any component fires the 'open-chat' event
   useEffect(() => {

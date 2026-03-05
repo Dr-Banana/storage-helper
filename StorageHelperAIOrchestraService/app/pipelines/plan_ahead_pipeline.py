@@ -245,8 +245,11 @@ class PlanAheadPipeline:
                 "\n  * 'remove the spicy dish on Wednesday' — if there are multiple dishes, pick the most likely spicy one."
                 "\n  * Use 'modify' and make a reasonable substitution; explain your interpretation in user_message."
                 "\n  * Only use 'ask' if the user's intent is truly ambiguous (e.g. they name a date not in the draft at all)."
-                "\n- Use 'confirm' when the user explicitly approves (e.g. 'looks good', 'ok', 'confirm', 'save it',"
-                " 'that works', 'yes', '可以', '确认', '保存')."
+                "\n- Use 'confirm' when the user approves the draft — this includes EXPLICIT and IMPLICIT signals:"
+                "\n  Explicit: 'ok', 'confirm', 'save it', 'yes', 'looks good', 'that works', '可以', '确认', '保存', '好的', '行', '没问题', 'sure', 'perfect', '就这个吧', '就这样', '这个可以'."
+                "\n  Implicit: 'sounds good', 'not bad', '听起来不错', '挺好的', '就按这个来', '行吧', 'go ahead', 'let's do it', '就这么定了', '按这个做'."
+                "\n  Compound: if the user confirms AND adds a new request (e.g. '可以，周三的牛排怎么做？'),"
+                " STILL use 'confirm' — the system will handle the secondary request separately."
                 "\n  * For 'confirm': set meal_entries=[] (the system uses the current draft plan)."
                 "\n  * In user_message, tell the user their plan has been saved and briefly summarize."
             )
@@ -566,10 +569,27 @@ class PlanAheadPipeline:
         action = parsed["action"]
         target_date = parsed.get("target_date")
 
+        # ---- Guard: enforce ask-before-recommend on fresh sessions ----
+        # If the LLM jumps straight to "recommend" without any prior exchange in this
+        # planning session, intercept and ask for preferences first.
+        last_action = current_state.get("last_pipeline_action")
+        if action == "recommend" and last_action is None:
+            action = "ask"
+            # Keep LLM's user_message only if it looks like a question, otherwise replace.
+            if "?" not in user_message and "？" not in user_message:
+                user_message = (
+                    "在我为您制定计划之前，想先了解一下您的偏好 😊\n"
+                    "您喜欢什么口味或菜系（比如家常菜、川菜、日料）？有没有不吃的食材或饮食要求？"
+                )
+            logger.info(
+                "[PLAN_AHEAD_PIPELINE] Fresh session: intercepted recommend → forced ask."
+            )
+
         # ---- Step 4: Early exits for non-plan actions ----
 
         # 'ask': AI is gathering preferences — no plan change, no persist.
         if action == "ask":
+            update_plan_state(owner_id=owner_id, last_pipeline_action="ask")
             logger.info("[PLAN_AHEAD_PIPELINE] action=ask: returning clarification question, skipping persist.")
             return self._build_result(
                 response_text=user_message,
@@ -644,6 +664,7 @@ class PlanAheadPipeline:
                 meal_plan_slots=draft_slots,
                 dish_ingredients=draft_di,
                 is_draft=False,
+                last_pipeline_action=None,  # reset session after confirm
                 merge=False,
             )
             logger.info(f"[PLAN_AHEAD_PIPELINE] confirm: draft persisted, schedule_id={schedule_id}")
@@ -707,6 +728,7 @@ class PlanAheadPipeline:
                 meal_plan_slots=new_meal_plan_slots,
                 dish_ingredients=new_dish_ingredients,
                 is_draft=True,
+                last_pipeline_action=action,
                 merge=False,
                 **base_db_dates_kwarg,
             )
@@ -751,6 +773,7 @@ class PlanAheadPipeline:
             meal_plan_slots=new_meal_plan_slots,
             dish_ingredients=new_dish_ingredients,
             is_draft=False,
+            last_pipeline_action=action,
             merge=False,
         )
 

@@ -79,15 +79,11 @@ Respond naturally in the same language as the user.
             intent_action = {'action': 'CORRECTION_MODE', 'data': {}, 'message': 'Processing correction...'}
             is_correction = True
         else:
-            # 1. Classify intent (pass history so follow-up messages like "周一吃番茄炒蛋" stay PLAN_AHEAD)
-            intent_result = await intent_classifier.classify(user_input, history=history)
-
-            # 1b. Plan-ahead stickiness: if we're in a PLAN_AHEAD flow and classifier returned SEARCH/UPDATE
-            #     for ambiguous phrases like "what i have", "what plan", "change monday", override to PLAN_AHEAD
+            # Detect whether user is currently in a meal-planning session
             plan_state = get_plan_state(owner_id)
             in_plan_ahead_flow = (
                 (context and context.get("type") == "plan_ahead")
-                or (plan_state.get("meal_plan") or plan_state.get("shopping_list"))
+                or bool(plan_state.get("meal_plan") or plan_state.get("shopping_list"))
                 or (
                     history
                     and any(
@@ -101,47 +97,128 @@ Respond naturally in the same language as the user.
                     )
                 )
             )
-            ambiguous_plan_phrases = (
-                "what i have",
-                "what do i have",
-                "what have",
-                "what plan",
-                "my plan",
-                "current plan",
-                "show plan",
-                "show my plan",
-                "change monday",
-                "monday to",
-                "wednesday change",
-                "swap",
-                "what do you recommend",
-                "your recommendation",
-                "something easy",
-                "something simple",
-                "decide for me",
-                "你推荐",
-                "随便",
-                "同一天",
-                "same day",
-                "那天",
-                "that day",
+
+            # 1. Classify intent — inject PLANNING session_mode so the LLM can decide
+            #    stickiness intelligently instead of relying on a keyword list.
+            session_mode = "PLANNING" if in_plan_ahead_flow else None
+            intent_result = await intent_classifier.classify(
+                user_input, history=history, session_mode=session_mode
+            )
+
+            # 1b. Lightweight safety net: if we're in a plan-ahead flow and the LLM returns
+            #     COOKING_STEPS but downgrades to GENERAL (rare edge case), correct it.
+            #     NOTE: broad "stickiness" is now handled by the LLM via session_mode above.
+            cooking_step_phrases = (
+                "怎么做", "怎么烹饪", "如何做", "做法", "步骤", "教我做",
+                "how to cook", "how to make", "how do i cook", "how do i make",
+                "cooking steps", "recipe steps", "how to prepare",
             )
             user_lower = user_input.strip().lower()
-            is_ambiguous = any(phrase in user_lower for phrase in ambiguous_plan_phrases)
-            if in_plan_ahead_flow and is_ambiguous and intent_result.intent in (Intent.SEARCH, Intent.UPDATE, Intent.GENERAL):
+            is_cooking_query = any(phrase in user_lower for phrase in cooking_step_phrases)
+            if in_plan_ahead_flow and is_cooking_query and intent_result.intent == Intent.GENERAL:
                 old_intent = intent_result.intent
                 intent_result = type(
                     "IntentResult",
                     (),
                     {
-                        "intent": Intent.PLAN_AHEAD,
-                        "reasoning": "User is in meal planning flow; ambiguous phrase interpreted as plan-related",
-                        "confidence": intent_result.confidence,
+                        "intent": Intent.COOKING_STEPS,
+                        "reasoning": "User asked how to cook while in meal planning context",
+                        "confidence": 0.9,
                     },
                 )()
-                logger.info(f"Plan-ahead stickiness: overrode {old_intent} to PLAN_AHEAD for: {user_input[:50]}")
+                logger.info(f"Cooking-steps override: {old_intent} -> COOKING_STEPS for: {user_input[:50]}")
 
-            # 2. Get intent-specific mock action/data (pass context for e.g. plan_ahead state)
+            # 2a. COOKING_STEPS: short-circuit before route_by_intent to pass history.
+            #
+            # Special case — "confirm + cooking" compound instruction:
+            # If the user is in an active draft plan AND their message contains both
+            # an implicit/explicit confirmation AND a cooking query (e.g. "可以，周三牛排怎么做"),
+            # we first run PlanAheadPipeline to confirm/save the draft, then generate cooking steps.
+            _confirm_phrases = (
+                "可以", "行", "好的", "没问题", "确认", "保存", "好", "就这样", "就这个",
+                "听起来不错", "挺好", "就按这个", "就这么定", "ok", "sure", "yes", "confirm",
+                "looks good", "sounds good", "that works", "go ahead",
+            )
+            _is_draft_context = (
+                in_plan_ahead_flow
+                and (context and context.get("type") == "plan_ahead")
+                and (context.get("data") or {}).get("is_draft", False)
+            )
+            _has_confirm_signal = any(p in user_lower for p in _confirm_phrases)
+
+            if (
+                intent_result.intent == Intent.COOKING_STEPS
+                and _is_draft_context
+                and _has_confirm_signal
+            ):
+                # Step 1: confirm the draft via PlanAheadPipeline
+                logger.info(
+                    f"[COMPOUND] Confirm+CookingSteps detected for: {user_input[:60]}"
+                )
+                try:
+                    from app.pipelines.plan_ahead_pipeline import PlanAheadPipeline
+                    from app.storage.pipeline_storage import _default_storage
+                    _confirm_pipeline = PlanAheadPipeline(gemini_api_url=self.api_url)
+                    _confirm_result = await _confirm_pipeline.execute(
+                        owner_id=owner_id,
+                        user_input="确认保存计划",  # explicit confirm signal so LLM picks action=confirm
+                        history=history,
+                        user_timezone=user_timezone,
+                        storage_client=_default_storage,
+                        context=context,
+                        intent_result=intent_result,
+                    )
+                    # Update context with freshly confirmed plan data
+                    context = {
+                        "type": "plan_ahead",
+                        "data": _confirm_result.get("action_data") or (context.get("data") or {}),
+                    }
+                    logger.info("[COMPOUND] Draft confirmed; proceeding to cooking steps.")
+                except Exception as _conf_err:
+                    logger.warning(f"[COMPOUND] Draft confirm step failed: {_conf_err}", exc_info=True)
+
+            if intent_result.intent == Intent.COOKING_STEPS:
+                try:
+                    from app.agents.cooking_steps_agent import CookingStepsAgent as _CSAgent
+                    _cs_result = await _CSAgent().execute(
+                        user_input=user_input,
+                        owner_id=owner_id,
+                        context=context,
+                        history=history,
+                    )
+                    _cs_data = _cs_result.get("data") or {}
+                    _steps = _cs_data.get("cooking_steps", [])
+                    _dish = _cs_data.get("dish_name", "")
+                    if _steps:
+                        _steps_text = "\n".join(f"{i+1}. {s}" for i, s in enumerate(_steps))
+                        _response_text = (
+                            f"这是「{_dish}」的烹饪步骤：\n\n{_steps_text}\n\n"
+                            "步骤已保存到您的膳食计划中，打开菜品详情即可查看 👨‍🍳"
+                            if _cs_data.get("saved")
+                            else f"这是「{_dish}」的烹饪步骤：\n\n{_steps_text}"
+                        )
+                    else:
+                        _response_text = _cs_result.get("message", "抱歉，无法生成烹饪步骤，请稍后重试。")
+                    return {
+                        "response": _response_text,
+                        "intent": intent_result.intent,
+                        "confidence": intent_result.confidence,
+                        "reasoning": intent_result.reasoning,
+                        "action": "COOKING_STEPS",
+                        "action_data": _cs_data,
+                    }
+                except Exception as _cs_err:
+                    logger.error(f"[COOKING_STEPS] Agent failed: {_cs_err}", exc_info=True)
+                    return {
+                        "response": "抱歉，烹饪步骤生成遇到问题，请稍后重试。",
+                        "intent": intent_result.intent,
+                        "confidence": intent_result.confidence,
+                        "reasoning": str(_cs_err),
+                        "action": "COOKING_STEPS",
+                        "action_data": {},
+                    }
+
+            # 2b. Get intent-specific mock action/data (pass context for e.g. plan_ahead state)
             intent_action = await route_by_intent(
                 intent_result.intent, user_input, owner_id, context=context
             )

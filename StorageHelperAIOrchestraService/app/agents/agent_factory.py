@@ -10,6 +10,7 @@ from app.agents.plan_eat_out_agent import PlanEatOutAgent
 from app.agents.plan_cook_home_agent import PlanCookHomeAgent
 from app.agents.plan_ahead_agent import PlanAheadAgent
 from app.agents.general_agent import GeneralAgent
+from app.agents.cooking_steps_agent import CookingStepsAgent
 
 
 class AgentFactory:
@@ -33,6 +34,7 @@ class AgentFactory:
             Intent.UPDATE: UpdateAgent(),
             Intent.PLAN_EAT_OUT: PlanEatOutAgent(),
             Intent.PLAN_AHEAD: PlanAheadAgent(),
+            Intent.COOKING_STEPS: CookingStepsAgent(),
             Intent.GENERAL: GeneralAgent(),
         }
         self._plan_cook_home_sub_agent: Optional[PlanCookHomeAgent] = None

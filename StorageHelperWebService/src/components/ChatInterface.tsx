@@ -403,10 +403,16 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ isOpen, onClose }) => {
         window.dispatchEvent(new CustomEvent('schedule-updated', { 
           detail: { scheduleId: response.action_data.schedule_id } 
         }))
-        // Optional: Auto redirect, or just let user click the button in the card
-        // if (response.action_data.saved_to_schedule) navigate('/schedule')
-      } else if (response.action !== 'PLAN_AHEAD' && activeContext?.type === 'plan_ahead') {
-        // Clear plan_ahead context when switching to other actions
+      } else if (response.action === 'COOKING_STEPS' && response.action_data) {
+        // Keep the existing plan_ahead context so the user can continue planning
+        // Trigger a schedule refresh if steps were saved successfully
+        if (response.action_data.saved && response.action_data.schedule_id) {
+          window.dispatchEvent(new CustomEvent('schedule-updated', {
+            detail: { scheduleId: response.action_data.schedule_id }
+          }))
+        }
+      } else if (response.action !== 'PLAN_AHEAD' && response.action !== 'COOKING_STEPS' && activeContext?.type === 'plan_ahead') {
+        // Clear plan_ahead context when switching to unrelated actions
         setActiveContext(null)
       }
     } catch (error) {

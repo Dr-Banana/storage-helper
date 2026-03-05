@@ -4,12 +4,21 @@ Schedule API routes
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from datetime import datetime
-from typing import List
+from typing import List, Optional
+
+from pydantic import BaseModel
 
 from app.core.database import get_db
 from app.core.auth import get_current_user_id
 from app.schemas.schedule import ScheduleCreate, ScheduleUpdate, ScheduleResponse, ScheduleStatusUpdate
 from app.services.schedule_service import ScheduleService
+
+
+class CookingStepsUpdate(BaseModel):
+    dish_name: str
+    steps: List[str]
+    date: Optional[str] = None
+    meal_time: Optional[str] = None
 
 router = APIRouter(prefix="/schedule", tags=["schedule"])
 
@@ -85,6 +94,31 @@ def update_schedule_status(
     schedule = ScheduleService.update_schedule_status(db, schedule_id, user_id, status_data.status)
     if not schedule:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Schedule not found")
+    return ScheduleResponse.from_orm_object(schedule)
+
+
+@router.patch("/{schedule_id}/cooking-steps", response_model=ScheduleResponse)
+def update_cooking_steps(
+    schedule_id: int,
+    data: CookingStepsUpdate,
+    db: Session = Depends(get_db),
+    user_id: int = Depends(get_current_user_id),
+):
+    """Update cooking steps for a specific dish in a schedule's meal plan"""
+    schedule = ScheduleService.update_cooking_steps(
+        db,
+        schedule_id=schedule_id,
+        user_id=user_id,
+        dish_name=data.dish_name,
+        steps=data.steps,
+        date=data.date,
+        meal_time=data.meal_time,
+    )
+    if not schedule:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Schedule or dish not found",
+        )
     return ScheduleResponse.from_orm_object(schedule)
 
 

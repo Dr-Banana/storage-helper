@@ -37,11 +37,13 @@ def get_plan_state(owner_id: int) -> Dict[str, Any]:
             # Date strings that were already in DB when the recommend draft was created.
             # Used at confirm time to detect dates the user deleted via the Web UI.
             "draft_base_db_dates": state.get("draft_base_db_dates", set()),
+            # Last action returned by the pipeline — used to enforce ask-before-recommend flow.
+            "last_pipeline_action": state.get("last_pipeline_action"),
             "updated_at": state.get("updated_at"),
         }
     return {
         "meal_plan": {}, "shopping_list": [], "meal_plan_slots": {}, "dish_ingredients": {},
-        "is_draft": False, "draft_base_db_dates": set(),
+        "is_draft": False, "draft_base_db_dates": set(), "last_pipeline_action": None,
     }
 
 
@@ -54,6 +56,7 @@ def update_plan_state(
     dish_ingredients: Optional[Dict[str, List[Any]]] = None,
     is_draft = _UNSET,  # True = draft (not saved to DB); False = confirmed
     draft_base_db_dates: Optional[Set[str]] = None,  # snapshot of DB dates at draft creation
+    last_pipeline_action: Optional[str] = _UNSET,  # last action returned by pipeline
     merge: bool = True,
 ) -> Dict[str, Any]:
     """
@@ -138,6 +141,12 @@ def update_plan_state(
 
     if draft_base_db_dates is not None:
         current["draft_base_db_dates"] = set(draft_base_db_dates)
+
+    if last_pipeline_action is not _UNSET:
+        if last_pipeline_action is None:
+            current.pop("last_pipeline_action", None)
+        else:
+            current["last_pipeline_action"] = last_pipeline_action
 
     current["updated_at"] = datetime.now(timezone.utc)
     _plan_states[owner_id] = current

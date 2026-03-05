@@ -28,6 +28,7 @@ interface Dish {
   servings?: number;
   prepTime?: number;
   cookTime?: number;
+  cookingSteps?: string[];
 }
 
 interface Meal {
@@ -1787,16 +1788,28 @@ const DishReadCard: React.FC<{
   onToggle: () => void;
 }> = memo(({ dish, expanded, onToggle }) => {
   const hasIngredients = dish.ingredients.filter(i => i.name).length > 0;
+  const hasSteps = (dish.cookingSteps?.length ?? 0) > 0;
+  const hasDetails = hasIngredients || hasSteps;
   const hasTiming = dish.prepTime || dish.cookTime;
+
+  // Active tab inside the expanded panel: 'ingredients' | 'steps'
+  const [activeTab, setActiveTab] = useState<'ingredients' | 'steps'>(
+    hasSteps ? 'steps' : 'ingredients'
+  );
+
+  // Switch to 'steps' tab automatically when steps become available for the first time
+  useEffect(() => {
+    if (hasSteps) setActiveTab('steps');
+  }, [hasSteps]);
 
   return (
     <div className="bg-white rounded-2xl border border-stone-100 overflow-hidden shadow-sm">
       <button
         type="button"
-        onClick={hasIngredients ? onToggle : undefined}
+        onClick={hasDetails ? onToggle : undefined}
         className={clsx(
           'w-full flex items-center gap-3 px-4 py-3.5 text-left',
-          hasIngredients ? 'cursor-pointer hover:bg-stone-50 transition-colors' : 'cursor-default',
+          hasDetails ? 'cursor-pointer hover:bg-stone-50 transition-colors' : 'cursor-default',
         )}
       >
         <div className="w-9 h-9 bg-orange-50 rounded-xl flex items-center justify-center border border-orange-100 flex-shrink-0">
@@ -1810,6 +1823,12 @@ const DishReadCard: React.FC<{
                 {dish.ingredients.filter(i => i.name).length} ingredients
               </span>
             )}
+            {hasSteps && (
+              <span className="flex items-center gap-0.5 text-[11px] text-orange-400 font-medium">
+                <ChefHat size={10} />
+                {dish.cookingSteps!.length} steps
+              </span>
+            )}
             {hasTiming && (
               <span className="flex items-center gap-0.5 text-[11px] text-stone-400">
                 <Clock size={10} />
@@ -1818,7 +1837,7 @@ const DishReadCard: React.FC<{
             )}
           </div>
         </div>
-        {hasIngredients && (
+        {hasDetails && (
           <ChevronDown
             size={16}
             className={clsx('text-stone-300 transition-transform flex-shrink-0', expanded && 'rotate-180')}
@@ -1826,21 +1845,79 @@ const DishReadCard: React.FC<{
         )}
       </button>
 
-      {expanded && hasIngredients && (
-        <div className="border-t border-stone-100 px-4 py-3 bg-stone-50/50">
-          <p className="text-[10px] font-bold text-stone-400 uppercase tracking-wider mb-2 flex items-center gap-1">
-            <ShoppingBag size={9} /> Ingredients
-          </p>
-          <div className="grid grid-cols-2 gap-x-4 gap-y-1.5">
-            {dish.ingredients.filter(i => i.name).map((ing, i) => (
-              <div key={i} className="flex items-center justify-between gap-2">
-                <span className="text-xs text-stone-700 truncate">{ing.name}</span>
-                {ing.quantity && (
-                  <span className="text-xs text-stone-400 flex-shrink-0 font-medium">{ing.quantity}</span>
+      {expanded && hasDetails && (
+        <div className="border-t border-stone-100 bg-stone-50/50">
+          {/* Tab bar — only show if both ingredients AND steps are present */}
+          {hasIngredients && hasSteps && (
+            <div className="flex border-b border-stone-100 px-4 pt-2 gap-3">
+              <button
+                type="button"
+                onClick={() => setActiveTab('ingredients')}
+                className={clsx(
+                  'flex items-center gap-1 pb-2 text-[11px] font-bold uppercase tracking-wider border-b-2 transition-colors',
+                  activeTab === 'ingredients'
+                    ? 'border-orange-400 text-orange-500'
+                    : 'border-transparent text-stone-400 hover:text-stone-600',
                 )}
+              >
+                <ShoppingBag size={9} /> Ingredients
+              </button>
+              <button
+                type="button"
+                onClick={() => setActiveTab('steps')}
+                className={clsx(
+                  'flex items-center gap-1 pb-2 text-[11px] font-bold uppercase tracking-wider border-b-2 transition-colors',
+                  activeTab === 'steps'
+                    ? 'border-orange-400 text-orange-500'
+                    : 'border-transparent text-stone-400 hover:text-stone-600',
+                )}
+              >
+                <ChefHat size={9} /> Steps
+              </button>
+            </div>
+          )}
+
+          {/* Ingredients panel */}
+          {(activeTab === 'ingredients' || !hasSteps) && hasIngredients && (
+            <div className="px-4 py-3">
+              {(!hasSteps) && (
+                <p className="text-[10px] font-bold text-stone-400 uppercase tracking-wider mb-2 flex items-center gap-1">
+                  <ShoppingBag size={9} /> Ingredients
+                </p>
+              )}
+              <div className="grid grid-cols-2 gap-x-4 gap-y-1.5">
+                {dish.ingredients.filter(i => i.name).map((ing, i) => (
+                  <div key={i} className="flex items-center justify-between gap-2">
+                    <span className="text-xs text-stone-700 truncate">{ing.name}</span>
+                    {ing.quantity && (
+                      <span className="text-xs text-stone-400 flex-shrink-0 font-medium">{ing.quantity}</span>
+                    )}
+                  </div>
+                ))}
               </div>
-            ))}
-          </div>
+            </div>
+          )}
+
+          {/* Cooking steps panel */}
+          {(activeTab === 'steps' || !hasIngredients) && hasSteps && (
+            <div className="px-4 py-3">
+              {(!hasIngredients) && (
+                <p className="text-[10px] font-bold text-stone-400 uppercase tracking-wider mb-2 flex items-center gap-1">
+                  <ChefHat size={9} /> Cooking Steps
+                </p>
+              )}
+              <ol className="space-y-2">
+                {dish.cookingSteps!.map((step, i) => (
+                  <li key={i} className="flex gap-2.5 items-start">
+                    <span className="flex-shrink-0 w-5 h-5 rounded-full bg-orange-100 text-orange-600 text-[10px] font-bold flex items-center justify-center mt-0.5">
+                      {i + 1}
+                    </span>
+                    <span className="text-xs text-stone-700 leading-relaxed">{step}</span>
+                  </li>
+                ))}
+              </ol>
+            </div>
+          )}
         </div>
       )}
     </div>
