@@ -33,6 +33,7 @@ class TestGetPlanState:
             "dish_ingredients": {},
             "is_draft": False,
             "draft_base_db_dates": set(),
+            "last_pipeline_action": None,
         }
 
     def test_get_existing_state(self):
