@@ -34,6 +34,7 @@ class TestGetPlanState:
             "is_draft": False,
             "draft_base_db_dates": set(),
             "last_pipeline_action": None,
+            "cooking_context": None,
         }
 
     def test_get_existing_state(self):
@@ -506,3 +507,75 @@ class TestIntegrationScenarios:
 
         state = get_plan_state(owner_id)
         assert state["schedule_id"] == 7
+
+
+class TestCookingContext:
+    """Tests for cooking_context field — used by the RECIPE_QA / DISCUSSING_RECIPE flow."""
+
+    def test_cooking_context_defaults_to_none(self):
+        """Fresh state has no cooking context."""
+        state = get_plan_state(owner_id=42)
+        assert state["cooking_context"] is None
+
+    def test_set_cooking_context(self):
+        """Should store dish_name and steps in cooking_context."""
+        owner_id = 1
+        ctx = {
+            "dish_name": "蒜泥白肉",
+            "steps": [
+                "将五花肉洗净，冷水入锅。",
+                "调酱：2汤匙生抽 : 1汤匙香醋 : ½汤匙白糖 : 1茶匙香油。",
+                "将肉切片，淋上酱汁即可。",
+            ],
+        }
+        update_plan_state(owner_id=owner_id, cooking_context=ctx)
+
+        state = get_plan_state(owner_id)
+        assert state["cooking_context"]["dish_name"] == "蒜泥白肉"
+        assert len(state["cooking_context"]["steps"]) == 3
+
+    def test_overwrite_cooking_context(self):
+        """Setting a new cooking_context replaces the previous one."""
+        owner_id = 1
+        update_plan_state(owner_id=owner_id, cooking_context={"dish_name": "宫保鸡丁", "steps": ["step1"]})
+        update_plan_state(owner_id=owner_id, cooking_context={"dish_name": "鱼香肉丝", "steps": ["stepA", "stepB"]})
+
+        state = get_plan_state(owner_id)
+        assert state["cooking_context"]["dish_name"] == "鱼香肉丝"
+        assert state["cooking_context"]["steps"] == ["stepA", "stepB"]
+
+    def test_clear_cooking_context(self):
+        """Setting cooking_context=None removes it from state."""
+        owner_id = 1
+        update_plan_state(owner_id=owner_id, cooking_context={"dish_name": "番茄炒蛋", "steps": ["s1"]})
+        update_plan_state(owner_id=owner_id, cooking_context=None)
+
+        state = get_plan_state(owner_id)
+        assert state["cooking_context"] is None
+
+    def test_cooking_context_unset_by_default(self):
+        """update_plan_state without cooking_context kwarg leaves existing value unchanged."""
+        owner_id = 1
+        ctx = {"dish_name": "回锅肉", "steps": ["step1"]}
+        update_plan_state(owner_id=owner_id, cooking_context=ctx)
+        # Update something else — cooking_context should be untouched
+        update_plan_state(owner_id=owner_id, last_pipeline_action="ask")
+
+        state = get_plan_state(owner_id)
+        assert state["cooking_context"]["dish_name"] == "回锅肉"
+
+    def test_cooking_context_survives_plan_update(self):
+        """A plan update (meal_plan_slots) should not wipe the cooking_context."""
+        owner_id = 1
+        update_plan_state(
+            owner_id=owner_id,
+            cooking_context={"dish_name": "蒜泥白肉", "steps": ["s1", "s2"]},
+        )
+        update_plan_state(
+            owner_id=owner_id,
+            meal_plan={"2026-03-10": "蒜泥白肉"},
+            merge=True,
+        )
+        state = get_plan_state(owner_id)
+        assert state["cooking_context"]["dish_name"] == "蒜泥白肉"
+        assert state["meal_plan"]["2026-03-10"] == "蒜泥白肉"

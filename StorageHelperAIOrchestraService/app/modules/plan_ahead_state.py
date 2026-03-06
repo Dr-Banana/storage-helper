@@ -39,11 +39,16 @@ def get_plan_state(owner_id: int) -> Dict[str, Any]:
             "draft_base_db_dates": state.get("draft_base_db_dates", set()),
             # Last action returned by the pipeline — used to enforce ask-before-recommend flow.
             "last_pipeline_action": state.get("last_pipeline_action"),
+            # Active cooking context — tracks the dish/steps currently being discussed.
+            # Enables follow-up questions ("酱料比例?") to be answered conversationally
+            # instead of re-triggering a full COOKING_STEPS generation.
+            "cooking_context": state.get("cooking_context"),
             "updated_at": state.get("updated_at"),
         }
     return {
         "meal_plan": {}, "shopping_list": [], "meal_plan_slots": {}, "dish_ingredients": {},
         "is_draft": False, "draft_base_db_dates": set(), "last_pipeline_action": None,
+        "cooking_context": None,
     }
 
 
@@ -57,6 +62,7 @@ def update_plan_state(
     is_draft = _UNSET,  # True = draft (not saved to DB); False = confirmed
     draft_base_db_dates: Optional[Set[str]] = None,  # snapshot of DB dates at draft creation
     last_pipeline_action: Optional[str] = _UNSET,  # last action returned by pipeline
+    cooking_context = _UNSET,  # Dict with dish_name + steps, or None to clear
     merge: bool = True,
 ) -> Dict[str, Any]:
     """
@@ -147,6 +153,12 @@ def update_plan_state(
             current.pop("last_pipeline_action", None)
         else:
             current["last_pipeline_action"] = last_pipeline_action
+
+    if cooking_context is not _UNSET:
+        if cooking_context is None:
+            current.pop("cooking_context", None)
+        else:
+            current["cooking_context"] = cooking_context
 
     current["updated_at"] = datetime.now(timezone.utc)
     _plan_states[owner_id] = current

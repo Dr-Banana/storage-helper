@@ -324,11 +324,15 @@ class CookingStepsAgent(BaseAgent):
             ing_text = f"\nKnown ingredients: {', '.join(i for i in ingredients if i)}"
 
         prompt = (
-            f"Generate clear, concise step-by-step cooking instructions for: {dish_name}.{ing_text}\n"
+            f"Generate precise, chef-quality step-by-step cooking instructions for: {dish_name}.{ing_text}\n"
             'Respond with a JSON object: {"steps": ["step 1...", "step 2...", ...]}\n'
-            "Each step should be a single actionable sentence.\n"
-            "Respond in the same language as the dish name.\n"
-            "Include 5-10 steps."
+            "Requirements for each step:\n"
+            "- Use specific measurements for every ingredient (e.g. '2 tbsp soy sauce', '1 tsp vinegar', '½ tsp sugar').\n"
+            "- For sauces or marinades, state the exact ratio (e.g. 'mix 2 tbsp light soy sauce : 1 tbsp rice vinegar : ½ tbsp sugar : 1 tsp sesame oil').\n"
+            "- Include cooking temperatures, times, and visual cues where relevant.\n"
+            "- Each step should be a single, actionable sentence.\n"
+            "- Respond in the same language as the dish name.\n"
+            "- Include 6-10 steps."
         )
 
         payload = {

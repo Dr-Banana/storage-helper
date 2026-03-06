@@ -71,6 +71,11 @@ Respond naturally in the same language as the user.
         """
         Runs the chat pipeline: Classify intent -> Route/Mock Action -> Generate response.
         """
+        # Initialise cooking-steps data containers (populated later if intent == COOKING_STEPS)
+        _cs_injected_context: str = ""
+        _cs_action_data: Dict[str, Any] = {}
+        active_cooking_ctx: Optional[Dict[str, Any]] = None
+
         # 0. Check for context-based intent (e.g. Correction)
         # If we have explicit correction context, we bypass standard intent classification
         is_correction = False
@@ -98,11 +103,15 @@ Respond naturally in the same language as the user.
                 )
             )
 
-            # 1. Classify intent — inject PLANNING session_mode so the LLM can decide
+            # 1. Classify intent — inject session context so the LLM can decide
             #    stickiness intelligently instead of relying on a keyword list.
             session_mode = "PLANNING" if in_plan_ahead_flow else None
+            active_cooking_ctx = plan_state.get("cooking_context")  # for DISCUSSING_RECIPE block
             intent_result = await intent_classifier.classify(
-                user_input, history=history, session_mode=session_mode
+                user_input,
+                history=history,
+                session_mode=session_mode,
+                cooking_context=active_cooking_ctx,
             )
 
             # 1b. Lightweight safety net: if we're in a plan-ahead flow and the LLM returns
@@ -177,6 +186,42 @@ Respond naturally in the same language as the user.
                 except Exception as _conf_err:
                     logger.warning(f"[COMPOUND] Draft confirm step failed: {_conf_err}", exc_info=True)
 
+            # RECIPE_QA: targeted parameter query about an already-discussed dish.
+            # Skip CookingStepsAgent entirely — inject cooking_context and let LLM answer directly.
+            if intent_result.intent == Intent.RECIPE_QA:
+                if active_cooking_ctx and active_cooking_ctx.get("dish_name"):
+                    _qa_dish = active_cooking_ctx["dish_name"]
+                    _qa_steps = active_cooking_ctx.get("steps") or []
+                    if _qa_steps:
+                        _qa_steps_text = "\n".join(f"{i+1}. {s}" for i, s in enumerate(_qa_steps))
+                        _cs_injected_context = (
+                            f"\n\n=== RECIPE CONTEXT FOR 「{_qa_dish}」 ===\n"
+                            f"{_qa_steps_text}\n"
+                            "=== END RECIPE CONTEXT ===\n\n"
+                            "The user is asking a specific follow-up question about this recipe. "
+                            "Answer the specific question ONLY (e.g. give the exact ratio, temperature, "
+                            "timing, or substitution they asked for). "
+                            "Use the recipe as the primary source, then SUPPLEMENT with your own culinary "
+                            "expertise for any missing specifics — never say 'the recipe doesn't include that'. "
+                            "Be concise and direct. Respond in the user's language."
+                        )
+                    else:
+                        # No stored steps — answer from general knowledge
+                        _cs_injected_context = (
+                            f"\n\n[The user is asking a follow-up about 「{_qa_dish}」. "
+                            "Answer from your general culinary knowledge.]\n"
+                        )
+                else:
+                    # No cooking context — treat as general
+                    intent_result = type("IR", (), {
+                        "intent": Intent.GENERAL,
+                        "confidence": 0.7,
+                        "reasoning": "RECIPE_QA with no active cooking context; falling back to GENERAL",
+                    })()
+
+            # COOKING_STEPS: agent acts as a "data fetcher" — structured steps are injected
+            # into the LLM system prompt so Gemini can answer naturally and handle follow-ups.
+            # This replaces the old hard short-circuit that returned a fixed template string.
             if intent_result.intent == Intent.COOKING_STEPS:
                 try:
                     from app.agents.cooking_steps_agent import CookingStepsAgent as _CSAgent
@@ -187,36 +232,49 @@ Respond naturally in the same language as the user.
                         history=history,
                     )
                     _cs_data = _cs_result.get("data") or {}
+                    _cs_action_data = _cs_data
                     _steps = _cs_data.get("cooking_steps", [])
                     _dish = _cs_data.get("dish_name", "")
+
                     if _steps:
                         _steps_text = "\n".join(f"{i+1}. {s}" for i, s in enumerate(_steps))
-                        _response_text = (
-                            f"这是「{_dish}」的烹饪步骤：\n\n{_steps_text}\n\n"
-                            "步骤已保存到您的膳食计划中，打开菜品详情即可查看 👨‍🍳"
-                            if _cs_data.get("saved")
-                            else f"这是「{_dish}」的烹饪步骤：\n\n{_steps_text}"
+                        _saved_note = (
+                            "\n[Steps saved to meal plan — user can view them in the dish detail card]"
+                            if _cs_data.get("saved") else ""
+                        )
+                        _cs_injected_context = (
+                            f"\n\n=== RECIPE DATA FOR 「{_dish}」 ===\n"
+                            f"{_steps_text}"
+                            f"{_saved_note}\n"
+                            "=== END RECIPE DATA ===\n\n"
+                            "Use the recipe data above as the PRIMARY source to answer the user's question. "
+                            "If the recipe data is missing specific details the user is asking about "
+                            "(e.g. exact sauce ratios, temperatures, cooking times, ingredient substitutions), "
+                            "SUPPLEMENT with your own culinary expertise to give a complete, helpful answer — "
+                            "do NOT say 'the recipe doesn't include that information'. "
+                            "Present steps clearly if asked for the full recipe, or answer only the specific "
+                            "part they asked about. Respond conversationally in the user's language."
+                        )
+                        # Persist cooking context so follow-ups skip re-generation
+                        from app.modules.plan_ahead_state import update_plan_state
+                        update_plan_state(
+                            owner_id=owner_id,
+                            cooking_context={"dish_name": _dish, "steps": _steps},
                         )
                     else:
-                        _response_text = _cs_result.get("message", "抱歉，无法生成烹饪步骤，请稍后重试。")
-                    return {
-                        "response": _response_text,
-                        "intent": intent_result.intent,
-                        "confidence": intent_result.confidence,
-                        "reasoning": intent_result.reasoning,
-                        "action": "COOKING_STEPS",
-                        "action_data": _cs_data,
-                    }
+                        # Agent couldn't find/generate steps — fall through to LLM with a nudge
+                        _cs_injected_context = (
+                            f"\n\n[CookingStepsAgent could not find steps: "
+                            f"{_cs_result.get('message', '')}]\n"
+                            "Tell the user you couldn't identify the dish or find cooking steps, "
+                            "and ask them to clarify which dish they mean."
+                        )
                 except Exception as _cs_err:
                     logger.error(f"[COOKING_STEPS] Agent failed: {_cs_err}", exc_info=True)
-                    return {
-                        "response": "抱歉，烹饪步骤生成遇到问题，请稍后重试。",
-                        "intent": intent_result.intent,
-                        "confidence": intent_result.confidence,
-                        "reasoning": str(_cs_err),
-                        "action": "COOKING_STEPS",
-                        "action_data": {},
-                    }
+                    _cs_injected_context = (
+                        "\n\n[CookingStepsAgent encountered an error. "
+                        "Apologise briefly and ask the user to try again.]\n"
+                    )
 
             # 2b. Get intent-specific mock action/data (pass context for e.g. plan_ahead state)
             intent_action = await route_by_intent(
@@ -229,9 +287,39 @@ Respond naturally in the same language as the user.
             intent=intent_result.intent.value,
             reasoning=intent_result.reasoning
         )
-        
+
+        # Inject cooking steps data (if agent ran) into system prompt so LLM can answer naturally
+        if _cs_injected_context:
+            system_instruction += _cs_injected_context
+
         # Add context about the specific action we're taking
         context_msg = f"\nSystem Action: {intent_action['message']}"
+
+        # Inject active cooking context for GENERAL follow-up questions about a recipe
+        # (e.g. "酱料比例是多少?" after the AI showed a recipe).
+        # Skip if COOKING_STEPS or RECIPE_QA already injected the context above.
+        if (
+            not _cs_injected_context  # skip if already injected
+            and intent_result.intent == Intent.GENERAL
+            and active_cooking_ctx
+            and active_cooking_ctx.get("dish_name")
+        ):
+            _ctx_dish = active_cooking_ctx["dish_name"]
+            _ctx_steps = active_cooking_ctx.get("steps") or []
+            if _ctx_steps:
+                _ctx_steps_text = "\n".join(f"{i+1}. {s}" for i, s in enumerate(_ctx_steps))
+                context_msg += (
+                    f"\n\n=== RECIPE CONTEXT (already shared with user) ===\n"
+                    f"Dish: 「{_ctx_dish}」\n"
+                    f"{_ctx_steps_text}\n"
+                    "=== END RECIPE CONTEXT ===\n"
+                    "Use the recipe above as the PRIMARY source to answer the follow-up question. "
+                    "If the user is asking for a specific detail not in the recipe "
+                    "(e.g. exact ratios, temperatures, substitutions, variations), "
+                    "SUPPLEMENT with your own culinary expertise — do NOT say the recipe lacks that info. "
+                    "Be concise and targeted; don't re-list all steps unless explicitly asked."
+                )
+
         # Track if this turn was a schedule lookup only (no plan-ahead modification). If so, we skip persistence in response.
         schedule_context_added_this_turn = False
 
@@ -614,13 +702,24 @@ Respond naturally in the same language as the user.
                     logger.error(f"Gemini API response missing text content. Finish reason: {finish_reason}, Full response keys: {result.keys() if isinstance(result, dict) else 'not a dict'}")
                     raise ValueError("Gemini API response missing text content.")
 
+                # For COOKING_STEPS turns, surface the structured agent data so the
+                # frontend can still update the dish detail card (schedule_id, saved, etc.)
+                # RECIPE_QA goes straight to LLM; action stays GENERAL (no agent data to surface).
+                final_action = intent_action['action']
+                final_action_data = intent_action['data']
+                if intent_result.intent == Intent.COOKING_STEPS and _cs_action_data:
+                    final_action = "COOKING_STEPS"
+                    final_action_data = _cs_action_data
+                elif intent_result.intent == Intent.RECIPE_QA:
+                    final_action = "RECIPE_QA"
+
                 return {
                     "response": response_text,
                     "intent": intent_result.intent,
                     "confidence": intent_result.confidence,
                     "reasoning": intent_result.reasoning,
-                    "action": intent_action['action'],
-                    "action_data": intent_action['data']
+                    "action": final_action,
+                    "action_data": final_action_data,
                 }
 
         except Exception as e:

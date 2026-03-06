@@ -1,6 +1,7 @@
 """
 Schedule service layer for business logic
 """
+import logging
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.attributes import flag_modified
 from sqlalchemy import and_, or_
@@ -9,6 +10,8 @@ from datetime import datetime
 from typing import List, Optional
 from app.models.schedule import Schedule
 from app.schemas.schedule import ScheduleCreate, ScheduleUpdate
+
+logger = logging.getLogger(__name__)
 
 
 class ScheduleService:

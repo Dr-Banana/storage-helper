@@ -15,6 +15,7 @@ class Intent(str, Enum):
     PLAN_EAT_OUT = "PLAN_EAT_OUT"
     PLAN_AHEAD = "PLAN_AHEAD"
     COOKING_STEPS = "COOKING_STEPS"
+    RECIPE_QA = "RECIPE_QA"   # Follow-up parameter query about a dish already discussed
     GENERAL = "GENERAL"
 
 
@@ -51,19 +52,27 @@ You are an expert Intent Classifier for a Home AI Agent. Your task is to analyze
    - CRITICAL: If recent conversation history shows the user is in the middle of planning meals, phrases like "what I have", "what do I have now", "what plan" mean "show my meal plan" — use PLAN_AHEAD, NOT SEARCH.
    - When in meal planning context, "change X's meal" = PLAN_AHEAD, NOT UPDATE.
 
-5. **COOKING_STEPS**: The user wants step-by-step instructions on how to cook a specific dish. Typically asked after discussing a meal plan or a specific dish.
+5. **COOKING_STEPS**: The user wants the FULL step-by-step cooking workflow for a dish they haven't discussed yet (or a completely different dish).
    - Example: "怎么做呢", "怎么做", "怎么做这道菜", "how to cook this", "how do I make this", "做法是什么", "教我怎么做", "步骤是什么", "cooking steps", "recipe", "how to prepare it".
    - CRITICAL: When the conversation context involves meal planning and the user asks how to cook something, ALWAYS classify as COOKING_STEPS, NOT GENERAL.
+   - NOT for: follow-up questions about a dish already discussed (use RECIPE_QA instead).
 
-6. **GENERAL**: Basic greetings, general conversation, or queries that don't fit the above tasks.
+6. **RECIPE_QA**: The user is asking a SPECIFIC follow-up question about a dish that was ALREADY discussed in this conversation. This is a targeted parameter query, NOT a request for the full recipe.
+   - Triggers: asking for a specific measurement, ratio, temperature, timing, substitution, or technique clarification.
+   - Example (after discussing 蒜泥白肉): "酱料比例是多少", "多少克蒜", "可以不放辣椒油吗", "火要开多大", "第三步要煮多久", "有没有不辣的版本", "what's the ratio", "how much soy sauce", "can I substitute X".
+   - Key signal: the question assumes context ("that sauce", "this dish", "第三步") OR names the dish already discussed.
+   - Use RECIPE_QA (not COOKING_STEPS) when the user is clearly following up, not starting fresh.
+
+7. **GENERAL**: Basic greetings, general conversation, or queries that don't fit the above tasks.
    - Example: "Hello", "How are you?", "What can you do?".
 
 PRIORITY RULE: If the recent conversation (last few turns) is about planning meals for next week, and the user says something ambiguous like "what I have" or "change Monday's meal", prefer PLAN_AHEAD over SEARCH or UPDATE.
 COOKING_STEPS PRIORITY: If the user asks how to cook something (怎么做, how to make, steps, recipe instructions) — especially when recent context involves meal planning — ALWAYS classify as COOKING_STEPS, not GENERAL.
+RECIPE_QA PRIORITY: If an active recipe is being discussed AND the user asks a specific factual question about it (ratios, amounts, substitutions, timing), always use RECIPE_QA — it goes directly to the LLM for a fast, expert answer without re-generating the full recipe.
 
 Respond ONLY with a JSON object that strictly adheres to the following schema:
 {
-  "intent": "SEARCH" | "UPDATE" | "PLAN_EAT_OUT" | "PLAN_AHEAD" | "COOKING_STEPS" | "GENERAL",
+  "intent": "SEARCH" | "UPDATE" | "PLAN_EAT_OUT" | "PLAN_AHEAD" | "COOKING_STEPS" | "RECIPE_QA" | "GENERAL",
   "confidence": number (0.0 to 1.0),
   "reasoning": "string"
 }
@@ -79,21 +88,42 @@ Respond ONLY with a JSON object that strictly adheres to the following schema:
         user_input: str,
         history: List[Dict[str, str]] = None,
         session_mode: Optional[str] = None,
+        cooking_context: Optional[Dict[str, Any]] = None,
     ) -> "IntentClassificationResult":
         """
         Classifies the user input into an Intent, considering conversation history for context.
 
         Args:
-            user_input:    The latest user message.
-            history:       Recent conversation turns for context.
-            session_mode:  Optional active session mode (e.g. "PLANNING").
-                           When "PLANNING", injects a high-priority context block so the LLM
-                           knows the user is mid-session and can weigh PLAN_AHEAD accordingly —
-                           without keyword-based overrides in the caller.
+            user_input:       The latest user message.
+            history:          Recent conversation turns for context.
+            session_mode:     Optional active session mode (e.g. "PLANNING").
+                              When "PLANNING", injects a high-priority context block so the LLM
+                              knows the user is mid-session and can weigh PLAN_AHEAD accordingly.
+            cooking_context:  If set, the user is currently discussing a specific dish's recipe.
+                              Contains {dish_name, steps}. Enables follow-up routing to GENERAL
+                              (handled conversationally) instead of re-triggering COOKING_STEPS.
         """
         # Build session-mode context block (injected BEFORE history)
         session_block = ""
-        if session_mode == "PLANNING":
+        if cooking_context and cooking_context.get("dish_name"):
+            dish = cooking_context["dish_name"]
+            steps_preview = ""
+            steps = cooking_context.get("steps") or []
+            if steps:
+                steps_preview = "; ".join(steps[:3]) + ("..." if len(steps) > 3 else "")
+            session_block = (
+                f"=== ACTIVE SESSION: DISCUSSING RECIPE ===\n"
+                f"The user is currently discussing the recipe for 「{dish}」.\n"
+                f"Steps shared so far: {steps_preview}\n"
+                "- If the user asks a follow-up question about this dish "
+                "(e.g. sauce ratios, ingredient amounts, timing, technique, substitutions, "
+                "clarifications about a specific step), classify as RECIPE_QA — "
+                "this routes directly to the LLM for a fast, expert answer without re-generating steps.\n"
+                "- Only classify as COOKING_STEPS if the user is clearly asking to cook a "
+                "DIFFERENT dish (e.g. 'how do I make 番茄炒蛋?').\n"
+                "=== END SESSION CONTEXT ===\n\n"
+            )
+        elif session_mode == "PLANNING":
             session_block = (
                 "=== ACTIVE SESSION: MEAL PLANNING ===\n"
                 "The user is currently in the middle of a meal-planning session. "
