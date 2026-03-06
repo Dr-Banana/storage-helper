@@ -5,11 +5,12 @@ on:
     branches: [ main, master ]
     paths:
       - 'StorageHelperAIOrchestraService/**'
-      - '.github/workflows/ai-orchestra-service.yml'
+      - '.github/workflows/StorageHelperAIOrchestraService.yml'
   pull_request:
     branches: [ main, master ]
     paths:
       - 'StorageHelperAIOrchestraService/**'
+      - '.github/workflows/StorageHelperAIOrchestraService.yml'
 
 jobs:
   test:
@@ -36,30 +37,53 @@ jobs:
         python -m pip install --upgrade pip
         pip install -r requirements.txt
 
-    - name: Run Unit Tests
+    # ── Layer 1 & 2: Structural + Assertion tests (fully offline, no API key) ──
+    - name: Run Offline Tests (Structural + Assertion + Semantic-offline)
       env:
-        # All unit tests mock HTTP calls — no real API key needed.
-        # pydantic-settings reads these env vars directly (no .env.prod file in CI).
         APP_ENV: prod
         GEMINI_LLM_MODEL: gemini-2.5-flash
         GEMINI_EMBEDDING_MODEL: gemini-embedding-001
         GEMINI_METADATA_MODEL: gemini-2.5-flash
         VISION_MODEL: gemini-2.5-flash
         STORAGE_SERVICE_URL: http://localhost:8000/api/v1
+        # Placeholder keys — all HTTP calls are mocked in offline tests.
+        GEMINI_LLM_API_KEY: placeholder
+        GEMINI_EMBEDDING_API_KEY: placeholder
       run: |
         cd StorageHelperAIOrchestraService
-        python -m pytest tests/ -m "not llm_judge and not embedding"
+        python -m pytest tests/ -m "not llm_judge and not embedding" -v
 
-    - name: Run LLM Judge Tests (requires GEMINI_LLM_TESTING_KEY secret)
-      # Skipped automatically when the secret is not configured.
-      if: ${{ secrets.GEMINI_LLM_TESTING_KEY != '' }}
+    # ── Check whether the LLM testing secret is available ─────────────────────
+    # secrets.* cannot be used directly in `if:` conditions; use a step output.
+    - name: Check LLM testing key availability
+      id: check_llm_key
+      run: |
+        if [ -n "$LLM_TESTING_KEY" ]; then
+          echo "available=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "available=false" >> "$GITHUB_OUTPUT"
+        fi
+      env:
+        LLM_TESTING_KEY: ${{ secrets.GEMINI_LLM_TESTING_KEY }}
+
+    # ── Layer 3: LLM-as-Judge tests (live Gemini calls) ───────────────────────
+    # Skipped automatically when GEMINI_LLM_TESTING_KEY secret is not configured.
+    - name: Run LLM Judge Tests
+      if: steps.check_llm_key.outputs.available == 'true'
       env:
         APP_ENV: prod
         GEMINI_LLM_MODEL: gemini-2.5-flash
-        GEMINI_LLM_API_KEY: ${{ secrets.GEMINI_LLM_TESTING_KEY }}
+        GEMINI_METADATA_MODEL: gemini-2.5-flash
+        VISION_MODEL: gemini-2.5-flash
         STORAGE_SERVICE_URL: http://localhost:8000/api/v1
+        # Both names needed:
+        #   GEMINI_LLM_TESTING_KEY → picked up by _load_testing_key() (auto-enables tests)
+        #   GEMINI_LLM_API_KEY     → fallback used by settings.GEMINI_LLM_API_KEY
+        GEMINI_LLM_TESTING_KEY: ${{ secrets.GEMINI_LLM_TESTING_KEY }}
+        GEMINI_LLM_API_KEY: ${{ secrets.GEMINI_LLM_TESTING_KEY }}
+        GEMINI_EMBEDDING_API_KEY: placeholder
       run: |
         cd StorageHelperAIOrchestraService
-        python -m pytest tests/ai_quality/test_semantic.py -m llm_judge --run-llm -v
-      continue-on-error: true  # LLM output is non-deterministic; don't fail the build
-
+        python -m pytest tests/ai_quality/test_semantic.py -m llm_judge -v
+      # LLM output is non-deterministic; don't fail the entire build on flakiness.
+      continue-on-error: true
