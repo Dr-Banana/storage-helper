@@ -225,16 +225,176 @@ Respond naturally in the same language as the user.
             if intent_result.intent == Intent.COOKING_STEPS:
                 try:
                     from app.agents.cooking_steps_agent import CookingStepsAgent as _CSAgent
-                    _cs_result = await _CSAgent().execute(
-                        user_input=user_input,
-                        owner_id=owner_id,
-                        context=context,
-                        history=history,
+
+                    # ── "Replace-from-context" mode ──────────────────────────────────────────
+                    # When the user wants to REPLACE existing steps with the already-discussed
+                    # alternative method (e.g. "替换现有的方案") or confirms a pending replace
+                    # ("确定" after AI asked "确认替换吗?"), skip re-generation and directly
+                    # PATCH the in-context steps to the DB.
+                    _replace_triggers = ("替换", "换成这个", "用这个方案", "更换步骤", "replace")
+                    _confirm_triggers = ("确定", "好的", "是的", "对", "yes", "确认")
+                    _has_pending_replace = bool((active_cooking_ctx or {}).get("pending_replace"))
+                    _is_replace_mode = (
+                        (
+                            any(t in user_lower for t in _replace_triggers)
+                            or (_has_pending_replace and any(t in user_lower for t in _confirm_triggers))
+                        )
+                        and (active_cooking_ctx or {}).get("steps")
+                        and (active_cooking_ctx or {}).get("dish_name")
                     )
-                    _cs_data = _cs_result.get("data") or {}
-                    _cs_action_data = _cs_data
-                    _steps = _cs_data.get("cooking_steps", [])
-                    _dish = _cs_data.get("dish_name", "")
+                    if _is_replace_mode:
+                        _ctx_dish = active_cooking_ctx["dish_name"]
+                        _ctx_steps = active_cooking_ctx["steps"]
+                        logger.info(
+                            f"[COOKING_STEPS] Replace-from-context: saving {len(_ctx_steps)} steps for '{_ctx_dish}'"
+                        )
+                        _repl_plan_state = get_plan_state(owner_id)
+                        _repl_sched_id = _repl_plan_state.get("schedule_id")
+                        _repl_slots: Dict[str, Any] = _repl_plan_state.get("meal_plan_slots") or {}
+                        # Find date/meal_time, preferring today then nearest future
+                        from datetime import date as _date_cls
+                        _today_iso = _date_cls.today().isoformat()
+
+                        def _repl_dp(d: str) -> tuple:
+                            if d == _today_iso:
+                                return (0, d)
+                            return (1, d) if d > _today_iso else (2, "~" + d)
+
+                        _repl_date: Optional[str] = None
+                        _repl_mt: Optional[str] = None
+                        for _rdk in sorted(_repl_slots.keys(), key=_repl_dp):
+                            for _rmtt, _rdishes in (_repl_slots[_rdk] or {}).items():
+                                if isinstance(_rdishes, str):
+                                    _rdishes = [_rdishes]
+                                if any(str(d).strip().lower() == _ctx_dish.lower() for d in (_rdishes or [])):
+                                    _repl_date, _repl_mt = _rdk, _rmtt
+                                    break
+                            if _repl_date:
+                                break
+                        _repl_agent = _CSAgent()
+                        _repl_saved, _repl_sid = await _repl_agent._save_steps(
+                            owner_id=owner_id,
+                            schedule_id=_repl_sched_id,
+                            dish_name=_ctx_dish,
+                            steps=_ctx_steps,
+                            date=_repl_date,
+                            meal_time=_repl_mt,
+                            ingredients=[],
+                        )
+                        if _repl_saved:
+                            _repl_steps_text = "\n".join(f"{i+1}. {s}" for i, s in enumerate(_ctx_steps))
+                            _cs_injected_context = (
+                                f"\n\n=== REPLACED STEPS FOR 「{_ctx_dish}」 ===\n"
+                                f"{_repl_steps_text}\n"
+                                "=== END ===\n\n"
+                                f"The cooking steps for 「{_ctx_dish}」 have been successfully REPLACED and "
+                                "saved to the meal plan. Give a brief, friendly confirmation to the user. "
+                                "Respond in the user's language."
+                            )
+                            update_plan_state(
+                                owner_id=owner_id,
+                                cooking_context={
+                                    "dish_name": _ctx_dish,
+                                    "steps": _ctx_steps,
+                                    "pending_replace": True,  # allow one more confirmation turn
+                                },
+                            )
+                            _cs_action_data = {
+                                "dish_name": _ctx_dish,
+                                "cooking_steps": _ctx_steps,
+                                "saved": True,
+                                "replaced": True,
+                            }
+                        else:
+                            _cs_injected_context = (
+                                f"\n\n[Failed to replace steps for 「{_ctx_dish}」. "
+                                "Apologise briefly and ask the user to try again.]\n"
+                            )
+                        _cs_result = None  # skip normal execute() below
+
+                    # "Save pending" fast path: compound flow previously generated context
+                    # but step generation failed. Re-run batch for all pending dishes.
+                    _pending_dishes = (
+                        (active_cooking_ctx or {}).get("all_dishes") or []
+                        if (active_cooking_ctx or {}).get("pending_save")
+                        else []
+                    ) if not _is_replace_mode else []
+                    if _pending_dishes:
+                        logger.info(
+                            f"[COOKING_STEPS] Re-running batch for pending dishes: {_pending_dishes}"
+                        )
+                        _plan_state_data = get_plan_state(owner_id)
+                        _save_ctx = {
+                            "type": "plan_ahead",
+                            "data": {
+                                "schedule_id": _plan_state_data.get("schedule_id"),
+                                "meal_plan_slots": _plan_state_data.get("meal_plan_slots") or {},
+                                "dish_ingredients": _plan_state_data.get("dish_ingredients") or {},
+                            },
+                        }
+                        _batch = await _CSAgent().execute_batch(
+                            dish_names=_pending_dishes,
+                            owner_id=owner_id,
+                            context=_save_ctx,
+                        )
+                        _ok_batch = [r for r in _batch if not isinstance(r, Exception) and r.get("cooking_steps")]
+                        if _ok_batch:
+                            _steps_blocks = []
+                            for r in _ok_batch:
+                                _steps_text = "\n".join(f"{i+1}. {s}" for i, s in enumerate(r["cooking_steps"]))
+                                _steps_blocks.append(
+                                    f"\n**{r['dish_name']}**\n{_steps_text}"
+                                )
+                            _cs_injected_context = (
+                                "\n\n=== RECIPE DATA (BATCH SAVE) ===\n"
+                                + "".join(_steps_blocks)
+                                + "\n=== END RECIPE DATA ===\n\n"
+                                "The steps above have been saved to the meal plan. "
+                                "Present them clearly to the user and confirm they have been saved. "
+                                "Respond in the user's language."
+                            )
+                            # Update cooking_context to reflect saved state
+                            update_plan_state(
+                                owner_id=owner_id,
+                                cooking_context={
+                                    "dish_name": _ok_batch[-1]["dish_name"],
+                                    "steps": _ok_batch[-1]["cooking_steps"],
+                                    "all_dishes": [r["dish_name"] for r in _ok_batch],
+                                },
+                            )
+                            _cs_action_data = {"batch_results": _ok_batch}
+                        else:
+                            _cs_injected_context = (
+                                "\n\n[Step generation failed for all dishes. "
+                                "Apologise and ask the user to try again.]\n"
+                            )
+                        # Skip the normal single-dish execute() below
+                        intent_action = await route_by_intent(
+                            intent_result.intent, user_input, owner_id, context=context
+                        )
+                        # Jump to LLM call by falling through (no further agent call needed)
+                        _cs_result = None  # sentinel: handled above
+                    else:
+                        _cs_result = None  # will be set below
+
+                    if _cs_result is None and not _cs_injected_context:
+                        # Normal single-dish path
+                        _cs_result = await _CSAgent().execute(
+                            user_input=user_input,
+                            owner_id=owner_id,
+                            context=context,
+                            history=history,
+                        )
+
+                    # Process single-dish result (batch-save path already set _cs_injected_context)
+                    _cs_data: Dict[str, Any] = {}
+                    _steps: list = []
+                    _dish: str = ""
+                    if _cs_result is not None:
+                        _cs_data = _cs_result.get("data") or {}
+                        _cs_action_data = _cs_data
+                        _steps = _cs_data.get("cooking_steps", [])
+                        _dish = _cs_data.get("dish_name", "")
 
                     if _steps:
                         _steps_text = "\n".join(f"{i+1}. {s}" for i, s in enumerate(_steps))
@@ -256,16 +416,15 @@ Respond naturally in the same language as the user.
                             "part they asked about. Respond conversationally in the user's language."
                         )
                         # Persist cooking context so follow-ups skip re-generation
-                        from app.modules.plan_ahead_state import update_plan_state
                         update_plan_state(
                             owner_id=owner_id,
                             cooking_context={"dish_name": _dish, "steps": _steps},
                         )
-                    else:
+                    elif not _cs_injected_context:
                         # Agent couldn't find/generate steps — fall through to LLM with a nudge
+                        _msg = _cs_result.get("message", "") if _cs_result else ""
                         _cs_injected_context = (
-                            f"\n\n[CookingStepsAgent could not find steps: "
-                            f"{_cs_result.get('message', '')}]\n"
+                            f"\n\n[CookingStepsAgent could not find steps: {_msg}]\n"
                             "Tell the user you couldn't identify the dish or find cooking steps, "
                             "and ask them to clarify which dish they mean."
                         )
@@ -591,6 +750,149 @@ Respond naturally in the same language as the user.
                     from app.pipelines.plan_ahead_pipeline import PlanAheadPipeline
                     from app.storage.pipeline_storage import _default_storage
                     _pipeline = PlanAheadPipeline(gemini_api_url=self.api_url)
+
+                    # ── COMPOUND CHECK: PLAN_AHEAD + COOKING_STEPS ──────────────────────
+                    # When the user says e.g. "今天晚上加宫保鸡丁和鱼香肉丝，附上做法":
+                    #   1. Run PlanAheadPipeline to add the dishes (also persists to DB).
+                    #   2. Batch-generate cooking steps for the extracted dishes in parallel.
+                    #   3. Synthesize both results into one natural LLM response.
+                    _cmpd_intents = list(getattr(intent_result, "compound_intents", None) or [])
+                    _cmpd_dishes  = list(getattr(intent_result, "extracted_items",  None) or [])
+                    _is_compound_plan_cook = (
+                        Intent.PLAN_AHEAD in _cmpd_intents
+                        and Intent.COOKING_STEPS in _cmpd_intents
+                        and bool(_cmpd_dishes)
+                    )
+
+                    if _is_compound_plan_cook:
+                        logger.info(
+                            f"[COMPOUND] PLAN_AHEAD+COOKING_STEPS detected. "
+                            f"Dishes: {_cmpd_dishes}"
+                        )
+                        # Step A: run plan pipeline (adds dishes, persists to DB)
+                        _plan_result = await _pipeline.execute(
+                            owner_id=owner_id,
+                            user_input=user_input,
+                            history=history,
+                            user_timezone=user_timezone,
+                            storage_client=_default_storage,
+                            context=context,
+                            intent_result=intent_result,
+                        )
+                        _plan_data = _plan_result.get("action_data") or {}
+
+                        # Step B: batch-generate + save steps for all dishes in parallel
+                        from app.agents.cooking_steps_agent import CookingStepsAgent as _CSAgent
+                        _batch_ctx = {"type": "plan_ahead", "data": _plan_data}
+                        _batch_results = await _CSAgent().execute_batch(
+                            dish_names=_cmpd_dishes,
+                            owner_id=owner_id,
+                            context=_batch_ctx,
+                        )
+
+                        # Step C: build synthesis context for the final LLM call
+                        _synth_sys = self.SYSTEM_PROMPT.format(
+                            intent="PLAN_AHEAD",
+                            reasoning="Compound task: dishes added to plan + cooking steps generated.",
+                        )
+                        _synth_ctx = (
+                            "\n=== COMPOUND ACTION RESULTS ===\n"
+                            f"Step 1 — Plan update completed:\n{_plan_result.get('response', '')}\n"
+                            "\nStep 2 — Cooking steps generated:\n"
+                        )
+                        _successful_batches = [
+                            r for r in _batch_results
+                            if not isinstance(r, Exception) and r.get("cooking_steps")
+                        ]
+                        for r in _successful_batches:
+                            _synth_ctx += f"\n**{r['dish_name']}**\n"
+                            for i, s in enumerate(r["cooking_steps"]):
+                                _synth_ctx += f"{i+1}. {s}\n"
+                        _synth_ctx += (
+                            "\n=== END COMPOUND RESULTS ===\n\n"
+                            "Write a single, natural reply that:\n"
+                            "1. Confirms what was added to the meal plan (dish names + meal slot).\n"
+                            "2. Presents the cooking steps for EACH dish in a clear, readable format.\n"
+                            "3. Uses the same language as the user."
+                        )
+                        _synth_sys += _synth_ctx
+
+                        # Step D: synthesis LLM call
+                        _synth_contents: List[Dict[str, Any]] = []
+                        if history:
+                            for _msg in history:
+                                _r = "user" if _msg["role"] == "user" else "model"
+                                _synth_contents.append({"role": _r, "parts": [{"text": _msg["content"]}]})
+                        _synth_contents.append({"role": "user", "parts": [{"text": user_input}]})
+                        _synth_payload = {
+                            "contents": _synth_contents,
+                            "systemInstruction": {"parts": [{"text": _synth_sys}]},
+                            "generationConfig": {"temperature": 0.7, "maxOutputTokens": 4096},
+                        }
+                        _synth_text = _plan_result.get("response", "")
+                        try:
+                            async with httpx.AsyncClient(timeout=30.0) as _hc:
+                                _sr = await _hc.post(
+                                    self.api_url,
+                                    headers={"Content-Type": "application/json"},
+                                    json=_synth_payload,
+                                )
+                                _sr.raise_for_status()
+                                _synth_text = (
+                                    _sr.json()
+                                    .get("candidates", [{}])[0]
+                                    .get("content", {})
+                                    .get("parts", [{}])[0]
+                                    .get("text", _synth_text)
+                                )
+                        except Exception as _se:
+                            logger.error(f"[COMPOUND] Synthesis LLM call failed: {_se}", exc_info=True)
+
+                        # Persist cooking context for follow-ups.
+                        # Even when step generation failed (successful_batches is empty),
+                        # store the dish names so "把步骤加进去" can re-trigger generation.
+                        if _successful_batches:
+                            _last = _successful_batches[-1]
+                            update_plan_state(
+                                owner_id=owner_id,
+                                cooking_context={
+                                    "dish_name": _last["dish_name"],
+                                    "steps": _last["cooking_steps"],
+                                    "all_dishes": [r["dish_name"] for r in _successful_batches],
+                                },
+                            )
+                        elif _batch_results:
+                            # Steps failed — record pending dishes so the user can ask again
+                            _pending = [
+                                r["dish_name"] for r in _batch_results
+                                if not isinstance(r, Exception) and r.get("dish_name")
+                            ]
+                            if _pending:
+                                update_plan_state(
+                                    owner_id=owner_id,
+                                    cooking_context={
+                                        "dish_name": _pending[-1],
+                                        "steps": [],
+                                        "all_dishes": _pending,
+                                        "pending_save": True,
+                                    },
+                                )
+
+                        return {
+                            "response": _synth_text,
+                            "intent": Intent.PLAN_AHEAD,
+                            "confidence": intent_result.confidence,
+                            "reasoning": intent_result.reasoning,
+                            "action": "COMPOUND",
+                            "action_data": {
+                                "plan": _plan_data,
+                                "cooking_steps_results": [
+                                    r for r in _batch_results if not isinstance(r, Exception)
+                                ],
+                            },
+                        }
+
+                    # ── Normal (non-compound) PLAN_AHEAD ────────────────────────────────
                     return await _pipeline.execute(
                         owner_id=owner_id,
                         user_input=user_input,

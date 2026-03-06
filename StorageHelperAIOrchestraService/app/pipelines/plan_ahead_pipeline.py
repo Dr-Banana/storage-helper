@@ -190,7 +190,13 @@ class PlanAheadPipeline:
             " dairy (milk, cheese, butter), grain (rice, noodles, bread, flour), spice (salt, sugar, oil, sauce, herb), other."
         )
         ctx += "\n   - If user removes a date, omit it from meal_entries entirely."
-        ctx += "\n4. Write a brief, friendly message in 'user_message' (match user's language)."
+        ctx += (
+            "\n4. Write a brief, friendly message in 'user_message' (match user's language)."
+            "\n   CRITICAL: NEVER mention 'JSON', 'data format', 'structured response', or any technical"
+            " implementation detail in user_message. The message is shown directly to the user."
+            "\n   If you need to mention cooking steps, write them as plain text — do NOT say"
+            " 'I cannot provide this in JSON'."
+        )
         ctx += "\n\nRULES:"
         ctx += "\n- NEVER invent meals for dates not mentioned unless user explicitly asks."
         ctx += "\n- For 'view', meal_entries should mirror the current plan exactly."

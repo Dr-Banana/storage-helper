@@ -8,9 +8,20 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from app.modules.intent_classifier import IntentClassifier, Intent, IntentClassificationResult
 
 
-def _make_gemini_response(intent: str, confidence: float = 0.95, reasoning: str = "test") -> dict:
+def _make_gemini_response(
+    intent: str,
+    confidence: float = 0.95,
+    reasoning: str = "test",
+    compound_intents=None,
+    extracted_items=None,
+) -> dict:
     """Build a minimal fake Gemini API response payload."""
-    body = json.dumps({"intent": intent, "confidence": confidence, "reasoning": reasoning})
+    data: dict = {"intent": intent, "confidence": confidence, "reasoning": reasoning}
+    if compound_intents is not None:
+        data["compound_intents"] = compound_intents
+    if extracted_items is not None:
+        data["extracted_items"] = extracted_items
+    body = json.dumps(data)
     return {
         "candidates": [{"content": {"parts": [{"text": body}]}}]
     }
@@ -249,3 +260,103 @@ class TestClassifyReturnValues:
         text = captured["payload"]["contents"][0]["parts"][0]["text"]
         assert "今天晚上什么计划" in text
         assert "蒜泥白肉" in text
+
+
+# ---------------------------------------------------------------------------
+# Compound intent
+# ---------------------------------------------------------------------------
+
+class TestCompoundIntent:
+    """Tests for the COMPOUND_INTENTS + EXTRACTED_ITEMS feature."""
+
+    @pytest.mark.asyncio
+    async def test_compound_plan_ahead_and_cooking_steps(self, classifier):
+        """LLM returns compound_intents with PLAN_AHEAD + COOKING_STEPS."""
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status = MagicMock()
+        mock_resp.json.return_value = _make_gemini_response(
+            "PLAN_AHEAD",
+            confidence=0.97,
+            compound_intents=["PLAN_AHEAD", "COOKING_STEPS"],
+            extracted_items=["宫保鸡丁", "鱼香肉丝"],
+        )
+
+        with patch("httpx.AsyncClient") as mock_cls:
+            client = AsyncMock()
+            client.post = AsyncMock(return_value=mock_resp)
+            client.__aenter__ = AsyncMock(return_value=client)
+            client.__aexit__ = AsyncMock(return_value=False)
+            mock_cls.return_value = client
+
+            result = await classifier.classify("今天晚上加宫保鸡丁和鱼香肉丝，附上做法")
+
+        assert result.intent == Intent.PLAN_AHEAD
+        assert Intent.PLAN_AHEAD in (result.compound_intents or [])
+        assert Intent.COOKING_STEPS in (result.compound_intents or [])
+        assert result.extracted_items == ["宫保鸡丁", "鱼香肉丝"]
+
+    @pytest.mark.asyncio
+    async def test_single_intent_has_no_compound(self, classifier):
+        """A plain single-task message should return no compound_intents."""
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status = MagicMock()
+        mock_resp.json.return_value = _make_gemini_response("PLAN_AHEAD", compound_intents=None)
+
+        with patch("httpx.AsyncClient") as mock_cls:
+            client = AsyncMock()
+            client.post = AsyncMock(return_value=mock_resp)
+            client.__aenter__ = AsyncMock(return_value=client)
+            client.__aexit__ = AsyncMock(return_value=False)
+            mock_cls.return_value = client
+
+            result = await classifier.classify("帮我计划一下本周的饮食")
+
+        assert result.compound_intents is None
+
+    @pytest.mark.asyncio
+    async def test_compound_prompt_mentions_compound_rule(self, classifier):
+        """Verify the COMPOUND INTENT RULE is present in the system prompt payload."""
+        captured = {}
+
+        async def fake_post(url, headers, json):
+            captured["payload"] = json
+            mock_resp = MagicMock()
+            mock_resp.raise_for_status = MagicMock()
+            mock_resp.json.return_value = _make_gemini_response("PLAN_AHEAD")
+            return mock_resp
+
+        with patch("httpx.AsyncClient") as mock_cls:
+            client = AsyncMock()
+            client.post = fake_post
+            client.__aenter__ = AsyncMock(return_value=client)
+            client.__aexit__ = AsyncMock(return_value=False)
+            mock_cls.return_value = client
+
+            await classifier.classify("加两道菜并附上步骤")
+
+        sys_text = captured["payload"]["systemInstruction"]["parts"][0]["text"]
+        assert "COMPOUND INTENT RULE" in sys_text
+        assert "compound_intents" in sys_text
+        assert "extracted_items" in sys_text
+
+    def test_intent_classification_result_has_compound_fields(self):
+        """IntentClassificationResult accepts optional compound fields."""
+        r = IntentClassificationResult(
+            intent=Intent.PLAN_AHEAD,
+            confidence=0.9,
+            reasoning="test",
+            compound_intents=[Intent.PLAN_AHEAD, Intent.COOKING_STEPS],
+            extracted_items=["番茄炒蛋"],
+        )
+        assert r.compound_intents == [Intent.PLAN_AHEAD, Intent.COOKING_STEPS]
+        assert r.extracted_items == ["番茄炒蛋"]
+
+    def test_intent_classification_result_compound_optional(self):
+        """compound_intents and extracted_items default to None."""
+        r = IntentClassificationResult(
+            intent=Intent.GENERAL,
+            confidence=0.8,
+            reasoning="hello",
+        )
+        assert r.compound_intents is None
+        assert r.extracted_items is None

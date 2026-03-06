@@ -1,0 +1,68 @@
+{
+  "timestamp": "20260306_141409",
+  "dish": "Kung Pao Chicken",
+  "score": null,
+  "verdict": "FAIL",
+  "layer": "llm_judge",
+  "diff": {
+    "golden": "1. Cut 200g chicken breast into 1 cm cubes; marinate with 1 tbsp soy sauce and 0.5 tsp cornstarch for 15 minutes.\n2. Toast peanuts in a dry pan over low heat until golden; cut dried chilies into ~1 cm sections.\n3. Make sauce: mix 2 tbsp soy sauce, 1 tbsp rice vinegar, 1 tsp sugar, 0.5 tsp cornstarch.\n4. Heat 2 tbsp oil in a wok; stir-fry dried chilies and Sichuan peppercorns until fragrant.\n5. Add chicken; stir-fry over high heat ~2 minutes until cooked through.\n6. Pour in sauce and toss until thickened.\n7. Add peanuts and scallions; stir briefly and serve.",
+    "candidate": "Cube 200g chicken breast; coat with 1 tbsp soy sauce and 0.5 tsp cornstarch, marinate 15 min. Toast peanuts in a dry pan over low heat until golden; snip dried chilies into 1 cm sections. Combine sauce: 2 tbsp soy sauce, 1 tbsp rice vinegar, 1 tsp sugar, 0.5 tsp cornstarch. Heat 2 tbsp oil in a wok; stir-fry dried chilies and Sichuan peppercorns until fragrant. Add chicken and stir-fry over high heat ~2 min until cooked through. Pour in sauce and toss until thickened. Finish with peanuts and scallions."
+  },
+  "side_by_side": [
+    [
+      "1. Cut 200g chicken breast into 1 cm cubes; marinate with 1 tbsp soy sauce and 0.5 tsp cornstarch for 15 minutes.",
+      "Cube 200g chicken breast; coat with 1 tbsp soy sauce and 0.5 tsp cornstarch, marinate 15 min. Toast peanuts in a dry pan over low heat until golden; snip dried chilies into 1 cm sections. Combine sauce: 2 tbsp soy sauce, 1 tbsp rice vinegar, 1 tsp sugar, 0.5 tsp cornstarch. Heat 2 tbsp oil in a wok; stir-fry dried chilies and Sichuan peppercorns until fragrant. Add chicken and stir-fry over high heat ~2 min until cooked through. Pour in sauce and toss until thickened. Finish with peanuts and scallions."
+    ],
+    [
+      "2. Toast peanuts in a dry pan over low heat until golden; cut dried chilies into ~1 cm sections.",
+      ""
+    ],
+    [
+      "3. Make sauce: mix 2 tbsp soy sauce, 1 tbsp rice vinegar, 1 tsp sugar, 0.5 tsp cornstarch.",
+      ""
+    ],
+    [
+      "4. Heat 2 tbsp oil in a wok; stir-fry dried chilies and Sichuan peppercorns until fragrant.",
+      ""
+    ],
+    [
+      "5. Add chicken; stir-fry over high heat ~2 minutes until cooked through.",
+      ""
+    ],
+    [
+      "6. Pour in sauce and toss until thickened.",
+      ""
+    ],
+    [
+      "7. Add peanuts and scallions; stir briefly and serve.",
+      ""
+    ]
+  ],
+  "extra": {
+    "pass_count": 0,
+    "fail_count": 3,
+    "verdicts": [
+      {
+        "verdict": "FAIL",
+        "reason": "The candidate recipe omits the specific 1 cm size for cutting the chicken breast, which is critical for consistent cooking and texture.",
+        "missing": [
+          "Specific size for chicken cubes (1 cm)"
+        ]
+      },
+      {
+        "verdict": "FAIL",
+        "reason": "The candidate recipe omits the specific 1 cm size for cutting the chicken breast, which is critical for consistent cooking and texture.",
+        "missing": [
+          "Specific size for chicken cubes (1 cm)"
+        ]
+      },
+      {
+        "verdict": "FAIL",
+        "reason": "The candidate recipe omits the specific 1 cm size for cutting the chicken breast, which is critical for consistent cooking and texture.",
+        "missing": [
+          "Specific size for chicken cubes (1 cm)"
+        ]
+      }
+    ]
+  }
+}

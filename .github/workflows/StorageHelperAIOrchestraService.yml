@@ -38,8 +38,28 @@ jobs:
 
     - name: Run Unit Tests
       env:
+        # All unit tests mock HTTP calls — no real API key needed.
+        # pydantic-settings reads these env vars directly (no .env.prod file in CI).
         APP_ENV: prod
+        GEMINI_LLM_MODEL: gemini-2.5-flash
+        GEMINI_EMBEDDING_MODEL: gemini-embedding-001
+        GEMINI_METADATA_MODEL: gemini-2.5-flash
+        VISION_MODEL: gemini-2.5-flash
+        STORAGE_SERVICE_URL: http://localhost:8000/api/v1
       run: |
         cd StorageHelperAIOrchestraService
-        python -m pytest tests/
+        python -m pytest tests/ -m "not llm_judge and not embedding"
+
+    - name: Run LLM Judge Tests (requires GEMINI_LLM_TESTING_KEY secret)
+      # Skipped automatically when the secret is not configured.
+      if: ${{ secrets.GEMINI_LLM_TESTING_KEY != '' }}
+      env:
+        APP_ENV: prod
+        GEMINI_LLM_MODEL: gemini-2.5-flash
+        GEMINI_LLM_API_KEY: ${{ secrets.GEMINI_LLM_TESTING_KEY }}
+        STORAGE_SERVICE_URL: http://localhost:8000/api/v1
+      run: |
+        cd StorageHelperAIOrchestraService
+        python -m pytest tests/ai_quality/test_semantic.py -m llm_judge --run-llm -v
+      continue-on-error: true  # LLM output is non-deterministic; don't fail the build
 

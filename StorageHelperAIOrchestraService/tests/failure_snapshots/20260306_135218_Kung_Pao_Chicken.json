@@ -1,0 +1,21 @@
+{
+  "timestamp": "20260306_135218",
+  "dish": "Kung Pao Chicken",
+  "score": 0.0,
+  "verdict": null,
+  "layer": "cosine",
+  "diff": {
+    "golden": "cube chicken marinate soy sauce stirfry peanuts chilies sauce serve",
+    "candidate": "xzqwvjkmpfbyrthldngoasueiocxzqwvjkmtpfb"
+  },
+  "side_by_side": [
+    [
+      "cube chicken marinate soy sauce stirfry peanuts chilies sauce serve",
+      "xzqwvjkmpfbyrthldngoasueiocxzqwvjkmtpfb"
+    ]
+  ],
+  "extra": {
+    "reason": "below GRAY_LOW",
+    "threshold": 0.08
+  }
+}

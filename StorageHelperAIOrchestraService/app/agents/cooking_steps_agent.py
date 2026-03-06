@@ -8,6 +8,7 @@ When the user asks "怎么做呢" / "how to cook this?" after discussing a meal 
   4. Saves the steps to the schedule via PATCH /schedule/{id}/cooking-steps.
      If the PATCH fails (name mismatch), creates a new schedule entry for that date.
 """
+import asyncio
 import json
 import logging
 from datetime import datetime, timezone
@@ -291,8 +292,16 @@ class CookingStepsAgent(BaseAgent):
                         f"'{name}' ({mt}) on {target_date} in schedule {sid}"
                     )
                     return name, sid, mt
+            # Hint was given but nothing in the schedule matches it.
+            # Return None so the caller falls back to using dish_hint directly,
+            # rather than picking an unrelated dish from the schedule.
+            self.logger.info(
+                f"[CookingStepsAgent] Schedule lookup: hint '{dish_hint}' not found in"
+                f" schedule for {target_date} — returning None to avoid wrong dish."
+            )
+            return None, None, None
 
-        # 2. Fallback: first dish in preferred meal_order
+        # 2. Fallback (no hint): first dish in preferred meal_order
         for preferred_mt in meal_order:
             for name, sid, mt in candidates:
                 if mt == preferred_mt:
@@ -339,8 +348,9 @@ class CookingStepsAgent(BaseAgent):
             "contents": [{"parts": [{"text": prompt}]}],
             "generationConfig": {
                 "temperature": 0.3,
-                "maxOutputTokens": 2048,
-                "responseMimeType": "application/json",
+                # responseMimeType intentionally omitted: strict JSON mode can truncate
+                # long step lists, causing "Unterminated string" parse errors.
+                # maxOutputTokens intentionally omitted: let the model decide the length.
             },
         }
         headers = {"Content-Type": "application/json"}
@@ -349,14 +359,26 @@ class CookingStepsAgent(BaseAgent):
             async with httpx.AsyncClient(timeout=30.0) as client:
                 resp = await client.post(self.api_url, headers=headers, json=payload)
                 resp.raise_for_status()
-                text = (
+                raw = (
                     resp.json()
                     .get("candidates", [{}])[0]
                     .get("content", {})
                     .get("parts", [{}])[0]
                     .get("text", "")
+                    .strip()
                 )
-                parsed = json.loads(text)
+                # Strip markdown code fences if present
+                if raw.startswith("```"):
+                    raw = raw.split("```")[1]
+                    if raw.startswith("json"):
+                        raw = raw[4:]
+                    raw = raw.strip()
+                # Extract the first {...} JSON object
+                start = raw.find("{")
+                end = raw.rfind("}") + 1
+                if start == -1 or end == 0:
+                    raise ValueError(f"No JSON object in response: {raw[:80]!r}")
+                parsed = json.loads(raw[start:end])
                 steps = parsed.get("steps", [])
                 if steps and isinstance(steps, list):
                     return [str(s) for s in steps]
@@ -595,6 +617,138 @@ class CookingStepsAgent(BaseAgent):
                 return True, new_sid
 
         return False, schedule_id
+
+    # ------------------------------------------------------------------
+    # Batch API
+    # ------------------------------------------------------------------
+
+    async def _generate_and_save_for_dish(
+        self,
+        dish_name: str,
+        owner_id: int,
+        schedule_id: Optional[int],
+        context: Optional[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """
+        Generate cooking steps for a single dish and persist them.
+        Helper used by execute_batch().
+        """
+        # Extract ingredients from plan context
+        ingredients: List[str] = []
+        if context and context.get("type") == "plan_ahead":
+            di = (context.get("data") or {}).get("dish_ingredients") or {}
+            for item in (di.get(dish_name) or []):
+                if isinstance(item, dict):
+                    n = item.get("name", "").strip()
+                    if n:
+                        ingredients.append(n)
+                elif isinstance(item, str) and item.strip():
+                    ingredients.append(item.strip())
+
+        # Find the date/meal_time for this dish from the plan slots.
+        # Sort dates so that today comes first, then nearest future dates, then past dates —
+        # this prevents an old entry (e.g. 宫保鸡丁 on 2026-03-01) from shadowing a newly
+        # added entry on the same name (e.g. 宫保鸡丁 on 2026-03-06 added today).
+        target_date: Optional[str] = None
+        target_meal_time: Optional[str] = None
+        if context and context.get("type") == "plan_ahead":
+            slots: Dict[str, Any] = (context.get("data") or {}).get("meal_plan_slots") or {}
+            dish_lower = dish_name.lower()
+            from datetime import date as _date
+            _today = _date.today().isoformat()
+
+            def _date_priority(d: str) -> tuple:
+                if d == _today:
+                    return (0, d)
+                if d > _today:
+                    return (1, d)          # near future (ascending)
+                return (2, "~" + d)        # past (also ascending, but lower priority)
+
+            for date_key in sorted(slots.keys(), key=_date_priority):
+                date_slots = slots[date_key] or {}
+                for mt, dishes in date_slots.items():
+                    if isinstance(dishes, str):
+                        dishes = [dishes]
+                    for d in (dishes or []):
+                        if str(d).strip().lower() == dish_lower:
+                            target_date = date_key
+                            target_meal_time = mt
+                            break
+                    if target_date:
+                        break
+                if target_date:
+                    break
+
+        steps = await self._generate_steps(dish_name, ingredients)
+        if not steps:
+            self.logger.warning(f"[CookingStepsAgent.batch] No steps generated for '{dish_name}'")
+            return {"dish_name": dish_name, "cooking_steps": [], "saved": False, "schedule_id": None}
+
+        saved, effective_sid = await self._save_steps(
+            owner_id=owner_id,
+            schedule_id=schedule_id,
+            dish_name=dish_name,
+            steps=steps,
+            date=target_date,
+            meal_time=target_meal_time,
+            ingredients=ingredients,
+        )
+        self.logger.info(
+            f"[CookingStepsAgent.batch] '{dish_name}': {len(steps)} steps, saved={saved}, sid={effective_sid}"
+        )
+        return {
+            "dish_name": dish_name,
+            "cooking_steps": steps,
+            "saved": saved,
+            "schedule_id": effective_sid,
+            "date": target_date,
+            "meal_time": target_meal_time,
+        }
+
+    async def execute_batch(
+        self,
+        dish_names: List[str],
+        owner_id: int,
+        context: Optional[Dict[str, Any]] = None,
+        schedule_id: Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
+        """
+        Generate and persist cooking steps for multiple dishes in parallel.
+
+        Args:
+            dish_names:   List of canonical dish names to process.
+            owner_id:     User/owner ID.
+            context:      plan_ahead context (meal_plan_slots, dish_ingredients, schedule_id).
+            schedule_id:  Override schedule_id (if not already in context).
+
+        Returns:
+            List of result dicts, one per dish, in the same order as dish_names.
+            Any dish that raises an exception returns {"dish_name": ..., "error": "..."}.
+        """
+        # Prefer schedule_id from context if available
+        ctx_sid = None
+        if context and context.get("type") == "plan_ahead":
+            ctx_sid = (context.get("data") or {}).get("schedule_id")
+        effective_sid = ctx_sid or schedule_id
+
+        tasks = [
+            self._generate_and_save_for_dish(
+                dish_name=dish,
+                owner_id=owner_id,
+                schedule_id=effective_sid,
+                context=context,
+            )
+            for dish in dish_names
+        ]
+        raw = await asyncio.gather(*tasks, return_exceptions=True)
+        results: List[Dict[str, Any]] = []
+        for dish, outcome in zip(dish_names, raw):
+            if isinstance(outcome, Exception):
+                self.logger.error(f"[CookingStepsAgent.batch] Error for '{dish}': {outcome}")
+                results.append({"dish_name": dish, "cooking_steps": [], "saved": False, "error": str(outcome)})
+            else:
+                results.append(outcome)
+        return results
 
     # ------------------------------------------------------------------
     # Public API

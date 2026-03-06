@@ -282,7 +282,8 @@ class TestDishFromSchedule:
         assert mt == "breakfast"
 
     @pytest.mark.asyncio
-    async def test_falls_back_to_preferred_meal_time(self, agent):
+    async def test_falls_back_to_preferred_meal_time_when_no_hint(self, agent):
+        """Without a hint, fall back to the dish in the preferred meal slot."""
         today = date.today().isoformat()
         schedules = [
             _schedule_payload("麻婆豆腐", today, "lunch", sid=11),
@@ -303,6 +304,54 @@ class TestDishFromSchedule:
 
         assert dish == "清炒白菜"
         assert mt == "dinner"
+
+    @pytest.mark.asyncio
+    async def test_hint_mismatch_returns_none_not_wrong_dish(self, agent):
+        """
+        When a hint is given but NO dish in the schedule matches it,
+        return (None, None, None) instead of falling back to an unrelated dish.
+        This prevents e.g. generating steps for '牛排' when the user asked about '宫保鸡丁'.
+        """
+        today = date.today().isoformat()
+        # Schedule has '牛排' for dinner — user is asking about '宫保鸡丁'
+        schedules = [_schedule_payload("牛排", today, "dinner", sid=30)]
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status = MagicMock()
+        mock_resp.json.return_value = schedules
+
+        with patch("httpx.AsyncClient") as mock_cls:
+            client = AsyncMock()
+            client.get = AsyncMock(return_value=mock_resp)
+            client.__aenter__ = AsyncMock(return_value=client)
+            client.__aexit__ = AsyncMock(return_value=False)
+            mock_cls.return_value = client
+            with patch("app.agents.cooking_steps_agent._get_storage_base_url", return_value="http://storage"):
+                dish, sid, mt = await agent._dish_from_schedule(1, today, "dinner", dish_hint="宫保鸡丁")
+
+        # Should return None rather than wrongly returning '牛排'
+        assert dish is None
+        assert sid is None
+
+    @pytest.mark.asyncio
+    async def test_hint_partial_match_is_accepted(self, agent):
+        """Partial substring match should still succeed (hint '饺子' matches '速冻饺子')."""
+        today = date.today().isoformat()
+        schedules = [_schedule_payload("速冻饺子", today, "breakfast", sid=7)]
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status = MagicMock()
+        mock_resp.json.return_value = schedules
+
+        with patch("httpx.AsyncClient") as mock_cls:
+            client = AsyncMock()
+            client.get = AsyncMock(return_value=mock_resp)
+            client.__aenter__ = AsyncMock(return_value=client)
+            client.__aexit__ = AsyncMock(return_value=False)
+            mock_cls.return_value = client
+            with patch("app.agents.cooking_steps_agent._get_storage_base_url", return_value="http://storage"):
+                dish, sid, mt = await agent._dish_from_schedule(1, today, "breakfast", dish_hint="饺子")
+
+        assert dish == "速冻饺子"
+        assert sid == 7
 
     @pytest.mark.asyncio
     async def test_returns_none_when_no_storage_url(self, agent):
@@ -389,10 +438,34 @@ class TestGenerateSteps:
 
             await agent._generate_steps("回锅肉")
 
+        gen_cfg = captured["payload"]["generationConfig"]
+        # responseMimeType must NOT be set (it causes JSON truncation for long step lists)
+        assert "responseMimeType" not in gen_cfg
+        # maxOutputTokens must NOT be set — let the model decide the length
+        assert "maxOutputTokens" not in gen_cfg
         prompt_text = captured["payload"]["contents"][0]["parts"][0]["text"]
         assert "specific measurements" in prompt_text
         assert "exact ratio" in prompt_text
         assert "6-10 steps" in prompt_text
+
+    @pytest.mark.asyncio
+    async def test_generate_steps_handles_markdown_fenced_json(self, agent):
+        """_generate_steps should handle markdown-fenced JSON without responseMimeType."""
+        fenced = '```json\n{"steps": ["热锅冷油。", "加蒜爆香。"]}\n```'
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status = MagicMock()
+        mock_resp.json.return_value = {"candidates": [{"content": {"parts": [{"text": fenced}]}}]}
+
+        with patch("httpx.AsyncClient") as mock_cls:
+            client = AsyncMock()
+            client.post = AsyncMock(return_value=mock_resp)
+            client.__aenter__ = AsyncMock(return_value=client)
+            client.__aexit__ = AsyncMock(return_value=False)
+            mock_cls.return_value = client
+
+            result = await agent._generate_steps("蒜蓉炒菜")
+
+        assert result == ["热锅冷油。", "加蒜爆香。"]
 
 
 # ---------------------------------------------------------------------------
@@ -497,6 +570,142 @@ class TestExecute:
 
         assert result["data"]["cooking_steps"] == []
         assert "怪菜" in result["message"]
+
+
+# ---------------------------------------------------------------------------
+# execute_batch()
+# ---------------------------------------------------------------------------
+
+class TestExecuteBatch:
+
+    @pytest.mark.asyncio
+    async def test_generates_steps_for_multiple_dishes(self, agent):
+        """execute_batch should return one result per dish with steps populated."""
+        today = date.today().isoformat()
+        ctx = _plan_context({
+            today: {
+                "dinner": ["宫保鸡丁", "鱼香肉丝"],
+            }
+        })
+
+        call_count = {"n": 0}
+
+        async def fake_post(url, headers, json):
+            call_count["n"] += 1
+            text_input = json["contents"][0]["parts"][0]["text"]
+            if "宫保鸡丁" in text_input:
+                data = _gemini_steps_response(["步骤1：花生备好。", "步骤2：炒鸡丁。"])
+            else:
+                data = _gemini_steps_response(["步骤1：肉丝腌制。", "步骤2：爆炒。"])
+            return _make_response(data)
+
+        with patch("httpx.AsyncClient") as mock_cls, \
+             patch("app.agents.cooking_steps_agent._get_storage_base_url", return_value=None):
+            client = AsyncMock()
+            client.post = fake_post
+            client.__aenter__ = AsyncMock(return_value=client)
+            client.__aexit__ = AsyncMock(return_value=False)
+            mock_cls.return_value = client
+
+            results = await agent.execute_batch(
+                dish_names=["宫保鸡丁", "鱼香肉丝"],
+                owner_id=1,
+                context=ctx,
+            )
+
+        assert len(results) == 2
+        names = {r["dish_name"] for r in results}
+        assert names == {"宫保鸡丁", "鱼香肉丝"}
+        for r in results:
+            assert r["cooking_steps"], f"Expected steps for {r['dish_name']}"
+
+    @pytest.mark.asyncio
+    async def test_batch_resolves_date_and_meal_time_from_context(self, agent):
+        """Steps for each dish should carry the correct date/meal_time from slots."""
+        today = date.today().isoformat()
+        ctx = _plan_context({today: {"lunch": ["清炒白菜"]}})
+
+        async def fake_post(url, headers, json):
+            return _make_response(_gemini_steps_response(["热锅，放油。", "翻炒白菜。"]))
+
+        with patch("httpx.AsyncClient") as mock_cls, \
+             patch("app.agents.cooking_steps_agent._get_storage_base_url", return_value=None):
+            client = AsyncMock()
+            client.post = fake_post
+            client.__aenter__ = AsyncMock(return_value=client)
+            client.__aexit__ = AsyncMock(return_value=False)
+            mock_cls.return_value = client
+
+            results = await agent.execute_batch(["清炒白菜"], owner_id=1, context=ctx)
+
+        assert results[0]["date"] == today
+        assert results[0]["meal_time"] == "lunch"
+
+    @pytest.mark.asyncio
+    async def test_batch_partial_failure_returns_error_entry(self, agent):
+        """If one dish fails (exception), its result should have an 'error' key."""
+        call_count = {"n": 0}
+
+        async def fake_post(url, headers, json):
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                raise RuntimeError("LLM exploded")
+            return _make_response(_gemini_steps_response(["步骤1。", "步骤2。"]))
+
+        with patch("httpx.AsyncClient") as mock_cls, \
+             patch("app.agents.cooking_steps_agent._get_storage_base_url", return_value=None):
+            client = AsyncMock()
+            client.post = fake_post
+            client.__aenter__ = AsyncMock(return_value=client)
+            client.__aexit__ = AsyncMock(return_value=False)
+            mock_cls.return_value = client
+
+            results = await agent.execute_batch(["宫保鸡丁", "番茄炒蛋"], owner_id=1)
+
+        assert len(results) == 2
+        failed = next(r for r in results if r["dish_name"] == "宫保鸡丁")
+        success = next(r for r in results if r["dish_name"] == "番茄炒蛋")
+        assert "error" in failed or failed["cooking_steps"] == []
+        assert success["cooking_steps"] != []
+
+    @pytest.mark.asyncio
+    async def test_batch_uses_schedule_id_from_context(self, agent):
+        """execute_batch should pass the schedule_id from context to _save_steps."""
+        today = date.today().isoformat()
+        ctx = {
+            "type": "plan_ahead",
+            "data": {
+                "schedule_id": 42,
+                "meal_plan_slots": {today: {"dinner": ["红烧肉"]}},
+                "dish_ingredients": {},
+            },
+        }
+        patched_calls: list = []
+
+        async def fake_patch(sid, oid, dish, steps, d, mt):
+            patched_calls.append(sid)
+            return True
+
+        async def fake_post(url, headers, json):
+            return _make_response(_gemini_steps_response(["步骤1。", "步骤2。"]))
+
+        with patch("httpx.AsyncClient") as mock_cls, \
+             patch.object(agent, "_patch_schedule", fake_patch), \
+             patch("app.agents.cooking_steps_agent._get_storage_base_url", return_value="http://x"):
+            client = AsyncMock()
+            client.post = fake_post
+            client.__aenter__ = AsyncMock(return_value=client)
+            client.__aexit__ = AsyncMock(return_value=False)
+            mock_cls.return_value = client
+
+            await agent.execute_batch(["红烧肉"], owner_id=1, context=ctx)
+
+        assert 42 in patched_calls
+
+    @pytest.mark.asyncio
+    async def test_batch_empty_dish_list_returns_empty(self, agent):
+        results = await agent.execute_batch(dish_names=[], owner_id=1)
+        assert results == []
 
 
 # ---------------------------------------------------------------------------

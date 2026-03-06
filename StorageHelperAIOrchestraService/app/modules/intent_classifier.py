@@ -20,9 +20,18 @@ class Intent(str, Enum):
 
 
 class IntentClassificationResult(BaseModel):
-    intent: Intent = Field(..., description="The detected intent of the user. MUST be one of: SEARCH, UPDATE, PLAN_EAT_OUT, PLAN_AHEAD, COOKING_STEPS, GENERAL.")
+    intent: Intent = Field(..., description="The PRIMARY intent of the user.")
     confidence: float = Field(..., description="Confidence score from 0.0 to 1.0.")
     reasoning: str = Field(..., description="Brief explanation of why this intent was chosen.")
+    compound_intents: Optional[List[Intent]] = Field(
+        default=None,
+        description="All intents present when the message contains multiple distinct tasks. "
+                    "Omit or set to null when there is only one task.",
+    )
+    extracted_items: Optional[List[str]] = Field(
+        default=None,
+        description="Dish/item names explicitly mentioned in the message, used for batch operations.",
+    )
 
 class IntentClassifier:
     """
@@ -52,8 +61,9 @@ You are an expert Intent Classifier for a Home AI Agent. Your task is to analyze
    - CRITICAL: If recent conversation history shows the user is in the middle of planning meals, phrases like "what I have", "what do I have now", "what plan" mean "show my meal plan" — use PLAN_AHEAD, NOT SEARCH.
    - When in meal planning context, "change X's meal" = PLAN_AHEAD, NOT UPDATE.
 
-5. **COOKING_STEPS**: The user wants the FULL step-by-step cooking workflow for a dish they haven't discussed yet (or a completely different dish).
+5. **COOKING_STEPS**: The user wants the FULL step-by-step cooking workflow for a dish they haven't discussed yet (or a completely different dish), OR they want to SAVE / REPLACE previously generated steps in the plan.
    - Example: "怎么做呢", "怎么做", "怎么做这道菜", "how to cook this", "how do I make this", "做法是什么", "教我怎么做", "步骤是什么", "cooking steps", "recipe", "how to prepare it".
+   - Save/replace triggers: "把步骤加进去", "保存步骤", "存起来", "记录下来", "把做法保存", "save the steps", "add steps to plan", "store the recipe", "记下来", "替换现有的方案", "替换步骤", "换成这个方法", "用这个方案", "替换成这个".
    - CRITICAL: When the conversation context involves meal planning and the user asks how to cook something, ALWAYS classify as COOKING_STEPS, NOT GENERAL.
    - NOT for: follow-up questions about a dish already discussed (use RECIPE_QA instead).
 
@@ -70,11 +80,21 @@ PRIORITY RULE: If the recent conversation (last few turns) is about planning mea
 COOKING_STEPS PRIORITY: If the user asks how to cook something (怎么做, how to make, steps, recipe instructions) — especially when recent context involves meal planning — ALWAYS classify as COOKING_STEPS, not GENERAL.
 RECIPE_QA PRIORITY: If an active recipe is being discussed AND the user asks a specific factual question about it (ratios, amounts, substitutions, timing), always use RECIPE_QA — it goes directly to the LLM for a fast, expert answer without re-generating the full recipe.
 
+COMPOUND INTENT RULE: When the user's message contains TWO distinct tasks in a single sentence, set "compound_intents" to the full list and "intent" to the PRIMARY task (the one to do first).
+- "今天晚上加宫保鸡丁和鱼香肉丝，附上做法" → primary: PLAN_AHEAD, compound: ["PLAN_AHEAD","COOKING_STEPS"], extracted_items: ["宫保鸡丁","鱼香肉丝"]
+- "加上番茄炒蛋并告诉我怎么做" → primary: PLAN_AHEAD, compound: ["PLAN_AHEAD","COOKING_STEPS"], extracted_items: ["番茄炒蛋"]
+- "帮我搜一下牛奶，然后更新它的数量" → primary: SEARCH, compound: ["SEARCH","UPDATE"]
+- Single-task messages: omit compound_intents (or set to null).
+For compound PLAN_AHEAD+COOKING_STEPS, always list PLAN_AHEAD first so dishes are added before steps are generated.
+Always populate "extracted_items" with any dish/food names explicitly mentioned.
+
 Respond ONLY with a JSON object that strictly adheres to the following schema:
 {
   "intent": "SEARCH" | "UPDATE" | "PLAN_EAT_OUT" | "PLAN_AHEAD" | "COOKING_STEPS" | "RECIPE_QA" | "GENERAL",
   "confidence": number (0.0 to 1.0),
-  "reasoning": "string"
+  "reasoning": "string",
+  "compound_intents": ["INTENT1", "INTENT2"] | null,
+  "extracted_items": ["item1", "item2"] | null
 }
 """
 
@@ -119,8 +139,14 @@ Respond ONLY with a JSON object that strictly adheres to the following schema:
                 "(e.g. sauce ratios, ingredient amounts, timing, technique, substitutions, "
                 "clarifications about a specific step), classify as RECIPE_QA — "
                 "this routes directly to the LLM for a fast, expert answer without re-generating steps.\n"
-                "- Only classify as COOKING_STEPS if the user is clearly asking to cook a "
-                "DIFFERENT dish (e.g. 'how do I make 番茄炒蛋?').\n"
+                "- If the user wants to SAVE, ADD, or REPLACE the steps "
+                "('把步骤加进去', '保存步骤', '存起来', '记录下来', 'save the steps', 'add steps to plan', "
+                "'替换现有的方案', '替换步骤', '换成这个方法', '用这个方案', '替换成这个'), "
+                "classify as COOKING_STEPS — this triggers the save/replace flow.\n"
+                "- If the user CONFIRMS a previous action with '确定', '好的', '是的', '对', 'yes', '确认', "
+                "classify as COOKING_STEPS — they are confirming the save or replacement of recipe steps.\n"
+                "- Only classify as COOKING_STEPS for a DIFFERENT dish (e.g. 'how do I make 番茄炒蛋?'), "
+                "OR to save/replace steps.\n"
                 "=== END SESSION CONTEXT ===\n\n"
             )
         elif session_mode == "PLANNING":

@@ -1,0 +1,22 @@
+{
+  "timestamp": "20260306_135457",
+  "dish": "Kung Pao Chicken [cross-domain test]",
+  "score": 0.0704,
+  "verdict": null,
+  "layer": "cosine",
+  "diff": {
+    "golden": "cubechickenmarinatewithsoysaucetoastpeanutsstirfrychiliesandsichuanpeppercornsaddchickenpoursoysauceandvinegarsaucetopwithpeanuts",
+    "candidate": "abinarysearchtreeinsertsanddeletesnodesinlogarithmictimebalancingalgorithmssuchasavlorredblacktreesmaintainheightbounds"
+  },
+  "side_by_side": [
+    [
+      "cubechickenmarinatewithsoysaucetoastpeanutsstirfrychiliesandsichuanpeppercornsaddchickenpoursoysauceandvinegarsaucetopwithpeanuts",
+      "abinarysearchtreeinsertsanddeletesnodesinlogarithmictimebalancingalgorithmssuchasavlorredblacktreesmaintainheightbounds"
+    ]
+  ],
+  "extra": {
+    "n": 3,
+    "expected": "< 0.05",
+    "got": 0.07044771771940649
+  }
+}
