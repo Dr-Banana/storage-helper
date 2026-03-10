@@ -17,6 +17,10 @@ class UserCreate(BaseModel):
     note: Optional[str] = Field(None, max_length=1000, description="Optional user note")
     cooking_level: CookingLevel = Field("beginner", description="User cooking skill level")
     language: UserLanguage = Field("zh", description="Preferred language for AI responses")
+    default_servings: int = Field(1, ge=1, le=20, description="Default number of servings to generate")
+    meat_veg_ratio: str = Field("1:1:1", description="Dish count ratio: meat:veg:staple (e.g. '1:1:1')")
+    include_soup: bool = Field(True, description="Whether soup must be included in every meal plan")
+    calorie_target: Optional[int] = Field(None, ge=100, le=5000, description="Optional per-meal calorie target in kcal")
 
 
 class UserUpdate(BaseModel):
@@ -25,6 +29,10 @@ class UserUpdate(BaseModel):
     note: Optional[str] = Field(None, max_length=1000, description="Optional user note")
     cooking_level: Optional[CookingLevel] = Field(None, description="User cooking skill level")
     language: Optional[UserLanguage] = Field(None, description="Preferred language for AI responses")
+    default_servings: Optional[int] = Field(None, ge=1, le=20, description="Default number of servings to generate")
+    meat_veg_ratio: Optional[str] = Field(None, description="Dish count ratio: meat:veg:staple (e.g. '1:1:1')")
+    include_soup: Optional[bool] = Field(None, description="Whether soup must be included in every meal plan")
+    calorie_target: Optional[int] = Field(None, ge=100, le=5000, description="Optional per-meal calorie target in kcal")
 
 
 class UserResponse(BaseModel):
@@ -36,6 +44,10 @@ class UserResponse(BaseModel):
     note: Optional[str] = None
     cooking_level: CookingLevel = "beginner"
     language: UserLanguage = "zh"
+    default_servings: int = 1
+    meat_veg_ratio: str = "1:1:1"
+    include_soup: bool = True
+    calorie_target: Optional[int] = None
     created_at: datetime
     updated_at: datetime
 

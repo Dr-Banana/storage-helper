@@ -65,8 +65,20 @@ try:
         _conn.execute(_sql_text(
             "ALTER TABLE \"user\" ADD COLUMN IF NOT EXISTS language VARCHAR(10) NOT NULL DEFAULT 'zh'"
         ))
+        _conn.execute(_sql_text(
+            "ALTER TABLE \"user\" ADD COLUMN IF NOT EXISTS default_servings INTEGER NOT NULL DEFAULT 1"
+        ))
+        _conn.execute(_sql_text(
+            "ALTER TABLE \"user\" ADD COLUMN IF NOT EXISTS meat_veg_ratio VARCHAR(20) NOT NULL DEFAULT '1:1:1'"
+        ))
+        _conn.execute(_sql_text(
+            "ALTER TABLE \"user\" ADD COLUMN IF NOT EXISTS include_soup BOOLEAN NOT NULL DEFAULT true"
+        ))
+        _conn.execute(_sql_text(
+            "ALTER TABLE \"user\" ADD COLUMN IF NOT EXISTS calorie_target INTEGER"
+        ))
         _conn.commit()
-    logger.info("DB migration: storage_location.content_analysis, user.cooking_level, user.language columns ensured")
+    logger.info("DB migration: storage_location.content_analysis, user.cooking_level, user.language, user.dining_preference columns ensured")
 except Exception as _e:
     logger.warning(f"DB migration check skipped: {_e}")
 

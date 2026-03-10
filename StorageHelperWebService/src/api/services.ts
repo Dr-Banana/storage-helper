@@ -30,6 +30,10 @@ export interface User {
   note?: string
   cooking_level: CookingLevel
   language: UserLanguage
+  default_servings: number
+  meat_veg_ratio: string
+  include_soup: boolean
+  calorie_target?: number | null
   created_at: string
   updated_at: string
 }
@@ -231,7 +235,7 @@ export const userService = {
    * Update user
    * PATCH /api/users/{user_id}
    */
-  update: async (id: number, data: Partial<{ display_name: string; note: string; cooking_level: CookingLevel; language: UserLanguage }>): Promise<User> => {
+  update: async (id: number, data: Partial<{ display_name: string; note: string; cooking_level: CookingLevel; language: UserLanguage; default_servings: number; meat_veg_ratio: string; include_soup: boolean; calorie_target: number | null }>): Promise<User> => {
     const response = await apiClient.patch(`/users/${id}`, data)
     return response.data
   },

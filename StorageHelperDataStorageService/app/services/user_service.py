@@ -111,7 +111,16 @@ class UserService:
                 user.cooking_level = user_data.cooking_level
             if user_data.language is not None:
                 user.language = user_data.language
-            
+            if user_data.default_servings is not None:
+                user.default_servings = user_data.default_servings
+            if user_data.meat_veg_ratio is not None:
+                user.meat_veg_ratio = user_data.meat_veg_ratio
+            if user_data.include_soup is not None:
+                user.include_soup = user_data.include_soup
+            # calorie_target can be explicitly set to None to clear it
+            if hasattr(user_data, 'calorie_target') and 'calorie_target' in user_data.model_fields_set:
+                user.calorie_target = user_data.calorie_target
+
             db.commit()
             db.refresh(user)
             return user
