@@ -2,8 +2,11 @@
 Pydantic schemas for User
 """
 from datetime import datetime
-from typing import Optional
-from pydantic import BaseModel, Field, EmailStr
+from typing import Literal, Optional
+from pydantic import BaseModel, Field, EmailStr, field_validator
+
+CookingLevel = Literal["beginner", "intermediate", "expert"]
+UserLanguage = Literal["zh", "en", "ja", "ko"]
 
 
 class UserCreate(BaseModel):
@@ -12,12 +15,16 @@ class UserCreate(BaseModel):
     email: EmailStr = Field(..., description="User email")
     display_name: str = Field(..., min_length=1, max_length=100, description="User display name")
     note: Optional[str] = Field(None, max_length=1000, description="Optional user note")
+    cooking_level: CookingLevel = Field("beginner", description="User cooking skill level")
+    language: UserLanguage = Field("zh", description="Preferred language for AI responses")
 
 
 class UserUpdate(BaseModel):
     """Schema for updating a user"""
     display_name: Optional[str] = Field(None, min_length=1, max_length=100, description="User display name")
     note: Optional[str] = Field(None, max_length=1000, description="Optional user note")
+    cooking_level: Optional[CookingLevel] = Field(None, description="User cooking skill level")
+    language: Optional[UserLanguage] = Field(None, description="Preferred language for AI responses")
 
 
 class UserResponse(BaseModel):
@@ -27,6 +34,8 @@ class UserResponse(BaseModel):
     email: str
     display_name: str
     note: Optional[str] = None
+    cooking_level: CookingLevel = "beginner"
+    language: UserLanguage = "zh"
     created_at: datetime
     updated_at: datetime
 

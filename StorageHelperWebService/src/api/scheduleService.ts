@@ -95,6 +95,24 @@ class ScheduleService {
   static async deleteSchedule(id: number): Promise<void> {
     await apiClient.delete(`/schedule/${id}`);
   }
+
+  /**
+   * Overwrite cooking steps and ingredients for a specific dish in a schedule.
+   * Used by the RecipeDiffCard "Save this version" button.
+   */
+  static async updateCookingSteps(
+    scheduleId: number,
+    payload: {
+      dish_name: string;
+      steps: string[];
+      ingredients?: { name: string; quantity: string }[];
+      date?: string;
+      meal_time?: string;
+    },
+  ): Promise<Schedule> {
+    const response = await apiClient.patch(`/schedule/${scheduleId}/cooking-steps`, payload);
+    return response.data;
+  }
 }
 
 export default ScheduleService;

@@ -15,7 +15,8 @@ class Intent(str, Enum):
     PLAN_EAT_OUT = "PLAN_EAT_OUT"
     PLAN_AHEAD = "PLAN_AHEAD"
     COOKING_STEPS = "COOKING_STEPS"
-    RECIPE_QA = "RECIPE_QA"   # Follow-up parameter query about a dish already discussed
+    RECIPE_QA = "RECIPE_QA"       # Follow-up parameter query about a dish already discussed
+    MODIFY_RECIPE = "MODIFY_RECIPE"  # Tweak ingredient quantity in an existing recipe step
     GENERAL = "GENERAL"
 
 
@@ -72,8 +73,15 @@ You are an expert Intent Classifier for a Home AI Agent. Your task is to analyze
    - Example (after discussing 蒜泥白肉): "酱料比例是多少", "多少克蒜", "可以不放辣椒油吗", "火要开多大", "第三步要煮多久", "有没有不辣的版本", "what's the ratio", "how much soy sauce", "can I substitute X".
    - Key signal: the question assumes context ("that sauce", "this dish", "第三步") OR names the dish already discussed.
    - Use RECIPE_QA (not COOKING_STEPS) when the user is clearly following up, not starting fresh.
+   - NOT for: requests to CHANGE or INCREASE/DECREASE an ingredient quantity — use MODIFY_RECIPE.
 
-7. **GENERAL**: Basic greetings, general conversation, or queries that don't fit the above tasks.
+7. **MODIFY_RECIPE**: The user wants to CHANGE THE QUANTITY or AMOUNT of a specific ingredient in an already-generated recipe.
+   - Requires an active cooking context (steps must already exist in the conversation).
+   - Triggers: "多放", "少放", "再多一点", "再少一点", "减少", "增加", "改成", "换成更多", "多一点", "少一点", "放多点", "放少点", "多加", "少加", "能不能多放", "more of", "less of", "increase", "decrease", "add more", "reduce".
+   - Examples: "第3步我想多放一点酱油", "酱油再多放一些", "少放点盐", "把步骤5里的油改成30ml", "I want more garlic in step 2", "can you reduce the salt?".
+   - If no active cooking context, fall back to RECIPE_QA.
+
+8. **GENERAL**: Basic greetings, general conversation, or queries that don't fit the above tasks.
    - Example: "Hello", "How are you?", "What can you do?".
 
 PRIORITY RULE: If the recent conversation (last few turns) is about planning meals for next week, and the user says something ambiguous like "what I have" or "change Monday's meal", prefer PLAN_AHEAD over SEARCH or UPDATE.
@@ -90,7 +98,7 @@ Always populate "extracted_items" with any dish/food names explicitly mentioned.
 
 Respond ONLY with a JSON object that strictly adheres to the following schema:
 {
-  "intent": "SEARCH" | "UPDATE" | "PLAN_EAT_OUT" | "PLAN_AHEAD" | "COOKING_STEPS" | "RECIPE_QA" | "GENERAL",
+  "intent": "SEARCH" | "UPDATE" | "PLAN_EAT_OUT" | "PLAN_AHEAD" | "COOKING_STEPS" | "RECIPE_QA" | "MODIFY_RECIPE" | "GENERAL",
   "confidence": number (0.0 to 1.0),
   "reasoning": "string",
   "compound_intents": ["INTENT1", "INTENT2"] | null,
@@ -139,6 +147,9 @@ Respond ONLY with a JSON object that strictly adheres to the following schema:
                 "(e.g. sauce ratios, ingredient amounts, timing, technique, substitutions, "
                 "clarifications about a specific step), classify as RECIPE_QA — "
                 "this routes directly to the LLM for a fast, expert answer without re-generating steps.\n"
+                "- If the user wants to CHANGE A QUANTITY or AMOUNT of an ingredient in the existing steps "
+                "(e.g. '多放酱油', '少放盐', '第3步再多加点油', 'more garlic', 'reduce the salt', 'increase soy sauce'), "
+                "classify as MODIFY_RECIPE — this triggers the step-modification flow.\n"
                 "- If the user wants to SAVE, ADD, or REPLACE the steps "
                 "('把步骤加进去', '保存步骤', '存起来', '记录下来', 'save the steps', 'add steps to plan', "
                 "'替换现有的方案', '替换步骤', '换成这个方法', '用这个方案', '替换成这个'), "

@@ -43,12 +43,20 @@ def get_plan_state(owner_id: int) -> Dict[str, Any]:
             # Enables follow-up questions ("酱料比例?") to be answered conversationally
             # instead of re-triggering a full COOKING_STEPS generation.
             "cooking_context": state.get("cooking_context"),
+            # Deferred modification request (pending user confirmation).
+            # Set when MODIFY_RECIPE intent confidence < 0.8 so the next turn can
+            # execute the modification if the user confirms with "yes".
+            "pending_modify_action": state.get("pending_modify_action"),
+            # Pending recipe overwrite (ASK_OVERWRITE flow).
+            # Holds the proposed new recipe when the dish already has a saved recipe,
+            # waiting for the user to click "Save this version" in the RecipeDiffCard.
+            "pending_overwrite": state.get("pending_overwrite"),
             "updated_at": state.get("updated_at"),
         }
     return {
         "meal_plan": {}, "shopping_list": [], "meal_plan_slots": {}, "dish_ingredients": {},
         "is_draft": False, "draft_base_db_dates": set(), "last_pipeline_action": None,
-        "cooking_context": None,
+        "cooking_context": None, "pending_modify_action": None, "pending_overwrite": None,
     }
 
 
@@ -63,6 +71,8 @@ def update_plan_state(
     draft_base_db_dates: Optional[Set[str]] = None,  # snapshot of DB dates at draft creation
     last_pipeline_action: Optional[str] = _UNSET,  # last action returned by pipeline
     cooking_context = _UNSET,  # Dict with dish_name + steps, or None to clear
+    pending_modify_action = _UNSET,  # Deferred MODIFY_RECIPE request awaiting user confirmation
+    pending_overwrite = _UNSET,  # Proposed recipe overwrite awaiting user confirmation
     merge: bool = True,
 ) -> Dict[str, Any]:
     """
@@ -159,6 +169,18 @@ def update_plan_state(
             current.pop("cooking_context", None)
         else:
             current["cooking_context"] = cooking_context
+
+    if pending_modify_action is not _UNSET:
+        if pending_modify_action is None:
+            current.pop("pending_modify_action", None)
+        else:
+            current["pending_modify_action"] = pending_modify_action
+
+    if pending_overwrite is not _UNSET:
+        if pending_overwrite is None:
+            current.pop("pending_overwrite", None)
+        else:
+            current["pending_overwrite"] = pending_overwrite
 
     current["updated_at"] = datetime.now(timezone.utc)
     _plan_states[owner_id] = current

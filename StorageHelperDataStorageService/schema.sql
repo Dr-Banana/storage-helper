@@ -14,6 +14,7 @@ CREATE TABLE "user" (
     email           VARCHAR(255) UNIQUE NOT NULL,  -- Google account email
     display_name    VARCHAR(100) NOT NULL,
     note            TEXT,
+    cooking_level   VARCHAR(20) NOT NULL DEFAULT 'beginner',  -- beginner | intermediate | expert
     created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );

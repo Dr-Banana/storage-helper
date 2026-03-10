@@ -431,3 +431,115 @@ class TestInventorySorting:
         ctx_saved = pipeline._build_context(self._empty_state(), None, is_draft=False)
         assert "DRAFT MEAL PLAN" in ctx_draft
         assert "CURRENT MEAL PLAN" in ctx_saved
+
+
+class TestBuildContextCookingLevelAndLanguage:
+    """Tests for the cooking_level and language sections added to _build_context."""
+
+    def _pipeline(self):
+        return PlanAheadPipeline(gemini_api_url="http://fake")
+
+    def _empty_state(self):
+        return {"meal_plan_slots": {}, "dish_ingredients": {}, "meal_plan": {}}
+
+    def test_beginner_section_present(self):
+        ctx = self._pipeline()._build_context(self._empty_state(), None, cooking_level="beginner")
+        assert "COOKING LEVEL" in ctx.upper() or "USER COOKING LEVEL" in ctx
+        assert "beginner" in ctx.lower() or "Beginner" in ctx
+
+    def test_intermediate_section_present(self):
+        ctx = self._pipeline()._build_context(self._empty_state(), None, cooking_level="intermediate")
+        assert "intermediate" in ctx.lower() or "Intermediate" in ctx or "Some Experience" in ctx
+
+    def test_expert_section_present(self):
+        ctx = self._pipeline()._build_context(self._empty_state(), None, cooking_level="expert")
+        assert "expert" in ctx.lower() or "Experienced Cook" in ctx
+
+    def test_unknown_level_falls_back_to_beginner(self):
+        """An unrecognised cooking_level should be treated as beginner."""
+        ctx = self._pipeline()._build_context(self._empty_state(), None, cooking_level="ninja")
+        assert "Beginner" in ctx or "beginner" in ctx.lower()
+
+    def test_language_zh_in_context(self):
+        ctx = self._pipeline()._build_context(self._empty_state(), None, language="zh")
+        assert "LANGUAGE REQUIREMENT" in ctx.upper() or "Simplified Chinese" in ctx
+
+    def test_language_en_in_context(self):
+        ctx = self._pipeline()._build_context(self._empty_state(), None, language="en")
+        assert "English" in ctx
+
+    def test_language_ja_in_context(self):
+        ctx = self._pipeline()._build_context(self._empty_state(), None, language="ja")
+        assert "Japanese" in ctx or "日本語" in ctx
+
+    def test_language_critical_rule_present(self):
+        """CRITICAL language rule must be present regardless of language chosen."""
+        for lang in ("zh", "en", "ja", "ko"):
+            ctx = self._pipeline()._build_context(self._empty_state(), None, language=lang)
+            assert "CRITICAL" in ctx or "MUST" in ctx
+
+    def test_scheduling_context_injected(self):
+        """When scheduling_context is provided, it appears in the output."""
+        ctx = self._pipeline()._build_context(
+            self._empty_state(), None,
+            scheduling_context="占用: 周三午餐 — 公司聚餐",
+        )
+        assert "公司聚餐" in ctx
+        assert "LIVE CALENDAR" in ctx.upper() or "SchedulingAgent" in ctx
+
+    def test_no_scheduling_context_adds_anti_dup_rule(self):
+        """Without scheduling_context, the single-source anti-duplication rule is present."""
+        ctx = self._pipeline()._build_context(self._empty_state(), None)
+        assert "ANTI-DUPLICATION" in ctx.upper() or "Do NOT add" in ctx
+
+
+class TestPlanAheadPipelineStaleStateCleanup:
+    """Tests for the stale in-memory state cleanup when DB has no meal plan."""
+
+    def setup_method(self):
+        from app.modules.plan_ahead_state import _plan_states
+        _plan_states.clear()
+
+    def test_stale_state_cleared_when_db_empty(self):
+        """If DB returns no plan but in-memory has a stale schedule_id, it should be cleared."""
+        from app.modules.plan_ahead_state import update_plan_state, get_plan_state
+
+        owner_id = 42
+        # Seed in-memory state with stale data
+        update_plan_state(
+            owner_id=owner_id,
+            meal_plan={"2026-03-10": "宫保鸡丁"},
+            schedule_id=999,
+            meal_plan_slots={"2026-03-10": {"dinner": ["宫保鸡丁"]}},
+            merge=False,
+        )
+        assert get_plan_state(owner_id)["schedule_id"] == 999
+
+        # Simulate the pipeline receiving an empty DB state (user deleted the plan on Web UI)
+        from app.modules.plan_ahead_state import update_plan_state as _upd
+        _upd(
+            owner_id=owner_id,
+            meal_plan={},
+            shopping_list=[],
+            schedule_id=None,
+            meal_plan_slots={},
+            dish_ingredients={},
+            is_draft=False,
+            last_pipeline_action=None,
+            merge=False,
+        )
+
+        state = get_plan_state(owner_id)
+        assert state["schedule_id"] is None
+        assert state["meal_plan"] == {}
+        assert state["meal_plan_slots"] == {}
+
+    def test_fresh_state_not_affected_by_empty_db(self):
+        """A user with no prior state should still have clean defaults."""
+        from app.modules.plan_ahead_state import get_plan_state
+
+        state = get_plan_state(owner_id=99)
+        # schedule_id is absent (or None) from a brand-new state
+        assert state.get("schedule_id") is None
+        assert state["meal_plan"] == {}
+        assert state["is_draft"] is False

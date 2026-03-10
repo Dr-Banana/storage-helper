@@ -658,6 +658,8 @@ async def chat_with_agent(request: ChatRequest):
             history=history_dicts,
             context=request.context,
             user_timezone=request.user_timezone,
+            cooking_level=request.cooking_level or "beginner",
+            language=request.language or "zh",
         )
         
         return ChatResponse(

@@ -99,6 +99,9 @@ class PlanAheadPipeline:
         user_timezone: Optional[str],
         inventory_items: Optional[List[Dict[str, Any]]] = None,
         is_draft: bool = False,
+        cooking_level: Optional[str] = "beginner",
+        language: Optional[str] = "zh",
+        scheduling_context: Optional[str] = None,
     ) -> str:
         """Build system context string for the single-shot structured LLM call."""
         now = self._now_in_timezone(user_timezone)
@@ -170,6 +173,71 @@ class PlanAheadPipeline:
         else:
             ctx += "\n(No food items found — recommend based on common ingredients)\n"
 
+        # --- Cooking level section ---
+        _level_map = {
+            "beginner": "Complete Beginner (no cooking experience)",
+            "intermediate": "Some Experience (knows basic techniques)",
+            "expert": "Experienced Cook (can handle complex recipes)",
+        }
+        _level_label = _level_map.get(cooking_level or "beginner", _level_map["beginner"])
+        ctx += f"\n\n=== USER COOKING LEVEL: {_level_label} ==="
+        if cooking_level == "beginner":
+            ctx += (
+                "\nThis user is a complete beginner. When recommending meals:"
+                "\n- Suggest simple, beginner-friendly dishes with minimal steps (e.g. stir-fries, fried eggs, simple soups)."
+                "\n- Avoid dishes requiring advanced knife skills, precise temperatures, or complex techniques."
+                "\n- Prefer dishes with fewer than 5 ingredients when possible."
+            )
+        elif cooking_level == "intermediate":
+            ctx += (
+                "\nThis user has some cooking experience. When recommending meals:"
+                "\n- Suggest moderately complex dishes (e.g. braised meats, dumplings, multi-component stir-fries)."
+                "\n- Include dishes that require basic techniques like marinating, blanching, or sauce-making."
+                "\n- Balance simplicity with variety."
+            )
+        elif cooking_level == "expert":
+            ctx += (
+                "\nThis user is an experienced cook. When recommending meals:"
+                "\n- Feel free to suggest complex, multi-step dishes (e.g. Peking duck, hand-made noodles, elaborate stews)."
+                "\n- Include dishes requiring advanced techniques like deep-frying, precise timing, or complex flavor layering."
+                "\n- Prioritize variety, creativity, and culinary challenge."
+            )
+
+        # --- Language section ---
+        _lang_name_map = {
+            "zh": "Simplified Chinese (简体中文)",
+            "en": "English",
+            "ja": "Japanese (日本語)",
+            "ko": "Korean (한국어)",
+        }
+        _lang_name = _lang_name_map.get(language or "zh", _lang_name_map["zh"])
+        ctx += f"\n\n=== LANGUAGE REQUIREMENT (CRITICAL) ==="
+        ctx += (
+            f"\nYou MUST use {_lang_name} for ALL text content in your response — this includes:"
+            f"\n- 'user_message': must be in {_lang_name}."
+            f"\n- ALL ingredient 'name' fields inside meal_entries → dishes → ingredients: must be in {_lang_name}."
+            f"\n- ALL dish names inside meal_entries: must be in {_lang_name}."
+            f"\n- 'recommendation_reason' if present: must be in {_lang_name}."
+            f"\nDo NOT use English (or any other language) for ingredient names or dish names unless {_lang_name} is English."
+            f"\nThis rule overrides everything else, regardless of what language the user writes in."
+        )
+
+        # --- Live schedule context from SchedulingAgent ---
+        if scheduling_context:
+            ctx += "\n\n=== LIVE CALENDAR CONTEXT (from SchedulingAgent — most up-to-date) ==="
+            ctx += f"\n{scheduling_context}"
+            ctx += (
+                "\n\nCRITICAL ANTI-DUPLICATION RULES:"
+                "\n- Compare ANY dish you are about to add against BOTH the CURRENT MEAL PLAN above AND the LIVE CALENDAR CONTEXT."
+                "\n- If the same dish already exists in the same meal slot (date + meal_time), do NOT add it again."
+                "\n- If the user explicitly asks to add a dish that is already there, acknowledge the duplicate and ask for confirmation."
+            )
+        else:
+            ctx += (
+                "\n\nCRITICAL ANTI-DUPLICATION RULE:"
+                "\n- Do NOT add a dish to a meal slot if that slot already contains the same dish in the CURRENT MEAL PLAN above."
+            )
+
         ctx += "\n\n=== INSTRUCTIONS ==="
         ctx += (
             "\n1. Understand the user's intent and set 'action' to one of:"
@@ -184,10 +252,9 @@ class PlanAheadPipeline:
         ctx += "\n   - For unchanged dates, copy them exactly (same dishes + same ingredients)."
         ctx += "\n   - For changed dates, apply the user's modification."
         ctx += (
-            "\n   - Each dish MUST include ingredients as an array of objects."
-            " Each ingredient object MUST have 'name', 'category' (from the list below), and an optional 'quantity' (e.g. '200g', '2 pieces', '1 tbsp')."
-            "\n     category values: vegetable (all veg, fruit, mushroom, tofu), protein (meat, poultry, seafood, egg),"
-            " dairy (milk, cheese, butter), grain (rice, noodles, bread, flour), spice (salt, sugar, oil, sauce, herb), other."
+            f"\n   - Each dish MUST include ingredients as an array of objects."
+            f" Each ingredient object MUST have 'name' (write in {_lang_name}), 'category' (from the list below, keep in English), and an optional 'quantity' (e.g. '200g', '2 pieces', '1 tbsp')."
+            "\n     category values (keep these exact English codes): vegetable, protein, dairy, grain, spice, other."
         )
         ctx += "\n   - If user removes a date, omit it from meal_entries entirely."
         ctx += (
@@ -433,8 +500,17 @@ class PlanAheadPipeline:
     ) -> Optional[int]:
         """Persist changes to DB. Returns schedule_id or None."""
         if action == "remove" and target_date:
-            await self._delete_orphaned_schedules(owner_id, [target_date], storage_client)
-            return None
+            if target_date in new_meal_plan:
+                # Partial removal (e.g. only dinner removed; breakfast/lunch remain).
+                # Fall through to the normal persist path so the updated day is saved.
+                logger.info(
+                    f"[PLAN_AHEAD_PIPELINE] action=remove, target_date={target_date} still "
+                    f"present in new plan — persisting updated schedule instead of deleting."
+                )
+            else:
+                # Entire day was removed — delete the schedule for that date.
+                await self._delete_orphaned_schedules(owner_id, [target_date], storage_client)
+                return None
 
         # Find dates that were in the old plan but are absent from the new plan (e.g. move operation)
         old_dates = set((old_state.get("meal_plan") or {}).keys())
@@ -471,6 +547,8 @@ class PlanAheadPipeline:
         storage_client: Any,
         context: Optional[Dict] = None,
         intent_result: Any = None,
+        cooking_level: Optional[str] = "beginner",
+        language: Optional[str] = "zh",
     ) -> Dict[str, Any]:
         """
         Execute the full PLAN_AHEAD pipeline and return a chat.py-compatible result dict.
@@ -531,7 +609,30 @@ class PlanAheadPipeline:
             )
             current_state = get_plan_state(owner_id)
         else:
-            current_state = server_state
+            # DB returned no meal plan (empty or all schedules deleted).
+            # If in-memory state still carries a stale schedule_id or stale slots
+            # (from a plan the user deleted via the Web UI), clear it immediately.
+            # Without this, the stale state would be fed to the LLM as "CURRENT MEAL PLAN"
+            # and the deleted meals would get resurrected on the next chat turn.
+            if server_state.get("schedule_id") or server_state.get("meal_plan_slots"):
+                logger.info(
+                    f"[PLAN_AHEAD_PIPELINE] DB has no plan but in-memory has stale data "
+                    f"(schedule_id={server_state.get('schedule_id')}, "
+                    f"slots={list((server_state.get('meal_plan_slots') or {}).keys())}) — "
+                    f"clearing stale state for user {owner_id}."
+                )
+                update_plan_state(
+                    owner_id=owner_id,
+                    meal_plan={},
+                    shopping_list=[],
+                    schedule_id=None,
+                    meal_plan_slots={},
+                    dish_ingredients={},
+                    is_draft=False,
+                    last_pipeline_action=None,
+                    merge=False,
+                )
+            current_state = get_plan_state(owner_id)
 
         # Override with explicit context if provided
         if context and context.get("type") == "plan_ahead" and isinstance(context.get("data"), dict):
@@ -548,10 +649,14 @@ class PlanAheadPipeline:
         is_currently_draft = current_state.get("is_draft", False)
 
         # ---- Step 2: Build context ----
+        _scheduling_ctx = (context or {}).get("scheduling_context") if context else None
         system_context = self._build_context(
             current_state, user_timezone,
             inventory_items=inventory_items,
             is_draft=is_currently_draft,
+            cooking_level=cooking_level,
+            language=language,
+            scheduling_context=_scheduling_ctx,
         )
 
         # ---- Step 3: Single LLM call ----

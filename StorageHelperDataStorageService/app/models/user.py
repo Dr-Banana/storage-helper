@@ -7,6 +7,13 @@ from sqlalchemy.orm import relationship
 
 from app.core.database import Base
 
+COOKING_LEVEL_BEGINNER = "beginner"
+COOKING_LEVEL_INTERMEDIATE = "intermediate"
+COOKING_LEVEL_EXPERT = "expert"
+COOKING_LEVEL_VALUES = [COOKING_LEVEL_BEGINNER, COOKING_LEVEL_INTERMEDIATE, COOKING_LEVEL_EXPERT]
+
+USER_LANGUAGE_VALUES = ["zh", "en", "ja", "ko"]
+
 
 class User(Base):
     """User model"""
@@ -21,6 +28,8 @@ class User(Base):
     email = Column(String(255), unique=True, nullable=False, index=True)
     display_name = Column(String(100), nullable=False)
     note = Column(Text, nullable=True)
+    cooking_level = Column(String(20), nullable=False, server_default=COOKING_LEVEL_BEGINNER)
+    language = Column(String(10), nullable=False, server_default="zh")
     created_at = Column(DateTime, default=func.now(), nullable=False)
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now(), nullable=False)
 

@@ -402,7 +402,7 @@ class TestGenerateSteps:
 
             result = await agent._generate_steps("蒜泥白肉", ["五花肉", "大蒜", "生抽"])
 
-        assert result == steps
+        assert result["steps"] == steps
 
     @pytest.mark.asyncio
     async def test_returns_empty_list_on_api_error(self, agent):
@@ -415,7 +415,7 @@ class TestGenerateSteps:
 
             result = await agent._generate_steps("宫保鸡丁")
 
-        assert result == []
+        assert result["steps"] == []
 
     @pytest.mark.asyncio
     async def test_prompt_contains_measurement_requirement(self, agent):
@@ -444,9 +444,9 @@ class TestGenerateSteps:
         # maxOutputTokens must NOT be set — let the model decide the length
         assert "maxOutputTokens" not in gen_cfg
         prompt_text = captured["payload"]["contents"][0]["parts"][0]["text"]
-        assert "specific measurements" in prompt_text
-        assert "exact ratio" in prompt_text
-        assert "6-10 steps" in prompt_text
+        assert "exact quantities" in prompt_text
+        assert "specific number" in prompt_text
+        assert "6–8" in prompt_text
 
     @pytest.mark.asyncio
     async def test_generate_steps_handles_markdown_fenced_json(self, agent):
@@ -465,7 +465,7 @@ class TestGenerateSteps:
 
             result = await agent._generate_steps("蒜蓉炒菜")
 
-        assert result == ["热锅冷油。", "加蒜爆香。"]
+        assert result["steps"] == ["热锅冷油。", "加蒜爆香。"]
 
 
 # ---------------------------------------------------------------------------
@@ -682,7 +682,7 @@ class TestExecuteBatch:
         }
         patched_calls: list = []
 
-        async def fake_patch(sid, oid, dish, steps, d, mt):
+        async def fake_patch(sid, oid, dish, steps, d, mt, ingredients=None):
             patched_calls.append(sid)
             return True
 

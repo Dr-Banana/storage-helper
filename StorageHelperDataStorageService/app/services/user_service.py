@@ -38,7 +38,9 @@ class UserService:
                 google_id=user_data.google_id,
                 email=user_data.email,
                 display_name=user_data.display_name,
-                note=user_data.note
+                note=user_data.note,
+                cooking_level=user_data.cooking_level if hasattr(user_data, "cooking_level") and user_data.cooking_level else "beginner",
+                language=user_data.language if hasattr(user_data, "language") and user_data.language else "zh",
             )
             db.add(new_user)
             db.commit()
@@ -105,6 +107,10 @@ class UserService:
                 user.display_name = user_data.display_name
             if user_data.note is not None:
                 user.note = user_data.note
+            if user_data.cooking_level is not None:
+                user.cooking_level = user_data.cooking_level
+            if user_data.language is not None:
+                user.language = user_data.language
             
             db.commit()
             db.refresh(user)

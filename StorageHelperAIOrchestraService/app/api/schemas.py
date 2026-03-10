@@ -205,6 +205,8 @@ class ChatRequest(BaseModel):
     owner_id: int = Field(..., description="User ID associated with the chat")
     context: Optional[Dict[str, Any]] = Field(None, description="Optional context data (e.g. current document items for correction)")
     user_timezone: Optional[str] = Field(None, description="User's IANA timezone e.g. America/Los_Angeles for local date/time")
+    cooking_level: Optional[str] = Field("beginner", description="User cooking skill level: beginner | intermediate | expert")
+    language: Optional[str] = Field("zh", description="Preferred AI response language: zh | en | ja | ko")
 
 class ChatResponse(BaseModel):
     """Response from AI chat agent"""

@@ -35,6 +35,8 @@ class TestGetPlanState:
             "draft_base_db_dates": set(),
             "last_pipeline_action": None,
             "cooking_context": None,
+            "pending_modify_action": None,
+            "pending_overwrite": None,
         }
 
     def test_get_existing_state(self):
@@ -579,3 +581,98 @@ class TestCookingContext:
         state = get_plan_state(owner_id)
         assert state["cooking_context"]["dish_name"] == "蒜泥白肉"
         assert state["meal_plan"]["2026-03-10"] == "蒜泥白肉"
+
+
+# ---------------------------------------------------------------------------
+# pending_modify_action and pending_overwrite fields
+# ---------------------------------------------------------------------------
+
+class TestPendingModifyAction:
+    """Tests for the pending_modify_action deferred-confirmation field."""
+
+    def setup_method(self):
+        from app.modules.plan_ahead_state import _plan_states
+        _plan_states.clear()
+
+    def test_default_is_none(self):
+        state = get_plan_state(owner_id=1)
+        assert state["pending_modify_action"] is None
+
+    def test_set_pending_modify_action(self):
+        action = {"dish": "宫保鸡丁", "step_idx": 2, "ingredient": "酱油", "delta": "+10ml"}
+        update_plan_state(owner_id=1, pending_modify_action=action)
+        assert get_plan_state(owner_id=1)["pending_modify_action"] == action
+
+    def test_clear_pending_modify_action_with_none(self):
+        update_plan_state(owner_id=1, pending_modify_action={"dish": "x"})
+        update_plan_state(owner_id=1, pending_modify_action=None)
+        assert get_plan_state(owner_id=1)["pending_modify_action"] is None
+
+    def test_pending_modify_action_not_affected_by_other_updates(self):
+        """Updating unrelated fields must not clear pending_modify_action."""
+        action = {"dish": "番茄炒蛋", "delta": "-5g"}
+        update_plan_state(owner_id=1, pending_modify_action=action)
+        update_plan_state(owner_id=1, last_pipeline_action="ask")
+        assert get_plan_state(owner_id=1)["pending_modify_action"] == action
+
+    def test_pending_modify_action_cleared_on_clear_plan_state(self):
+        update_plan_state(owner_id=1, pending_modify_action={"dish": "x"})
+        clear_plan_state(owner_id=1)
+        assert get_plan_state(owner_id=1)["pending_modify_action"] is None
+
+    def test_overwrite_pending_modify_action(self):
+        """A second set should replace the first."""
+        update_plan_state(owner_id=1, pending_modify_action={"dish": "A"})
+        update_plan_state(owner_id=1, pending_modify_action={"dish": "B"})
+        assert get_plan_state(owner_id=1)["pending_modify_action"]["dish"] == "B"
+
+
+class TestPendingOverwrite:
+    """Tests for the pending_overwrite recipe-diff confirmation field."""
+
+    def setup_method(self):
+        from app.modules.plan_ahead_state import _plan_states
+        _plan_states.clear()
+
+    def test_default_is_none(self):
+        state = get_plan_state(owner_id=2)
+        assert state["pending_overwrite"] is None
+
+    def test_set_pending_overwrite(self):
+        payload = {"dish_name": "红烧肉", "new_steps": ["s1", "s2", "s3"]}
+        update_plan_state(owner_id=2, pending_overwrite=payload)
+        assert get_plan_state(owner_id=2)["pending_overwrite"] == payload
+
+    def test_clear_pending_overwrite_with_none(self):
+        update_plan_state(owner_id=2, pending_overwrite={"dish_name": "x"})
+        update_plan_state(owner_id=2, pending_overwrite=None)
+        assert get_plan_state(owner_id=2)["pending_overwrite"] is None
+
+    def test_pending_overwrite_not_affected_by_other_updates(self):
+        payload = {"dish_name": "鱼香肉丝", "new_steps": ["s1"]}
+        update_plan_state(owner_id=2, pending_overwrite=payload)
+        update_plan_state(owner_id=2, cooking_context={"dish_name": "蒜泥白肉", "steps": []})
+        assert get_plan_state(owner_id=2)["pending_overwrite"] == payload
+
+    def test_pending_overwrite_cleared_on_clear_plan_state(self):
+        update_plan_state(owner_id=2, pending_overwrite={"dish_name": "y"})
+        clear_plan_state(owner_id=2)
+        assert get_plan_state(owner_id=2)["pending_overwrite"] is None
+
+    def test_both_pending_fields_independent(self):
+        """pending_modify_action and pending_overwrite are stored independently."""
+        action = {"dish": "A", "delta": "+5g"}
+        overwrite = {"dish_name": "B", "new_steps": ["s1"]}
+        update_plan_state(owner_id=3, pending_modify_action=action, pending_overwrite=overwrite)
+        state = get_plan_state(owner_id=3)
+        assert state["pending_modify_action"] == action
+        assert state["pending_overwrite"] == overwrite
+
+    def test_clear_one_does_not_affect_other(self):
+        action = {"dish": "A"}
+        overwrite = {"dish_name": "B"}
+        update_plan_state(owner_id=3, pending_modify_action=action, pending_overwrite=overwrite)
+        update_plan_state(owner_id=3, pending_modify_action=None)
+        state = get_plan_state(owner_id=3)
+        assert state["pending_modify_action"] is None
+        assert state["pending_overwrite"] == overwrite

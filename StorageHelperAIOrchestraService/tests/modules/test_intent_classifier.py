@@ -40,9 +40,15 @@ class TestIntentEnum:
     def test_recipe_qa_in_enum(self):
         assert Intent.RECIPE_QA == "RECIPE_QA"
 
+    def test_modify_recipe_in_enum(self):
+        assert Intent.MODIFY_RECIPE == "MODIFY_RECIPE"
+
     def test_all_intents_present(self):
         names = {i.value for i in Intent}
-        assert names >= {"SEARCH", "UPDATE", "PLAN_AHEAD", "COOKING_STEPS", "RECIPE_QA", "GENERAL"}
+        assert names >= {
+            "SEARCH", "UPDATE", "PLAN_AHEAD", "COOKING_STEPS",
+            "RECIPE_QA", "MODIFY_RECIPE", "GENERAL",
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -360,3 +366,119 @@ class TestCompoundIntent:
         )
         assert r.compound_intents is None
         assert r.extracted_items is None
+
+
+# ---------------------------------------------------------------------------
+# MODIFY_RECIPE intent
+# ---------------------------------------------------------------------------
+
+class TestModifyRecipeIntent:
+    """Tests for the new MODIFY_RECIPE intent added alongside RECIPE_QA."""
+
+    @pytest.mark.asyncio
+    async def test_returns_modify_recipe_intent(self, classifier):
+        """LLM returning MODIFY_RECIPE is parsed correctly."""
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status = MagicMock()
+        mock_resp.json.return_value = _make_gemini_response("MODIFY_RECIPE", confidence=0.91)
+
+        with patch("httpx.AsyncClient") as mock_cls:
+            client = AsyncMock()
+            client.post = AsyncMock(return_value=mock_resp)
+            client.__aenter__ = AsyncMock(return_value=client)
+            client.__aexit__ = AsyncMock(return_value=False)
+            mock_cls.return_value = client
+
+            result = await classifier.classify(
+                "第3步我想多放一点酱油",
+                cooking_context={"dish_name": "宫保鸡丁", "steps": ["步骤1", "步骤2", "步骤3"]},
+            )
+
+        assert result.intent == Intent.MODIFY_RECIPE
+        assert result.confidence == pytest.approx(0.91)
+
+    @pytest.mark.asyncio
+    async def test_discussing_recipe_block_mentions_modify_recipe(self, classifier):
+        """DISCUSSING RECIPE session block should reference MODIFY_RECIPE trigger."""
+        captured = {}
+
+        async def fake_post(url, headers, json):
+            captured["payload"] = json
+            mock_resp = MagicMock()
+            mock_resp.raise_for_status = MagicMock()
+            mock_resp.json.return_value = _make_gemini_response("MODIFY_RECIPE")
+            return mock_resp
+
+        with patch("httpx.AsyncClient") as mock_cls:
+            client = AsyncMock()
+            client.post = fake_post
+            client.__aenter__ = AsyncMock(return_value=client)
+            client.__aexit__ = AsyncMock(return_value=False)
+            mock_cls.return_value = client
+
+            await classifier.classify(
+                "少放点盐",
+                cooking_context={"dish_name": "番茄炒蛋", "steps": ["步骤1"]},
+            )
+
+        text = captured["payload"]["contents"][0]["parts"][0]["text"]
+        assert "MODIFY_RECIPE" in text
+
+    @pytest.mark.asyncio
+    async def test_system_prompt_includes_modify_recipe_definition(self, classifier):
+        """MODIFY_RECIPE must appear in the system prompt intent definitions."""
+        captured = {}
+
+        async def fake_post(url, headers, json):
+            captured["payload"] = json
+            mock_resp = MagicMock()
+            mock_resp.raise_for_status = MagicMock()
+            mock_resp.json.return_value = _make_gemini_response("GENERAL")
+            return mock_resp
+
+        with patch("httpx.AsyncClient") as mock_cls:
+            client = AsyncMock()
+            client.post = fake_post
+            client.__aenter__ = AsyncMock(return_value=client)
+            client.__aexit__ = AsyncMock(return_value=False)
+            mock_cls.return_value = client
+
+            await classifier.classify("今天吃什么")
+
+        sys_text = captured["payload"]["systemInstruction"]["parts"][0]["text"]
+        assert "MODIFY_RECIPE" in sys_text
+
+    @pytest.mark.asyncio
+    async def test_schema_comment_includes_modify_recipe(self, classifier):
+        """JSON schema comment in system prompt must list MODIFY_RECIPE as a valid intent value."""
+        captured = {}
+
+        async def fake_post(url, headers, json):
+            captured["payload"] = json
+            mock_resp = MagicMock()
+            mock_resp.raise_for_status = MagicMock()
+            mock_resp.json.return_value = _make_gemini_response("GENERAL")
+            return mock_resp
+
+        with patch("httpx.AsyncClient") as mock_cls:
+            client = AsyncMock()
+            client.post = fake_post
+            client.__aenter__ = AsyncMock(return_value=client)
+            client.__aexit__ = AsyncMock(return_value=False)
+            mock_cls.return_value = client
+
+            await classifier.classify("随便说说")
+
+        sys_text = captured["payload"]["systemInstruction"]["parts"][0]["text"]
+        # The JSON schema line should include MODIFY_RECIPE as a valid value
+        assert '"MODIFY_RECIPE"' in sys_text
+
+    def test_intent_classification_result_accepts_modify_recipe(self):
+        """IntentClassificationResult can hold MODIFY_RECIPE as its intent."""
+        r = IntentClassificationResult(
+            intent=Intent.MODIFY_RECIPE,
+            confidence=0.85,
+            reasoning="用户要改变食材用量",
+        )
+        assert r.intent == Intent.MODIFY_RECIPE
+        assert r.confidence == pytest.approx(0.85)

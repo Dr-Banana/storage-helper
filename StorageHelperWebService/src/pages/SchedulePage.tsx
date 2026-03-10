@@ -148,11 +148,12 @@ const computeGroceryList = (schedules: Schedule[], days: number): GroceryItem[] 
       for (const meal of plan.meals) {
         for (const dish of meal.dishes) {
           for (const ing of dish.ingredients) {
-            const key = ing.name.trim().toLowerCase();
+            const rawName = typeof ing.name === 'string' ? ing.name : String(ing.name ?? '');
+            const key = rawName.trim().toLowerCase();
             if (!key) continue;
             if (!seen.has(key)) {
               seen.set(key, {
-                name: ing.name.trim(),
+                name: rawName.trim(),
                 quantity: ing.quantity,
                 category: resolveIngredientCategory(ing.category),
                 checked: false,
@@ -415,6 +416,23 @@ const SchedulePage: React.FC = () => {
       window.removeEventListener('schedule-updated', handleScheduleUpdate);
       clearInterval(timer);
     };
+  }, []);
+
+  // When the Layout pre-fetches a schedule (e.g. after cooking steps are saved but
+  // the drawer isn't open), replace just that one record in local state so the
+  // calendar and detail view are immediately up-to-date without a full refetch.
+  useEffect(() => {
+    const handlePrefetch = (e: Event) => {
+      const { schedule } = (e as CustomEvent<{ schedule: Schedule }>).detail ?? {};
+      if (!schedule) return;
+      setSchedules(prev =>
+        prev.some(s => s.id === schedule.id)
+          ? prev.map(s => (s.id === schedule.id ? schedule : s))
+          : [...prev, schedule]
+      );
+    };
+    window.addEventListener('schedule-prefetched', handlePrefetch);
+    return () => window.removeEventListener('schedule-prefetched', handlePrefetch);
   }, []);
 
   // 监听 Layout 层派发的"抽屉编辑请求"事件，打开编辑 Modal
@@ -970,7 +988,7 @@ const SchedulePage: React.FC = () => {
                   ? allDishNames.slice(0, 3).join(' · ') + (allDishNames.length > 3 ? ' …' : '')
                   : 'Meal Plan';
               }
-              subtitle = dayPlan.meals.map(m => MEAL_META[m.mealTime].label).join(' · ');
+              subtitle = dayPlan.meals.map(m => (MEAL_META[m.mealTime] ?? MEAL_META.dinner).label).join(' · ');
             }
           }
 
@@ -1062,9 +1080,9 @@ const SchedulePage: React.FC = () => {
                       const dishNames = meal.dishes.map(d => d.name).filter(Boolean);
                       return (
                         <div key={meal.id} className="flex items-start gap-2.5 bg-white/70 rounded-xl px-3 py-2 border border-orange-100/60">
-                          <span className="text-base leading-none mt-0.5 flex-shrink-0">{MEAL_META[meal.mealTime].icon}</span>
+                          <span className="text-base leading-none mt-0.5 flex-shrink-0">{(MEAL_META[meal.mealTime] ?? MEAL_META.dinner).icon}</span>
                           <div className="flex-1 min-w-0">
-                            <span className="text-[10px] font-bold text-orange-500 uppercase tracking-wider">{MEAL_META[meal.mealTime].label}</span>
+                            <span className="text-[10px] font-bold text-orange-500 uppercase tracking-wider">{(MEAL_META[meal.mealTime] ?? MEAL_META.dinner).label}</span>
                             {dishNames.length > 0 ? (
                               <div className="flex flex-wrap gap-1 mt-1">
                                 {dishNames.map((name, i) => (
@@ -1283,7 +1301,7 @@ const MealTimeSection: React.FC<{
   onChange: (meal: Meal) => void;
   onRemove: () => void;
 }> = memo(({ meal, onChange, onRemove }) => {
-  const meta = MEAL_META[meal.mealTime];
+  const meta = MEAL_META[meal.mealTime] ?? MEAL_META.dinner;
 
   const addDish = useCallback(() => {
     onChange({ ...meal, dishes: [...meal.dishes, createEmptyDish()] });
@@ -1780,6 +1798,38 @@ const ScheduleModal: React.FC<ScheduleModalProps> = ({
   );
 };
 
+// ─── Step formatting helpers ──────────────────────────────────────────────────
+
+/** Converts **bold** markdown spans to <strong> elements. */
+function parseBoldText(text: string): React.ReactNode {
+  const parts = text.split(/\*\*([^*]+)\*\*/g);
+  if (parts.length === 1) return text;
+  return (
+    <>
+      {parts.map((part, i) =>
+        i % 2 === 1
+          ? <strong key={i} className="font-semibold text-stone-900">{part}</strong>
+          : part
+      )}
+    </>
+  );
+}
+
+/**
+ * Phase headers start with a food/cooking emoji (code points 0x1F300–0x1FBFF).
+ * Tips start specifically with 💡 (U+1F4A1), which is in the same range, so
+ * we check for tips first before the broad emoji check.
+ */
+function classifyStep(step: string): 'phase' | 'tip' | 'step' {
+  const s = step.trimStart();
+  const cp = s.codePointAt(0) ?? 0;
+  // 💡 = U+1F4A1 — must be checked before the broad emoji range
+  if (cp === 0x1F4A1) return 'tip';
+  // Food/activity emoji live in U+1F300–U+1FBFF
+  if (cp >= 0x1F300 && cp <= 0x1FBFF) return 'phase';
+  return 'step';
+}
+
 // ─── DishReadCard ─────────────────────────────────────────────────────────────
 
 const DishReadCard: React.FC<{
@@ -1826,7 +1876,7 @@ const DishReadCard: React.FC<{
             {hasSteps && (
               <span className="flex items-center gap-0.5 text-[11px] text-orange-400 font-medium">
                 <ChefHat size={10} />
-                {dish.cookingSteps!.length} steps
+                {dish.cookingSteps!.filter(s => classifyStep(s) === 'step').length} steps
               </span>
             )}
             {hasTiming && (
@@ -1906,16 +1956,40 @@ const DishReadCard: React.FC<{
                   <ChefHat size={9} /> Cooking Steps
                 </p>
               )}
-              <ol className="space-y-2">
-                {dish.cookingSteps!.map((step, i) => (
-                  <li key={i} className="flex gap-2.5 items-start">
-                    <span className="flex-shrink-0 w-5 h-5 rounded-full bg-orange-100 text-orange-600 text-[10px] font-bold flex items-center justify-center mt-0.5">
-                      {i + 1}
-                    </span>
-                    <span className="text-xs text-stone-700 leading-relaxed">{step}</span>
-                  </li>
-                ))}
-              </ol>
+              <div className="space-y-2">
+                {(() => {
+                  let stepNum = 0;
+                  return dish.cookingSteps!.map((step, i) => {
+                    const kind = classifyStep(step.trimStart());
+
+                    if (kind === 'phase') {
+                      return (
+                        <p key={i} className="text-sm font-semibold text-stone-600 pt-3 pb-1 border-t border-stone-100 first:border-t-0 first:pt-0">
+                          {step.trimStart()}
+                        </p>
+                      );
+                    }
+
+                    if (kind === 'tip') {
+                      return (
+                        <div key={i} className="flex gap-1.5 bg-amber-50 border border-amber-100 rounded-md px-2.5 py-1.5 text-xs text-amber-700 leading-relaxed">
+                          {parseBoldText(step)}
+                        </div>
+                      );
+                    }
+
+                    stepNum++;
+                    return (
+                      <div key={i} className="flex gap-2.5 items-start">
+                        <span className="flex-shrink-0 w-5 h-5 rounded-full bg-orange-100 text-orange-600 text-[10px] font-bold flex items-center justify-center mt-0.5">
+                          {stepNum}
+                        </span>
+                        <span className="text-xs text-stone-700 leading-relaxed">{parseBoldText(step)}</span>
+                      </div>
+                    );
+                  });
+                })()}
+              </div>
             </div>
           )}
         </div>
@@ -1988,8 +2062,8 @@ export const MealPlanDetailDrawer: React.FC<{
           sortedMeals.map(meal => (
             <div key={meal.id}>
               <div className="flex items-center gap-2 mb-3 sticky top-0 bg-[#FAF9F6]/95 backdrop-blur-sm py-1.5 z-10 -mx-1 px-1">
-                <span className="text-2xl leading-none">{MEAL_META[meal.mealTime].icon}</span>
-                <h3 className="text-base font-bold text-stone-700">{MEAL_META[meal.mealTime].label}</h3>
+                <span className="text-2xl leading-none">{(MEAL_META[meal.mealTime] ?? MEAL_META.dinner).icon}</span>
+                <h3 className="text-base font-bold text-stone-700">{(MEAL_META[meal.mealTime] ?? MEAL_META.dinner).label}</h3>
                 <div className="flex-1 h-px bg-stone-200" />
                 <span className="text-xs text-stone-400 flex-shrink-0">
                   {meal.dishes.length} dish{meal.dishes.length !== 1 ? 'es' : ''}

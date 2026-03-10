@@ -17,3 +17,6 @@ venv/
 .env.prod
 .env.preprod
 tmp/
+
+# Failure snapshots
+StorageHelperAIOrchestraService/tests/failure_snapshots/

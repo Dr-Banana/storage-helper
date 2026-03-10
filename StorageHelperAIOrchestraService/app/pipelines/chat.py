@@ -51,7 +51,7 @@ If the intent is PLAN_EAT_OUT: Suggest you can help find restaurants or make res
 If the intent is PLAN_AHEAD: Help the user plan meals for a future period or a specific date (e.g. next Monday), then generate a shopping list of ingredients to buy. Offer to save the list to their schedule when ready. Plan Cook Home is a sub-flow: when the user is cooking at home, use the provided USER'S ACTUAL INVENTORY (if any) to suggest recipes — only suggest recipes using ingredients that are ACTUALLY in the inventory; never invent ingredients not in the list. If inventory is empty or limited, say so and suggest what to buy.
 If the intent is GENERAL: Be friendly and helpful.
 
-Respond naturally in the same language as the user.
+LANGUAGE REQUIREMENT: {language_instruction} This applies to ALL text you generate — including dish names, ingredient names, step descriptions, and any other human-readable content.
 """
 
     def __init__(self, model_name: Optional[str] = None, api_key: Optional[str] = None):
@@ -67,10 +67,21 @@ Respond naturally in the same language as the user.
         history: List[Dict[str, str]] = None,
         context: Optional[Dict[str, Any]] = None,
         user_timezone: Optional[str] = None,
+        cooking_level: Optional[str] = "beginner",
+        language: Optional[str] = "zh",
     ) -> Dict[str, Any]:
         """
         Runs the chat pipeline: Classify intent -> Route/Mock Action -> Generate response.
         """
+        # Build language instruction injected into every LLM system prompt
+        _lang_map = {
+            "zh": "Always respond in Simplified Chinese (简体中文), regardless of what language the user writes in.",
+            "en": "Always respond in English, regardless of what language the user writes in.",
+            "ja": "Always respond in Japanese (日本語), regardless of what language the user writes in.",
+            "ko": "Always respond in Korean (한국어), regardless of what language the user writes in.",
+        }
+        _language_instruction = _lang_map.get(language or "zh", _lang_map["zh"])
+
         # Initialise cooking-steps data containers (populated later if intent == COOKING_STEPS)
         _cs_injected_context: str = ""
         _cs_action_data: Dict[str, Any] = {}
@@ -103,16 +114,60 @@ Respond naturally in the same language as the user.
                 )
             )
 
+            # ── Pending-action boomerang check ───────────────────────────────────
+            # If the previous turn stored a deferred MODIFY_RECIPE action (due to
+            # low confidence) and the user now confirms with a short affirmative,
+            # restore the original intent so the modification executes this turn.
+            _pending_modify = plan_state.get("pending_modify_action")
+            _confirm_words = {
+                "是", "好", "可以", "行", "确认", "保存", "是的", "当然", "好的", "没问题",
+                "yes", "ok", "okay", "sure", "confirm", "save", "apply", "update", "do it",
+                "就这样", "就按这个",
+            }
+            _user_tokens = set(user_input.strip().lower().split())
+            _is_short_affirmative = (
+                len(user_input.strip()) <= 20
+                and bool(_user_tokens & _confirm_words)
+            )
+            if _pending_modify and _is_short_affirmative:
+                logger.info(
+                    f"[chat] Pending MODIFY_RECIPE confirmed by user '{user_input.strip()}' — "
+                    f"restoring action for dish '{_pending_modify.get('dish_name')}'"
+                )
+                # Clear the pending action immediately to avoid infinite loops
+                update_plan_state(owner_id=owner_id, pending_modify_action=None)
+                # Synthesise a fake intent_result/action so the MODIFY_RECIPE block runs
+                intent_result = type("IR", (), {
+                    "intent": Intent.MODIFY_RECIPE,
+                    "confidence": 1.0,
+                    "reasoning": "Restored from pending_modify_action after user confirmation",
+                })()
+                intent_action = {"action": "MODIFY_RECIPE", "data": {}}
+                active_cooking_ctx = _pending_modify  # re-use the saved context
+                # The MODIFY_RECIPE block below reads active_cooking_ctx for dish/steps;
+                # also restore the original user_input that requested the change.
+                user_input = _pending_modify.get("original_user_input", user_input)
+            else:
+                # If the user says something other than "yes" while there's a pending action,
+                # discard the pending action so it doesn't linger.
+                if _pending_modify and not _is_short_affirmative:
+                    update_plan_state(owner_id=owner_id, pending_modify_action=None)
+                    logger.info(
+                        "[chat] Discarded pending_modify_action — user sent a non-affirmative message."
+                    )
+
             # 1. Classify intent — inject session context so the LLM can decide
             #    stickiness intelligently instead of relying on a keyword list.
             session_mode = "PLANNING" if in_plan_ahead_flow else None
             active_cooking_ctx = plan_state.get("cooking_context")  # for DISCUSSING_RECIPE block
-            intent_result = await intent_classifier.classify(
-                user_input,
-                history=history,
-                session_mode=session_mode,
-                cooking_context=active_cooking_ctx,
-            )
+            if not (_pending_modify and _is_short_affirmative):
+                # Skip re-classification when we already restored a pending intent above
+                intent_result = await intent_classifier.classify(
+                    user_input,
+                    history=history,
+                    session_mode=session_mode,
+                    cooking_context=active_cooking_ctx,
+                )
 
             # 1b. Lightweight safety net: if we're in a plan-ahead flow and the LLM returns
             #     COOKING_STEPS but downgrades to GENERAL (rare edge case), correct it.
@@ -176,6 +231,8 @@ Respond naturally in the same language as the user.
                         storage_client=_default_storage,
                         context=context,
                         intent_result=intent_result,
+                        cooking_level=cooking_level,
+                        language=language,
                     )
                     # Update context with freshly confirmed plan data
                     context = {
@@ -218,6 +275,129 @@ Respond naturally in the same language as the user.
                         "confidence": 0.7,
                         "reasoning": "RECIPE_QA with no active cooking context; falling back to GENERAL",
                     })()
+
+            # MODIFY_RECIPE: user wants to tweak an ingredient quantity in the existing steps.
+            # Requires an active cooking context with steps already generated.
+            # Safety gate: if the classifier is not confident enough, treat as RECIPE_QA first
+            # and prompt the user to confirm before committing a DB write.
+            if intent_result.intent == Intent.MODIFY_RECIPE:
+                _mod_confidence = getattr(intent_result, "confidence", 1.0) or 1.0
+                if _mod_confidence < 0.8 and active_cooking_ctx and active_cooking_ctx.get("dish_name"):
+                    _qa_dish = active_cooking_ctx["dish_name"]
+                    _qa_steps = active_cooking_ctx.get("steps") or []
+                    _qa_steps_text = "\n".join(f"{i+1}. {s}" for i, s in enumerate(_qa_steps)) if _qa_steps else ""
+                    _cs_injected_context = (
+                        f"\n\n[INTENT CONFIRMATION NEEDED]\n"
+                        f"The user's message seems to be asking about modifying the recipe for 「{_qa_dish}」, "
+                        "but the intent is ambiguous.\n"
+                        f"Current recipe context:\n{_qa_steps_text}\n\n"
+                        "INSTRUCTIONS: Answer the user's question naturally (as RECIPE_QA), "
+                        "then at the end of your answer ask in the user's language: "
+                        "\"要把这个更改保存到食谱中吗？\" (or "
+                        "\"Would you like me to save this change to your recipe?\" in English)\n"
+                        "Do NOT make any changes to the stored recipe yet."
+                    )
+                    # Save the deferred action so the next turn can execute it if the user confirms
+                    update_plan_state(
+                        owner_id=owner_id,
+                        pending_modify_action={
+                            "dish_name": _qa_dish,
+                            "steps": _qa_steps,
+                            "schedule_id": active_cooking_ctx.get("schedule_id"),
+                            "original_user_input": user_input,
+                        },
+                    )
+                    intent_result = type("IR", (), {
+                        "intent": Intent.RECIPE_QA,
+                        "confidence": _mod_confidence,
+                        "reasoning": f"MODIFY_RECIPE confidence {_mod_confidence:.2f} < 0.8 → confirming intent first",
+                    })()
+                    logger.info(
+                        f"[chat] MODIFY_RECIPE confidence {_mod_confidence:.2f} < 0.8 — "
+                        "routing to RECIPE_QA with confirmation prompt; "
+                        f"pending_modify_action saved for '{_qa_dish}'"
+                    )
+
+            if intent_result.intent == Intent.MODIFY_RECIPE:
+                if active_cooking_ctx and active_cooking_ctx.get("steps") and active_cooking_ctx.get("dish_name"):
+                    try:
+                        from app.agents.cooking_steps_agent import CookingStepsAgent as _CSAgent
+                        _mod_dish = active_cooking_ctx["dish_name"]
+                        _mod_steps = active_cooking_ctx["steps"]
+                        _mod_result = await _CSAgent().execute_modify(
+                            user_input=user_input,
+                            owner_id=owner_id,
+                            current_steps=_mod_steps,
+                            dish_name=_mod_dish,
+                            context=context,
+                            language=language,
+                        )
+                        _new_steps = _mod_result.get("modified_steps") or _mod_steps
+                        _ing_chg = _mod_result.get("ingredient_change")
+                        _chg_idx = _mod_result.get("changed_indices") or []
+
+                        # Build a diff summary for the LLM to narrate naturally
+                        _diff_lines = []
+                        for idx in _chg_idx:
+                            if idx < len(_mod_steps) and idx < len(_new_steps):
+                                _diff_lines.append(
+                                    f"  Step {idx + 1}: «{_mod_steps[idx]}»  →  «{_new_steps[idx]}»"
+                                )
+                        _diff_text = "\n".join(_diff_lines) if _diff_lines else "(steps updated)"
+                        _ing_note = ""
+                        if _ing_chg:
+                            _ing_note = (
+                                f"\nIngredient updated: {_ing_chg.get('name')} "
+                                f"{_ing_chg.get('old_qty')} → {_ing_chg.get('new_qty')}"
+                            )
+
+                        from app.agents.cooking_steps_agent import _clean_steps_for_llm as _cfl
+                        _steps_text = _cfl(_new_steps)
+                        _saved_note = (
+                            "\n[Changes saved to meal plan]"
+                            if _mod_result.get("saved") else
+                            "\n[Note: changes could not be auto-saved — user may need to regenerate]"
+                        )
+                        _cs_injected_context = (
+                            f"\n\n=== RECIPE MODIFICATION FOR 「{_mod_dish}」 ===\n"
+                            f"Changes applied:\n{_diff_text}{_ing_note}\n"
+                            f"{_saved_note}\n"
+                            f"\nFull updated recipe (USE THESE EXACT QUANTITIES in your reply):\n{_steps_text}\n"
+                            "=== END ===\n\n"
+                            "Confirm the change to the user. "
+                            "CRITICAL: quote the ACTUAL new quantities from the updated recipe above — "
+                            "do NOT invent or approximate numbers. "
+                            "Do NOT re-list all steps unless the user asks. "
+                            "Respond in the user's language."
+                        )
+                        _cs_action_data = {
+                            "dish_name": _mod_dish,
+                            "cooking_steps": _new_steps,
+                            "ingredient_change": _ing_chg,
+                            "saved": _mod_result.get("saved", False),
+                            "schedule_id": _mod_result.get("schedule_id"),
+                        }
+                        # Update cooking context so subsequent turns see the new steps
+                        update_plan_state(
+                            owner_id=owner_id,
+                            cooking_context={
+                                "dish_name": _mod_dish,
+                                "steps": _new_steps,
+                                "schedule_id": _mod_result.get("schedule_id"),
+                            },
+                        )
+                    except Exception as _mod_err:
+                        logger.error(f"[MODIFY_RECIPE] Agent failed: {_mod_err}", exc_info=True)
+                        _cs_injected_context = (
+                            "\n\n[Failed to apply the recipe modification. "
+                            "Apologise briefly and ask the user to try again.]\n"
+                        )
+                else:
+                    # No active recipe context — nudge the user to generate steps first
+                    _cs_injected_context = (
+                        "\n\n[MODIFY_RECIPE: no active recipe context found. "
+                        "Tell the user to first ask for cooking steps, then request the modification.]\n"
+                    )
 
             # COOKING_STEPS: agent acts as a "data fetcher" — structured steps are injected
             # into the LLM system prompt so Gemini can answer naturally and handle follow-ups.
@@ -296,6 +476,7 @@ Respond naturally in the same language as the user.
                                 cooking_context={
                                     "dish_name": _ctx_dish,
                                     "steps": _ctx_steps,
+                                    "schedule_id": _repl_sid,
                                     "pending_replace": True,  # allow one more confirmation turn
                                 },
                             )
@@ -336,6 +517,8 @@ Respond naturally in the same language as the user.
                             dish_names=_pending_dishes,
                             owner_id=owner_id,
                             context=_save_ctx,
+                            cooking_level=cooking_level,
+                            language=language,
                         )
                         _ok_batch = [r for r in _batch if not isinstance(r, Exception) and r.get("cooking_steps")]
                         if _ok_batch:
@@ -359,6 +542,7 @@ Respond naturally in the same language as the user.
                                 cooking_context={
                                     "dish_name": _ok_batch[-1]["dish_name"],
                                     "steps": _ok_batch[-1]["cooking_steps"],
+                                    "schedule_id": _ok_batch[-1].get("schedule_id"),
                                     "all_dishes": [r["dish_name"] for r in _ok_batch],
                                 },
                             )
@@ -384,6 +568,8 @@ Respond naturally in the same language as the user.
                             owner_id=owner_id,
                             context=context,
                             history=history,
+                            cooking_level=cooking_level,
+                            language=language,
                         )
 
                     # Process single-dish result (batch-save path already set _cs_injected_context)
@@ -396,7 +582,37 @@ Respond naturally in the same language as the user.
                         _steps = _cs_data.get("cooking_steps", [])
                         _dish = _cs_data.get("dish_name", "")
 
-                    if _steps:
+                    # ASK_OVERWRITE: recipe conflict — show proposed recipe, ask user to confirm save.
+                    _is_overwrite_ask = (
+                        _cs_result is not None
+                        and _cs_result.get("action") == "ASK_OVERWRITE"
+                    )
+                    if _is_overwrite_ask:
+                        _proposed = _cs_data.get("proposed_steps") or _cs_data.get("cooking_steps") or []
+                        _prop_text = "\n".join(f"{i+1}. {s}" for i, s in enumerate(_proposed))
+                        _cs_injected_context = (
+                            f"\n\n=== PROPOSED NEW RECIPE FOR 「{_dish}」 ===\n"
+                            f"{_prop_text}\n"
+                            "=== END PROPOSED RECIPE ===\n\n"
+                            f"A recipe for 「{_dish}」 already exists in the meal plan. "
+                            "You have just generated a new version. "
+                            "Briefly highlight the most notable changes or key characteristics of the new recipe, "
+                            "then tell the user they can save this new version using the button below "
+                            "or keep the existing one. Be concise and friendly. "
+                            "Respond in the user's language."
+                        )
+                        # Persist the pending overwrite so the user can still confirm later
+                        update_plan_state(
+                            owner_id=owner_id,
+                            pending_overwrite=_cs_data,
+                            cooking_context={
+                                "dish_name": _dish,
+                                "steps": _proposed,
+                                "schedule_id": _cs_data.get("schedule_id"),
+                            },
+                        )
+
+                    if _steps and not _is_overwrite_ask:
                         _steps_text = "\n".join(f"{i+1}. {s}" for i, s in enumerate(_steps))
                         _saved_note = (
                             "\n[Steps saved to meal plan — user can view them in the dish detail card]"
@@ -418,7 +634,11 @@ Respond naturally in the same language as the user.
                         # Persist cooking context so follow-ups skip re-generation
                         update_plan_state(
                             owner_id=owner_id,
-                            cooking_context={"dish_name": _dish, "steps": _steps},
+                            cooking_context={
+                                "dish_name": _dish,
+                                "steps": _steps,
+                                "schedule_id": _cs_data.get("schedule_id"),
+                            },
                         )
                     elif not _cs_injected_context:
                         # Agent couldn't find/generate steps — fall through to LLM with a nudge
@@ -444,7 +664,8 @@ Respond naturally in the same language as the user.
         # We include the detected intent and mock action in the prompt to guide the AI's response
         system_instruction = self.SYSTEM_PROMPT.format(
             intent=intent_result.intent.value,
-            reasoning=intent_result.reasoning
+            reasoning=intent_result.reasoning,
+            language_instruction=_language_instruction,
         )
 
         # Inject cooking steps data (if agent ran) into system prompt so LLM can answer naturally
@@ -636,11 +857,21 @@ Respond naturally in the same language as the user.
         # Handle schedule queries using SchedulingResponseGenerator
         # NOTE: schedule *fetch* (get_user_schedules) is temporarily disabled.
         # Time inference and context generation still work, but actual DB fetch is skipped.
+        # Skip for cooking-focused intents (COOKING_STEPS, MODIFY_RECIPE, RECIPE_QA) — these
+        # handle their own context via _cs_injected_context and don't benefit from schedule data.
+        # Injecting schedule context into these turns causes the LLM to mix schedule information
+        # into what should be a focused cooking-step confirmation, changing the response layout.
+        _cooking_only_intent = intent_result.intent in (
+            Intent.COOKING_STEPS,
+            Intent.MODIFY_RECIPE,
+            Intent.RECIPE_QA,
+        )
         logger.info(
             f"[SCHEDULING AGENT] Checking if scheduling agents are available: {SCHEDULING_AGENTS_AVAILABLE}, "
-            f"fetch_enabled={ENABLE_SCHEDULE_FETCH_IN_CHAT}"
+            f"fetch_enabled={ENABLE_SCHEDULE_FETCH_IN_CHAT}, "
+            f"cooking_only_intent={_cooking_only_intent} (skip={_cooking_only_intent})"
         )
-        if SCHEDULING_AGENTS_AVAILABLE:
+        if SCHEDULING_AGENTS_AVAILABLE and not _cooking_only_intent:
             try:
                 logger.info(f"[SCHEDULING AGENT] Processing query: {user_input[:100]}")
                 logger.info(f"[SCHEDULING AGENT] User timezone: {user_timezone}")
@@ -740,6 +971,11 @@ Respond naturally in the same language as the user.
             except Exception as e:
                 logger.error(f"[SCHEDULING AGENT] Error: {e}", exc_info=True)
                 # Continue without schedule context if there's an error
+        elif _cooking_only_intent:
+            logger.info(
+                f"[SCHEDULING AGENT] Skipping for cooking-focused intent ({intent_result.intent.value}); "
+                "schedule context is unnecessary and would pollute the cooking-step response."
+            )
         else:
             logger.info("[SCHEDULING AGENT] Scheduling agents not available, skipping schedule query processing")
 
@@ -770,14 +1006,18 @@ Respond naturally in the same language as the user.
                             f"Dishes: {_cmpd_dishes}"
                         )
                         # Step A: run plan pipeline (adds dishes, persists to DB)
+                        _cmpd_pa_context = dict(context or {})
+                        if context_msg.strip():
+                            _cmpd_pa_context["scheduling_context"] = context_msg.strip()
                         _plan_result = await _pipeline.execute(
                             owner_id=owner_id,
                             user_input=user_input,
                             history=history,
                             user_timezone=user_timezone,
                             storage_client=_default_storage,
-                            context=context,
+                            context=_cmpd_pa_context,
                             intent_result=intent_result,
+                            cooking_level=cooking_level,
                         )
                         _plan_data = _plan_result.get("action_data") or {}
 
@@ -788,12 +1028,15 @@ Respond naturally in the same language as the user.
                             dish_names=_cmpd_dishes,
                             owner_id=owner_id,
                             context=_batch_ctx,
+                            cooking_level=cooking_level,
+                            language=language,
                         )
 
                         # Step C: build synthesis context for the final LLM call
                         _synth_sys = self.SYSTEM_PROMPT.format(
                             intent="PLAN_AHEAD",
                             reasoning="Compound task: dishes added to plan + cooking steps generated.",
+                            language_instruction=_language_instruction,
                         )
                         _synth_ctx = (
                             "\n=== COMPOUND ACTION RESULTS ===\n"
@@ -858,6 +1101,7 @@ Respond naturally in the same language as the user.
                                 cooking_context={
                                     "dish_name": _last["dish_name"],
                                     "steps": _last["cooking_steps"],
+                                    "schedule_id": _last.get("schedule_id"),
                                     "all_dishes": [r["dish_name"] for r in _successful_batches],
                                 },
                             )
@@ -893,15 +1137,81 @@ Respond naturally in the same language as the user.
                         }
 
                     # ── Normal (non-compound) PLAN_AHEAD ────────────────────────────────
-                    return await _pipeline.execute(
+                    # Augment context with the Scheduling Agent's current-schedule
+                    # summary (built earlier in this turn). The pipeline can use this
+                    # to detect and avoid adding duplicate meals.
+                    _pa_context = dict(context or {})
+                    if context_msg.strip():
+                        _pa_context["scheduling_context"] = context_msg.strip()
+                    _pa_result = await _pipeline.execute(
                         owner_id=owner_id,
                         user_input=user_input,
                         history=history,
                         user_timezone=user_timezone,
                         storage_client=_default_storage,
-                        context=context,
+                        context=_pa_context,
                         intent_result=intent_result,
+                        cooking_level=cooking_level,
+                        language=language,
                     )
+
+                    # ── Log the full AI response ──────────────────────────────────
+                    _pa_response_text = _pa_result.get("response", "")
+                    logger.info(
+                        "[chat] RESPONSE intent=PLAN_AHEAD action_data_keys=%s",
+                        list((_pa_result.get("action_data") or {}).keys()),
+                    )
+                    logger.info("[chat] === AI RESPONSE START ===")
+                    for _resp_line in _pa_response_text.splitlines():
+                        logger.info("[chat] %s", _resp_line)
+                    logger.info("[chat] === AI RESPONSE END ===")
+
+                    # ── Auto-generate cooking steps for all dishes in the plan ──
+                    # Runs in background so it never blocks the chat response.
+                    # skip_if_exists=True prevents clobbering steps the user has
+                    # already confirmed (exact-name match in DB).
+                    try:
+                        import asyncio as _asyncio
+                        _pa_ad_bg = _pa_result.get("action_data") or {}
+                        _pa_slots_bg = _pa_ad_bg.get("meal_plan_slots") or {}
+                        _pa_sid_bg = _pa_ad_bg.get("schedule_id")
+                        if _pa_slots_bg and _pa_sid_bg:
+                            _bg_dishes: List[str] = []
+                            for _date_slots in _pa_slots_bg.values():
+                                for _mt_dishes in (_date_slots or {}).values():
+                                    if isinstance(_mt_dishes, list):
+                                        _bg_dishes.extend(_mt_dishes)
+                                    elif isinstance(_mt_dishes, str) and _mt_dishes.strip():
+                                        _bg_dishes.append(_mt_dishes.strip())
+                            _bg_dishes = list(dict.fromkeys(d.strip() for d in _bg_dishes if d and d.strip()))
+                            if _bg_dishes:
+                                from app.agents.cooking_steps_agent import CookingStepsAgent as _CSBg
+                                _bg_ctx = {
+                                    "type": "plan_ahead",
+                                    "data": {
+                                        "schedule_id": _pa_sid_bg,
+                                        "meal_plan_slots": _pa_slots_bg,
+                                        "dish_ingredients": _pa_ad_bg.get("dish_ingredients") or {},
+                                    },
+                                }
+                                logger.info(
+                                    "[chat] PLAN_AHEAD post-save: launching background step-gen "
+                                    "for %s (schedule_id=%s)", _bg_dishes, _pa_sid_bg,
+                                )
+                                _asyncio.create_task(
+                                    _CSBg().execute_batch(
+                                        dish_names=_bg_dishes,
+                                        owner_id=owner_id,
+                                        context=_bg_ctx,
+                                        cooking_level=cooking_level,
+                                        language=language,
+                                        skip_if_exists=True,
+                                    )
+                                )
+                    except Exception as _bg_err:
+                        logger.warning("[chat] PLAN_AHEAD background step-gen failed to start: %s", _bg_err)
+
+                    return _pa_result
                 except Exception as _pipe_err:
                     logger.error(f"[PLAN_AHEAD_PIPELINE] Pipeline failed: {_pipe_err}", exc_info=True)
                     return {
@@ -1010,10 +1320,44 @@ Respond naturally in the same language as the user.
                 final_action = intent_action['action']
                 final_action_data = intent_action['data']
                 if intent_result.intent == Intent.COOKING_STEPS and _cs_action_data:
-                    final_action = "COOKING_STEPS"
+                    # ASK_OVERWRITE when agent detected a recipe conflict (existing steps in DB).
+                    # Surface the diff data directly to the frontend instead of "COOKING_STEPS".
+                    if _cs_result and _cs_result.get("action") == "ASK_OVERWRITE":
+                        final_action = "ASK_OVERWRITE"
+                    else:
+                        final_action = "COOKING_STEPS"
+                    final_action_data = _cs_action_data
+                elif intent_result.intent == Intent.MODIFY_RECIPE and _cs_action_data:
+                    final_action = "COOKING_STEPS"   # reuse COOKING_STEPS so frontend refreshes the card
                     final_action_data = _cs_action_data
                 elif intent_result.intent == Intent.RECIPE_QA:
                     final_action = "RECIPE_QA"
+
+                # ── Log the full AI response (one call per line so Docker shows each) ──
+                logger.info(
+                    "[chat] RESPONSE intent=%s action_data_keys=%s",
+                    final_action,
+                    list((final_action_data or {}).keys()),
+                )
+                logger.info("[chat] === AI RESPONSE START ===")
+                for _resp_line in response_text.splitlines():
+                    logger.info("[chat] %s", _resp_line)
+                logger.info("[chat] === AI RESPONSE END ===")
+
+                # ── Save-failure debug assertion (always enabled) ────────────────
+                # Logs a structured ERROR when a step-save fails so the exact
+                # failure reason is surfaced in logs without having to reproduce it.
+                _debug_intent = getattr(intent_result, "intent", None)
+                if _debug_intent in (Intent.COOKING_STEPS, Intent.MODIFY_RECIPE) and final_action != "ASK_OVERWRITE":
+                    _ad = final_action_data or {}
+                    if not _ad.get("saved"):
+                        logger.error(
+                            f"[chat] SAVE_FAILED_ASSERTION "
+                            f"intent={_debug_intent} "
+                            f"schedule_id={_ad.get('schedule_id')} "
+                            f"dish={_ad.get('dish_name')!r} "
+                            f"error={_ad.get('error')!r}"
+                        )
 
                 return {
                     "response": response_text,

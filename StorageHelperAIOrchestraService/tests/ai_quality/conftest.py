@@ -89,6 +89,7 @@ INTENT_CLASSIFICATION_SCHEMA: Dict[str, Any] = {
                 "PLAN_AHEAD",
                 "COOKING_STEPS",
                 "RECIPE_QA",
+                "MODIFY_RECIPE",
                 "GENERAL",
             ],
         },

@@ -10,7 +10,6 @@ from app.agents.plan_eat_out_agent import PlanEatOutAgent
 from app.agents.plan_cook_home_agent import PlanCookHomeAgent
 from app.agents.plan_ahead_agent import PlanAheadAgent
 from app.agents.general_agent import GeneralAgent
-from app.agents.cooking_steps_agent import CookingStepsAgent
 
 
 class AgentFactory:
@@ -29,13 +28,20 @@ class AgentFactory:
     
     def _initialize_agents(self):
         """Initialize all agent instances. Plan Cook Home is a sub-agent of Plan Ahead, not a top-level intent."""
+        _general = GeneralAgent()
         self._agents = {
             Intent.SEARCH: SearchAgent(),
             Intent.UPDATE: UpdateAgent(),
             Intent.PLAN_EAT_OUT: PlanEatOutAgent(),
             Intent.PLAN_AHEAD: PlanAheadAgent(),
-            Intent.COOKING_STEPS: CookingStepsAgent(),
-            Intent.GENERAL: GeneralAgent(),
+            # COOKING_STEPS, RECIPE_QA, and MODIFY_RECIPE are handled directly in
+            # chat.py BEFORE route_by_intent is called.  Mapping them to GeneralAgent
+            # here ensures route_by_intent returns a no-op stub instead of re-running
+            # the heavy agent logic a second time.
+            Intent.COOKING_STEPS: _general,
+            Intent.RECIPE_QA: _general,
+            Intent.MODIFY_RECIPE: _general,
+            Intent.GENERAL: _general,
         }
         self._plan_cook_home_sub_agent: Optional[PlanCookHomeAgent] = None
 

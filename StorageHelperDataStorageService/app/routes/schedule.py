@@ -14,11 +14,17 @@ from app.schemas.schedule import ScheduleCreate, ScheduleUpdate, ScheduleRespons
 from app.services.schedule_service import ScheduleService
 
 
+class IngredientQuantityUpdate(BaseModel):
+    name: str
+    quantity: str
+
+
 class CookingStepsUpdate(BaseModel):
     dish_name: str
     steps: List[str]
     date: Optional[str] = None
     meal_time: Optional[str] = None
+    ingredients: Optional[List[IngredientQuantityUpdate]] = None
 
 router = APIRouter(prefix="/schedule", tags=["schedule"])
 
@@ -105,6 +111,10 @@ def update_cooking_steps(
     user_id: int = Depends(get_current_user_id),
 ):
     """Update cooking steps for a specific dish in a schedule's meal plan"""
+    ingredients = (
+        [{"name": ing.name, "quantity": ing.quantity} for ing in data.ingredients]
+        if data.ingredients else None
+    )
     schedule = ScheduleService.update_cooking_steps(
         db,
         schedule_id=schedule_id,
@@ -113,6 +123,7 @@ def update_cooking_steps(
         steps=data.steps,
         date=data.date,
         meal_time=data.meal_time,
+        ingredients=ingredients,
     )
     if not schedule:
         raise HTTPException(

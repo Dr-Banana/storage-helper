@@ -64,37 +64,60 @@ const Layout = () => {
 
   // When a schedule is updated (e.g. AI adds a meal plan or cooking steps),
   // refresh the drawer's schedule snapshot so it always shows the latest data.
+  // If the drawer is not open, we still notify the SchedulePage so its calendar
+  // reflects the new steps as soon as the user navigates there.
   useEffect(() => {
     const handler = async (e: Event) => {
-      const { scheduleId } = (e as CustomEvent<{ scheduleId?: number }>).detail ?? {};
+      const { scheduleId, reason } = (e as CustomEvent<{ scheduleId?: number; reason?: string }>).detail ?? {};
       const current = mealDrawerDataRef.current;
-      if (!current) return;
 
       try {
-        if (scheduleId && current.schedule.id === scheduleId) {
-          // Fast path: exact id match — just refresh that one record
-          const fresh = await ScheduleService.getSchedule(scheduleId);
-          setMealDrawerData(prev => prev ? { ...prev, schedule: fresh } : prev);
-        } else {
-          // Slow path: a different (possibly new) schedule was updated.
-          // Query the range for the drawer's date and pick the best meal-plan schedule.
-          const date = current.date;
-          const start = `${date}T00:00:00`;
-          const end   = `${date}T23:59:59`;
-          const schedules = await ScheduleService.getSchedulesByRange(start, end);
-          // Prefer the schedule that already matches, then any meal_plan_draft, then any
-          const best =
-            schedules.find(s => s.id === current.schedule.id) ??
-            schedules.find(s => s.event_type === 'meal_plan_draft') ??
-            schedules.find(s => (s.event_type ?? '').startsWith('meal_plan')) ??
-            null;
-          if (best && best.id !== current.schedule.id) {
-            setMealDrawerData(prev => prev ? { ...prev, schedule: best } : prev);
-          } else if (best) {
-            // Same id but may have stale metadata — refresh it
-            const fresh = await ScheduleService.getSchedule(best.id);
+        if (current) {
+          // Drawer is open — refresh it
+          if (scheduleId && current.schedule.id === scheduleId) {
+            // Fast path: exact id match — just refresh that one record
+            const fresh = await ScheduleService.getSchedule(scheduleId);
             setMealDrawerData(prev => prev ? { ...prev, schedule: fresh } : prev);
+          } else if (reason === 'cooking_steps_modified') {
+            // MODIFY_RECIPE for a different schedule — don't touch the drawer.
+            // The user is already viewing the correct plan; switching would be disorienting.
+            // SchedulePage will still silently re-fetch to keep its calendar in sync.
+          } else {
+            // Slow path: a different schedule was updated (e.g. a new meal plan was created
+            // by PLAN_AHEAD, or cooking steps were saved to a different schedule than the
+            // one currently shown). Query the range for the drawer's current date and pick
+            // the best schedule to display.
+            const date = current.date;
+            const start = `${date}T00:00:00`;
+            const end   = `${date}T23:59:59`;
+            const schedules = await ScheduleService.getSchedulesByRange(start, end);
+            const best =
+              // 1. Prefer the schedule that was actually just updated (most relevant)
+              (scheduleId ? schedules.find(s => s.id === scheduleId) : undefined) ??
+              // 2. Fall back to keeping the current schedule if it's still in range
+              schedules.find(s => s.id === current.schedule.id) ??
+              // 3. Last resort: pick the best available meal-plan schedule for this date
+              schedules.find(s => s.event_type === 'meal_plan_draft') ??
+              schedules.find(s => (s.event_type ?? '').startsWith('meal_plan')) ??
+              null;
+            if (best && best.id !== current.schedule.id) {
+              setMealDrawerData(prev => prev ? { ...prev, schedule: best } : prev);
+            } else if (best) {
+              const fresh = await ScheduleService.getSchedule(best.id);
+              setMealDrawerData(prev => prev ? { ...prev, schedule: fresh } : prev);
+            }
           }
+        } else if (scheduleId) {
+          // Drawer is not open — proactively pre-fetch the updated schedule and
+          // store it so that when the user opens the drawer it shows fresh data.
+          // Also fire a 'schedule-calendar-refresh' event so SchedulePage can
+          // update its calendar view without requiring navigation.
+          const fresh = await ScheduleService.getSchedule(scheduleId);
+          // Store the fresh schedule keyed by id so the MealPlanDetailDrawer
+          // opener can use it instead of making another network call.
+          window.dispatchEvent(new CustomEvent('schedule-prefetched', {
+            detail: { schedule: fresh }
+          }));
         }
       } catch {
         // Silently ignore — worst case user sees stale data until re-opening the drawer

@@ -5,12 +5,31 @@ import axios from 'axios'
 // Type Definitions
 // ============================================================================
 
+export type CookingLevel = 'beginner' | 'intermediate' | 'expert'
+
+export const COOKING_LEVEL_LABELS: Record<CookingLevel, string> = {
+  beginner: 'Beginner',
+  intermediate: 'Intermediate',
+  expert: 'Expert',
+}
+
+export type UserLanguage = 'zh' | 'en' | 'ja' | 'ko'
+
+export const USER_LANGUAGE_LABELS: Record<UserLanguage, { label: string; flag: string }> = {
+  zh: { label: 'Chinese', flag: '🇨🇳' },
+  en: { label: 'English', flag: '🇺🇸' },
+  ja: { label: 'Japanese', flag: '🇯🇵' },
+  ko: { label: 'Korean', flag: '🇰🇷' },
+}
+
 export interface User {
   id: number
   google_id: string
   email: string
   display_name: string
   note?: string
+  cooking_level: CookingLevel
+  language: UserLanguage
   created_at: string
   updated_at: string
 }
@@ -212,7 +231,7 @@ export const userService = {
    * Update user
    * PATCH /api/users/{user_id}
    */
-  update: async (id: number, data: Partial<{ display_name: string; note: string }>): Promise<User> => {
+  update: async (id: number, data: Partial<{ display_name: string; note: string; cooking_level: CookingLevel; language: UserLanguage }>): Promise<User> => {
     const response = await apiClient.patch(`/users/${id}`, data)
     return response.data
   },
@@ -503,6 +522,8 @@ export const ingestionService = {
     owner_id: number;
     context?: any;
     user_timezone?: string;
+    cooking_level?: CookingLevel;
+    language?: UserLanguage;
   }): Promise<{
     response: string;
     intent: string;

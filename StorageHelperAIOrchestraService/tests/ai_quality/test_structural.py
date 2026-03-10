@@ -247,7 +247,7 @@ class TestIntentClassificationSchema:
 
     @pytest.mark.parametrize(
         "intent",
-        ["SEARCH", "UPDATE", "PLAN_EAT_OUT", "PLAN_AHEAD", "COOKING_STEPS", "RECIPE_QA", "GENERAL"],
+        ["SEARCH", "UPDATE", "PLAN_EAT_OUT", "PLAN_AHEAD", "COOKING_STEPS", "RECIPE_QA", "MODIFY_RECIPE", "GENERAL"],
     )
     def test_all_valid_intents(self, intent, valid_intent_output):
         out = copy.deepcopy(valid_intent_output)
@@ -370,7 +370,7 @@ class TestCompoundIntentValidation:
 
     VALID_INTENTS = {
         "SEARCH", "UPDATE", "PLAN_EAT_OUT", "PLAN_AHEAD",
-        "COOKING_STEPS", "RECIPE_QA", "GENERAL",
+        "COOKING_STEPS", "RECIPE_QA", "MODIFY_RECIPE", "GENERAL",
     }
 
     def _make_compound(self, compound_intents, extracted_items):

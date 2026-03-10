@@ -5,6 +5,7 @@ import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { ingestionService, documentService, Document } from '../api/services'
 import { useAuth } from '../contexts/AuthContext'
+import RecipeDiffCard, { type RecipeDiffData } from './RecipeDiffCard'
 
 interface Message {
   role: 'user' | 'model'
@@ -123,9 +124,15 @@ interface MessageItemProps {
   index: number;
   setMessages: React.Dispatch<React.SetStateAction<Message[]>>;
   setIsLoading: React.Dispatch<React.SetStateAction<boolean>>;
+  overwriteDismissed?: boolean;
+  onOverwriteSaved?: (scheduleId: number) => void;
+  onOverwriteDismiss?: () => void;
 }
 
-const MessageItem = memo(({ msg, index, setMessages, setIsLoading }: MessageItemProps) => {
+const MessageItem = memo(({
+  msg, index, setMessages, setIsLoading,
+  overwriteDismissed, onOverwriteSaved, onOverwriteDismiss,
+}: MessageItemProps) => {
     const navigate = useNavigate();
 
     const handleUpdate = async (doc: Document, updates: any, searchTerm?: string) => {
@@ -268,6 +275,16 @@ const MessageItem = memo(({ msg, index, setMessages, setIsLoading }: MessageItem
              </div>
         )}
 
+        {/* Recipe Diff Card (ASK_OVERWRITE) */}
+        {msg.role === 'model' && msg.action === 'ASK_OVERWRITE' && msg.actionData &&
+          !overwriteDismissed && onOverwriteSaved && onOverwriteDismiss && (
+          <RecipeDiffCard
+            data={msg.actionData as RecipeDiffData}
+            onSaved={onOverwriteSaved}
+            onDismiss={onOverwriteDismiss}
+          />
+        )}
+
         {/* Document Cards */}
         {msg.role === 'model' && msg.documents && msg.documents.length > 0 && (
           <div className="grid grid-cols-1 gap-2 w-full mt-2">
@@ -317,13 +334,15 @@ interface ChatInterfaceProps {
 }
 
 const ChatInterface: React.FC<ChatInterfaceProps> = ({ isOpen, onClose }) => {
-  const { userId } = useAuth()
+  const { userId, cookingLevel, language } = useAuth()
   const [messages, setMessages] = useState<Message[]>([
     { role: 'model', content: 'Hi! I\'m your Home AI. How can I help you today?' }
   ])
   const [isLoading, setIsLoading] = useState(false)
   const [input, setInput] = useState('')
   const [activeContext, setActiveContext] = useState<any>(null)
+  // Indices of ASK_OVERWRITE messages whose diff card has been acted on (saved or dismissed).
+  const [dismissedOverwrites, setDismissedOverwrites] = useState<Set<number>>(new Set())
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
 
@@ -367,6 +386,8 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ isOpen, onClose }) => {
         owner_id: userId,
         context: contextToSend,
         user_timezone: userTimezone,
+        cooking_level: cookingLevel,
+        language: language,
       })
 
       let documents: Document[] = []
@@ -399,19 +420,50 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ isOpen, onClose }) => {
       // Update or clear context based on action
       if (response.action === 'PLAN_AHEAD' && response.action_data) {
         setActiveContext({ type: 'plan_ahead', data: response.action_data })
-        // Trigger schedule refresh event for real-time update
+        const _planSid = response.action_data.schedule_id
+        // Immediate refresh to show the saved meal plan
         window.dispatchEvent(new CustomEvent('schedule-updated', { 
-          detail: { scheduleId: response.action_data.schedule_id } 
+          detail: { scheduleId: _planSid, reason: 'plan_updated' } 
         }))
+        // Background step generation runs server-side after the response is sent and
+        // typically completes within 5–15 s.  Poll a few times so the drawer picks up
+        // the freshly generated steps without requiring a manual page refresh.
+        if (_planSid) {
+          ;[4000, 9000, 16000].forEach(delay => {
+            setTimeout(() => {
+              window.dispatchEvent(new CustomEvent('schedule-updated', {
+                detail: { scheduleId: _planSid, reason: 'cooking_steps_new' }
+              }))
+            }, delay)
+          })
+        }
       } else if (response.action === 'COOKING_STEPS' && response.action_data) {
         // Keep the existing plan_ahead context so the user can continue planning
-        // Trigger a schedule refresh if steps were saved successfully
+        // Trigger a schedule refresh if steps were saved successfully.
+        //
+        // Use different reasons so Layout.tsx can decide whether to switch the drawer:
+        //  - 'cooking_steps_modified' (MODIFY_RECIPE): user already has the correct plan open;
+        //    only fast-path refresh is allowed — no drawer switching.
+        //  - 'cooking_steps_new' (COOKING_STEPS): steps may have been saved to a different
+        //    schedule than what the drawer currently shows (e.g. context had stale schedule_id);
+        //    the slow path is allowed to switch the drawer to the schedule that actually has the steps.
         if (response.action_data.saved && response.action_data.schedule_id) {
+          const reason = response.intent === 'MODIFY_RECIPE'
+            ? 'cooking_steps_modified'
+            : 'cooking_steps_new'
           window.dispatchEvent(new CustomEvent('schedule-updated', {
-            detail: { scheduleId: response.action_data.schedule_id }
+            detail: { scheduleId: response.action_data.schedule_id, reason }
           }))
         }
-      } else if (response.action !== 'PLAN_AHEAD' && response.action !== 'COOKING_STEPS' && activeContext?.type === 'plan_ahead') {
+      } else if (response.action === 'ASK_OVERWRITE' && response.action_data) {
+        // Recipe conflict — diff card will be shown inline with the message.
+        // Keep plan_ahead context active so the user can still confirm after reviewing.
+      } else if (
+        response.action !== 'PLAN_AHEAD' &&
+        response.action !== 'COOKING_STEPS' &&
+        response.action !== 'ASK_OVERWRITE' &&
+        activeContext?.type === 'plan_ahead'
+      ) {
         // Clear plan_ahead context when switching to unrelated actions
         setActiveContext(null)
       }
@@ -506,7 +558,21 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ isOpen, onClose }) => {
       {/* Messages Area */}
       <div className="flex-1 min-h-0 overflow-y-auto p-4 space-y-6 custom-scrollbar bg-gray-50/50">
         {messages.map((msg, index) => (
-          <MessageItem key={index} index={index} msg={msg} setMessages={setMessages} setIsLoading={setIsLoading} />
+          <MessageItem
+            key={index}
+            index={index}
+            msg={msg}
+            setMessages={setMessages}
+            setIsLoading={setIsLoading}
+            overwriteDismissed={dismissedOverwrites.has(index)}
+            onOverwriteSaved={(scheduleId) => {
+              setDismissedOverwrites(prev => new Set([...prev, index]))
+              window.dispatchEvent(new CustomEvent('schedule-updated', {
+                detail: { scheduleId, reason: 'cooking_steps_new' }
+              }))
+            }}
+            onOverwriteDismiss={() => setDismissedOverwrites(prev => new Set([...prev, index]))}
+          />
         ))}
         
         {isLoading && (

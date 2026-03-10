@@ -14,6 +14,24 @@ from app.schemas.schedule import ScheduleCreate, ScheduleUpdate
 logger = logging.getLogger(__name__)
 
 
+def _collect_dish_names(extra_data: dict) -> list:
+    """Return a flat list of all dish names inside a schedule's extra_data JSON.
+
+    Used for diagnostic logging when a dish-name lookup fails.
+    """
+    names = []
+    for feat in (extra_data or {}).get("features", []):
+        if feat.get("type") != "meal_plan":
+            continue
+        for day_plan in feat.get("plans", []):
+            for meal in day_plan.get("meals", []):
+                for dish in meal.get("dishes", []):
+                    n = dish.get("name")
+                    if n:
+                        names.append(n)
+    return names
+
+
 class ScheduleService:
     """Service for schedule operations"""
 
@@ -208,6 +226,28 @@ class ScheduleService:
         return True
 
     @staticmethod
+    def _apply_ingredient_updates(dish: dict, ingredients: List[dict]) -> None:
+        """Merge ingredient quantity updates into a dish object in-place.
+
+        Matches by exact name first, then case-insensitive substring, so a partial
+        name like "酱油" will match "生抽酱油" if no exact match exists.
+        """
+        if not ingredients:
+            return
+        ing_map = {i.get("name", "").strip().lower(): i for i in ingredients}
+        for existing in dish.get("ingredients", []):
+            existing_name = existing.get("name", "").strip().lower()
+            # Exact match
+            if existing_name in ing_map:
+                existing["quantity"] = ing_map[existing_name]["quantity"]
+                continue
+            # Substring match
+            for key, upd in ing_map.items():
+                if key in existing_name or existing_name in key:
+                    existing["quantity"] = upd["quantity"]
+                    break
+
+    @staticmethod
     def update_cooking_steps(
         db: Session,
         schedule_id: int,
@@ -216,18 +256,32 @@ class ScheduleService:
         steps: List[str],
         date: Optional[str] = None,
         meal_time: Optional[str] = None,
+        ingredients: Optional[List[dict]] = None,
     ) -> Optional[Schedule]:
-        """Update cooking steps for a specific dish within a schedule's meal plan.
+        """Update cooking steps (and optionally ingredient quantities) for a specific
+        dish within a schedule's meal plan.
 
         Searches all meal_plan features for dishes matching `dish_name`
         (optionally filtered by `date` and `meal_time`) and replaces their
-        `cookingSteps` field.  Returns the updated schedule, or None if not found.
+        `cookingSteps` field.  If `ingredients` is provided, also updates matching
+        ingredient quantities.  Returns the updated schedule, or None if not found.
         """
         schedule = db.query(Schedule).filter(
             and_(Schedule.id == schedule_id, Schedule.user_id == user_id)
         ).first()
 
-        if not schedule or not schedule.extra_data:
+        if not schedule:
+            logger.error(
+                f"[ScheduleService.update_cooking_steps] SAVE_FAILED reason=schedule_not_found "
+                f"schedule_id={schedule_id} user_id={user_id} dish='{dish_name}'"
+            )
+            return None
+
+        if not schedule.extra_data:
+            logger.error(
+                f"[ScheduleService.update_cooking_steps] SAVE_FAILED reason=no_extra_data "
+                f"schedule_id={schedule_id} user_id={user_id} dish='{dish_name}'"
+            )
             return None
 
         extra_data = copy.deepcopy(schedule.extra_data)
@@ -245,6 +299,7 @@ class ScheduleService:
                     for dish in meal.get("dishes", []):
                         if dish.get("name", "").strip().lower() == dish_name.strip().lower():
                             dish["cookingSteps"] = steps
+                            ScheduleService._apply_ingredient_updates(dish, ingredients or [])
                             updated = True
 
         if not updated:
@@ -263,6 +318,7 @@ class ScheduleService:
                             if dishes:
                                 # Update the first dish in this slot
                                 dishes[0]["cookingSteps"] = steps
+                                ScheduleService._apply_ingredient_updates(dishes[0], ingredients or [])
                                 updated = True
                                 logger.info(
                                     f"[ScheduleService] update_cooking_steps fallback: "
@@ -287,6 +343,7 @@ class ScheduleService:
                                 stored = dish.get("name", "").strip().lower()
                                 if stored in dish_lower or dish_lower in stored:
                                     dish["cookingSteps"] = steps
+                                    ScheduleService._apply_ingredient_updates(dish, ingredients or [])
                                     updated = True
                                     logger.info(
                                         f"[ScheduleService] update_cooking_steps fuzzy match: "
@@ -301,12 +358,30 @@ class ScheduleService:
                         break
 
         if not updated:
+            logger.error(
+                f"[ScheduleService.update_cooking_steps] SAVE_FAILED reason=dish_not_found_in_schedule "
+                f"schedule_id={schedule_id} user_id={user_id} dish='{dish_name}' "
+                f"date={date!r} meal_time={meal_time!r} "
+                f"available_dishes={_collect_dish_names(extra_data)}"
+            )
             return None
 
         schedule.extra_data = extra_data
         flag_modified(schedule, "extra_data")
-        db.commit()
-        db.refresh(schedule)
+        try:
+            db.commit()
+            db.refresh(schedule)
+        except Exception as e:
+            logger.error(
+                f"[ScheduleService.update_cooking_steps] SAVE_FAILED reason=db_commit_error "
+                f"schedule_id={schedule_id} user_id={user_id} dish='{dish_name}' error={e}"
+            )
+            db.rollback()
+            return None
+        logger.info(
+            f"[ScheduleService.update_cooking_steps] SAVED schedule_id={schedule_id} dish='{dish_name}' "
+            f"steps={len(steps)} ingredients_updated={ingredients is not None}"
+        )
         return schedule
 
     @staticmethod

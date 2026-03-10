@@ -59,8 +59,14 @@ try:
         _conn.execute(_sql_text(
             "ALTER TABLE storage_location ADD COLUMN IF NOT EXISTS content_analysis JSON"
         ))
+        _conn.execute(_sql_text(
+            "ALTER TABLE \"user\" ADD COLUMN IF NOT EXISTS cooking_level VARCHAR(20) NOT NULL DEFAULT 'beginner'"
+        ))
+        _conn.execute(_sql_text(
+            "ALTER TABLE \"user\" ADD COLUMN IF NOT EXISTS language VARCHAR(10) NOT NULL DEFAULT 'zh'"
+        ))
         _conn.commit()
-    logger.info("DB migration: storage_location.content_analysis column ensured")
+    logger.info("DB migration: storage_location.content_analysis, user.cooking_level, user.language columns ensured")
 except Exception as _e:
     logger.warning(f"DB migration check skipped: {_e}")
 
