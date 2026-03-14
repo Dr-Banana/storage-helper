@@ -1028,6 +1028,79 @@ class PipelineStorage:
             logger.warning(f"Failed to get schedules via API: {e}")
             return []
 
+    async def get_user_profile(self, owner_id: int) -> Optional[Dict[str, Any]]:
+        """
+        Fetch the full user profile from DataStorageService.
+        [API: GET /api/users/{owner_id}]
+        Returns the user dict including cuisine_weights, disliked_ingredients, etc.
+        Returns None on failure (caller should degrade gracefully).
+        """
+        base_url = _get_storage_base_url()
+        if not base_url:
+            return None
+
+        url = f"/api/users/{owner_id}"
+        try:
+            async with httpx.AsyncClient(base_url=base_url, timeout=5.0) as client:
+                response = await client.get(url)
+                response.raise_for_status()
+                return response.json()
+        except Exception as e:
+            logger.warning(f"Failed to fetch user profile for {owner_id}: {e}")
+            return None
+
+    async def update_user_recent_dishes(
+        self,
+        owner_id: int,
+        new_entries: List[Dict[str, str]],
+        existing_recent_dishes: Optional[List[Dict[str, str]]] = None,
+    ) -> bool:
+        """
+        Append new dish entries to the user's recent_dishes list, prune records
+        older than 14 days, and persist the updated list via PATCH /api/users/{owner_id}.
+
+        Called after each confirmed meal plan commit (Phase 2 — Diversity Engine).
+
+        Args:
+            owner_id:               User ID.
+            new_entries:            [{"dish": str, "date": "YYYY-MM-DD"}, ...] from
+                                    the just-committed meal_plan_slots.
+            existing_recent_dishes: Current list already fetched from DB (avoids
+                                    an extra GET if the caller already has it).
+
+        Returns:
+            True on success, False on any failure (non-fatal — caller logs only).
+        """
+        if not new_entries:
+            return True  # Nothing to write
+
+        try:
+            from app.services.diversity_engine import merge_and_prune_recent_dishes
+            pruned = merge_and_prune_recent_dishes(existing_recent_dishes, new_entries)
+        except Exception as e:
+            logger.warning(f"[PIPELINE_STORAGE] DiversityEngine merge failed: {e}")
+            return False
+
+        base_url = _get_storage_base_url()
+        if not base_url:
+            return False
+
+        url = f"/api/users/{owner_id}"
+        try:
+            async with httpx.AsyncClient(base_url=base_url, timeout=5.0) as client:
+                response = await client.patch(url, json={"recent_dishes": pruned})
+                response.raise_for_status()
+            logger.info(
+                f"[PIPELINE_STORAGE] recent_dishes updated for user {owner_id}: "
+                f"{len(pruned)} entries (added {len(new_entries)} new)."
+            )
+            return True
+        except Exception as e:
+            logger.warning(
+                f"[PIPELINE_STORAGE] Failed to update recent_dishes for user {owner_id}: {e}"
+            )
+            return False
+
     async def delete_schedule(
         self,
         schedule_id: int,
@@ -1312,7 +1385,10 @@ class PipelineStorage:
             for date_str, meal_text in sorted(meal_plan.items()):
                 dish_names = slot_to_dish_names(meal_text)
                 if not dish_names:
-                    dish_names = [meal_text.strip()]
+                    if isinstance(meal_text, list):
+                        dish_names = [d.strip() for d in meal_text if isinstance(d, str) and d.strip()]
+                    elif isinstance(meal_text, str):
+                        dish_names = [meal_text.strip()]
                 dishes = build_dishes_for_names(dish_names, ingredients_pool, dish_ingredients, only_slot_today=True)
                 daily_plans.append({
                     "date": date_str,
@@ -1488,8 +1564,9 @@ class PipelineStorage:
                         else:
                             dish_names = re.split(r'\s+and\s+|\s+with\s+|,\s+', meal_text, flags=re.IGNORECASE)
                             dish_names = [n.strip() for n in dish_names if n.strip()]
-                        # Include keys that match split names OR the full meal_text
-                        sub_dish_ingredients = {k: v for k, v in dish_ingredients.items() if k in dish_names or (meal_text and k.strip() == meal_text.strip())}
+                        # Include keys that match split names OR the full meal_text (guard: meal_text may be a list)
+                        _meal_text_str = meal_text if isinstance(meal_text, str) else None
+                        sub_dish_ingredients = {k: v for k, v in dish_ingredients.items() if k in dish_names or (_meal_text_str and k.strip() == _meal_text_str.strip())}
                     # Use only this date's ingredients as shopping_list so we don't attach other days' ingredients to this schedule (e.g. pancake getting burger/拉面 ingredients)
                     date_shopping_list = []
                     if sub_dish_ingredients:
@@ -1500,7 +1577,10 @@ class PipelineStorage:
                     # (so we can pass existing_cooking_steps for preservation)
                     description = None
                     # Use actual dish name in title so Edit Schedule shows the meal (API requires title)
-                    title = meal_text.strip() if meal_text else f"Meal Plan - {date_str}"
+                    if isinstance(meal_text, list):
+                        title = meal_text[0].strip() if meal_text and isinstance(meal_text[0], str) else f"Meal Plan - {date_str}"
+                    else:
+                        title = meal_text.strip() if meal_text else f"Meal Plan - {date_str}"
                     
                     # Check if schedule for this date already exists
                     schedules = await self.get_user_schedules(owner_id)
@@ -1548,86 +1628,163 @@ class PipelineStorage:
             # Return the first created schedule ID (for backward compatibility)
             return created_schedule_ids[0] if created_schedule_ids else None
         
-        # Single date or empty meal_plan: use original logic
-        logger.info(f"[STORAGE] received_meal_plan_slots: existing_schedule_id={existing_schedule_id}, meal_plan_keys={list(meal_plan.keys()) if meal_plan else []}, meal_plan_slots={meal_plan_slots}")
-        # Determine scheduled_time based on meal_plan dates
-        # If meal_plan has one date, use that date; otherwise use next_monday
-        scheduled_time = None
-        if meal_plan and len(meal_plan) == 1:
-            # Single date: use that date
-            date_str = list(meal_plan.keys())[0]
-            try:
-                date_obj = datetime.strptime(date_str, '%Y-%m-%d').date()
-                scheduled_time = datetime.combine(date_obj, time(12, 0, 0))
-            except (ValueError, TypeError) as e:
-                logger.warning(f"Failed to parse single date {date_str} for scheduled_time: {e}")
-        
-        # Fallback to next_monday if no valid dates found in meal_plan
-        if scheduled_time is None:
-            scheduled_time = datetime.combine(next_monday, time(12, 0, 0))
-        
-        # Keep scheduled_time naive (no timezone) - date is computed in user's local timezone
-        
-        # Merge dish_ingredients, meal_plan_slots, and dish data from existing schedule when updating by id
-        merged_dish_ingredients = dish_ingredients
-        merged_meal_plan_slots = meal_plan_slots
-        merged_dish_data: Dict[str, Dict[str, Any]] = {}
-        if existing_schedule_id:
-            schedules = await self.get_user_schedules(owner_id)
-            for s in schedules:
-                if s.get("id") == existing_schedule_id:
-                    _, _, existing_di, existing_slots = self._extract_meal_plan_from_schedule(s)
-                    merged_dish_ingredients = {**existing_di, **(dish_ingredients or {})}
-                    # Merge slots: per-date, per-mealTime; new overwrites
-                    if existing_slots or meal_plan_slots:
-                        merged_meal_plan_slots = {}
-                        for d in set((existing_slots or {}).keys()) | set((meal_plan_slots or {}).keys()):
-                            merged_meal_plan_slots[d] = {**((existing_slots or {}).get(d) or {}), **((meal_plan_slots or {}).get(d) or {})}
-                    # Preserve cooking steps + ingredient quantities (richer than old steps-only dict)
-                    merged_dish_data = self._extract_existing_dish_data(s)
-                    break
-
-        # Convert to Feature format (use meal_plan_slots when present so lunch/breakfast/dinner are stored)
-        metadata = self._convert_to_feature_format(
-            meal_plan, shopping_list,
-            dish_ingredients=merged_dish_ingredients,
-            meal_plan_slots=merged_meal_plan_slots,
-            existing_dish_data=merged_dish_data or None,
+        # ── Per-date storage: every date gets its own schedule_id ─────────────────
+        # Rule: each calendar date must live in exactly one schedule.
+        #       Never merge multiple dates into a single schedule.
+        #       Search for an existing schedule that covers THIS date; update if
+        #       found, create otherwise.  `existing_schedule_id` is only used as a
+        #       hint for the *same* date (e.g. draft confirm flow).
+        logger.info(
+            f"[STORAGE] received_meal_plan_slots: existing_schedule_id={existing_schedule_id}, "
+            f"meal_plan_keys={list(meal_plan.keys()) if meal_plan else []}, "
+            f"meal_plan_slots={meal_plan_slots}"
         )
-        # Do not save ingredients to Notes (description); they live only in metadata.features = Kitchen & Dining
-        description = None
-        # Minimal title for API (required); actual meal content is in metadata
-        if event_type == "shopping_list":
-            title = "Next Week Shopping List"
-        elif meal_plan:
-            meal_names = list(meal_plan.values())
-            title = meal_names[0].strip() if meal_names and meal_names[0] else "Next Week Meal Plan (Draft)"
-        else:
-            title = "Next Week Meal Plan (Draft)"
 
-        # Try to update existing schedule if ID is provided
-        if existing_schedule_id:
-            _feat = metadata.get("features", [])
-            _plans_summary = []
-            for f in _feat:
-                if isinstance(f, dict) and f.get("type") == "meal_plan":
-                    for p in f.get("plans", []):
-                        _meals = [(m.get("mealTime"), [d.get("name") for d in m.get("dishes", [])]) for m in p.get("meals", [])]
-                        _plans_summary.append({"date": p.get("date"), "meals": _meals})
-            logger.info(f"[STORAGE] metadata_sent_to_api: existing_schedule_id={existing_schedule_id}, plans_summary={_plans_summary}")
-            # Only update Kitchen & Dining (metadata) + event_type; do not overwrite title/scheduled_time/Notes
-            ok = await self.update_schedule(
-                owner_id=owner_id,
-                schedule_id=existing_schedule_id,
-                event_type=event_type,
-                metadata=metadata,
+        if meal_plan:
+            logger.info(
+                "[PIPELINE STORAGE] Per-date path: routing %d date(s) individually: %s",
+                len(meal_plan), list(meal_plan.keys()),
             )
-            if ok:
-                return existing_schedule_id
-            else:
-                # Update failed (likely 404 - schedule was deleted), fallback to find/create
-                logger.warning(f"Failed to update schedule id={existing_schedule_id}, will try to find or create new one")
+            created_schedule_ids: List[int] = []
+            import re as _re
 
+            for date_str, meal_text in meal_plan.items():
+                try:
+                    date_obj = datetime.strptime(date_str, "%Y-%m-%d").date()
+                    scheduled_time = datetime.combine(date_obj, time(12, 0, 0))
+                except (ValueError, TypeError) as _e:
+                    logger.warning(f"[STORAGE] invalid date '{date_str}': {_e}")
+                    continue
+
+                # Build per-date slots and ingredients
+                single_date_slots = {date_str: (meal_plan_slots or {}).get(date_str) or {}}
+                date_slot = single_date_slots.get(date_str) or {}
+                dish_names_from_slots: List[str] = []
+                for mt_val in date_slot.values():
+                    if isinstance(mt_val, list):
+                        dish_names_from_slots.extend(mt_val)
+                    elif isinstance(mt_val, str):
+                        dish_names_from_slots.extend([p.strip() for p in _re.split(r"\s+and\s+", mt_val) if p.strip()])
+
+                if dish_names_from_slots:
+                    dish_names = dish_names_from_slots
+                elif isinstance(meal_text, list):
+                    dish_names = [d.strip() for d in meal_text if isinstance(d, str) and d.strip()]
+                elif isinstance(meal_text, str):
+                    dish_names = [n.strip() for n in _re.split(r"\s+and\s+|\s+with\s+|,\s+", meal_text, flags=_re.IGNORECASE) if n.strip()]
+                else:
+                    dish_names = []
+
+                sub_dish_ingredients: Optional[Dict[str, List[str]]] = None
+                if dish_ingredients:
+                    sub_dish_ingredients = {k: v for k, v in dish_ingredients.items() if k in dish_names}
+                date_shopping_list: List[str] = []
+                if sub_dish_ingredients:
+                    for ing_list in sub_dish_ingredients.values():
+                        if isinstance(ing_list, list):
+                            date_shopping_list.extend(ing_list)
+
+                # Title from first dish name
+                if dish_names_from_slots:
+                    title = dish_names_from_slots[0]
+                elif isinstance(meal_text, list):
+                    title = meal_text[0].strip() if meal_text and isinstance(meal_text[0], str) else f"Meal Plan - {date_str}"
+                elif isinstance(meal_text, str) and meal_text:
+                    title = meal_text.strip()
+                else:
+                    title = f"Meal Plan - {date_str}"
+
+                # ── Per-(date, meal_time) schedule lookup ──────────────────────────
+                # Rule: each (date, meal_time) pair lives in its own schedule.
+                #   - breakfast 2026-03-13 → schedule A
+                #   - dinner    2026-03-13 → schedule B  (separate, not merged into A)
+                # Search by matching BOTH the date AND the meal_time(s) in this call.
+                # If no overlap found → create a new schedule.
+                _new_meal_times: set = set(
+                    (single_date_slots.get(date_str) or {}).keys()
+                )
+                existing_for_date = None
+                all_schedules = await self.get_user_schedules(owner_id)
+                for s in all_schedules:
+                    _, _, _, s_slots = self._extract_meal_plan_from_schedule(s)
+                    s_date_slot = s_slots.get(date_str) or {}
+                    # Match if schedule covers this date AND any meal_time overlaps
+                    if s_date_slot and (
+                        not _new_meal_times or _new_meal_times & set(s_date_slot.keys())
+                    ):
+                        existing_for_date = s
+                        break
+                # Accept hint only when it covers this (date, meal_time) pair
+                if existing_for_date is None and existing_schedule_id:
+                    for s in all_schedules:
+                        if s.get("id") == existing_schedule_id:
+                            _, _, _, s_slots = self._extract_meal_plan_from_schedule(s)
+                            s_date_slot = s_slots.get(date_str) or {}
+                            if s_date_slot and (
+                                not _new_meal_times or _new_meal_times & set(s_date_slot.keys())
+                            ):
+                                existing_for_date = s
+                            break
+
+                existing_dd = self._extract_existing_dish_data(existing_for_date) if existing_for_date else {}
+                metadata = self._convert_to_feature_format(
+                    {date_str: meal_text},
+                    date_shopping_list,
+                    dish_ingredients=sub_dish_ingredients,
+                    meal_plan_slots=single_date_slots if single_date_slots.get(date_str) else None,
+                    existing_dish_data=existing_dd or None,
+                )
+
+                _feat = metadata.get("features", [])
+                _plans_summary = []
+                for f in _feat:
+                    if isinstance(f, dict) and f.get("type") == "meal_plan":
+                        for p in f.get("plans", []):
+                            _meals = [(m.get("mealTime"), [d.get("name") for d in m.get("dishes", [])]) for m in p.get("meals", [])]
+                            _plans_summary.append({"date": p.get("date"), "meals": _meals})
+                logger.info(
+                    f"[STORAGE] daily_plans_content: using_meal_plan_slots=True, summary={_plans_summary}"
+                )
+
+                if existing_for_date:
+                    ok = await self.update_schedule(
+                        owner_id=owner_id,
+                        schedule_id=existing_for_date["id"],
+                        event_type=event_type,
+                        metadata=metadata,
+                    )
+                    if ok:
+                        logger.info(f"Schedule updated via API: id={existing_for_date['id']}")
+                        created_schedule_ids.append(existing_for_date["id"])
+                    else:
+                        logger.warning(f"[STORAGE] update failed for date {date_str}, creating new schedule")
+                        new_id = await self.create_schedule(
+                            owner_id=owner_id,
+                            title=title,
+                            scheduled_time=scheduled_time,
+                            event_type=event_type,
+                            metadata=metadata,
+                        )
+                        if new_id:
+                            logger.info(f"Schedule created via API: id={new_id}, title={title}")
+                            created_schedule_ids.append(new_id)
+                else:
+                    new_id = await self.create_schedule(
+                        owner_id=owner_id,
+                        title=title,
+                        scheduled_time=scheduled_time,
+                        event_type=event_type,
+                        metadata=metadata,
+                    )
+                    if new_id:
+                        logger.info(f"Schedule created via API: id={new_id}, title={title}")
+                        created_schedule_ids.append(new_id)
+
+            return created_schedule_ids[0] if created_schedule_ids else None
+
+        # ── Empty meal_plan (edge case: shopping-list only) ─────────────────────
+        scheduled_time = datetime.combine(next_monday, time(12, 0, 0))
+        # Fallback legacy block (shopping list or no dates) ──────────────────────
         # Find existing draft schedule or create new one
         schedules = await self.get_user_schedules(owner_id)
         draft = None
@@ -1651,10 +1808,10 @@ class PipelineStorage:
                                     dish_names = [d.get("name") for m in plan["meals"] for d in m.get("dishes", []) if d.get("name")]
                                     if dish_names:
                                         existing_meal_plan[plan["date"]] = " and ".join(dish_names)
-            
+
             # Merge: existing meal_plan + new meal_plan (new overwrites existing for same dates)
             merged_meal_plan = {**existing_meal_plan, **meal_plan}
-            
+
             # Merge shopping lists
             existing_shopping_list = []
             if draft.get("metadata"):
@@ -1694,13 +1851,19 @@ class PipelineStorage:
             )
             return draft["id"] if ok else None
 
-        # No existing draft found, create new schedule (minimal title/scheduled_time for API; no Notes)
+        # No existing draft found — empty meal_plan edge case (shopping list only)
+        sl_title = "Next Week Shopping List" if event_type == "shopping_list" else "Next Week Meal Plan (Draft)"
+        sl_metadata = self._convert_to_feature_format(
+            meal_plan, shopping_list,
+            dish_ingredients=dish_ingredients,
+            meal_plan_slots=meal_plan_slots,
+        )
         return await self.create_schedule(
             owner_id=owner_id,
-            title=title,
+            title=sl_title,
             scheduled_time=scheduled_time,
             event_type=event_type,
-            metadata=metadata,
+            metadata=sl_metadata,
         )
 
     @staticmethod

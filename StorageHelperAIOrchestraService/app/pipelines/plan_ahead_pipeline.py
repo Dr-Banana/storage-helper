@@ -102,6 +102,7 @@ class PlanAheadPipeline:
         cooking_level: Optional[str] = "beginner",
         language: Optional[str] = "zh",
         scheduling_context: Optional[str] = None,
+        user_profile: Optional[Dict[str, Any]] = None,
     ) -> str:
         """Build system context string for the single-shot structured LLM call."""
         now = self._now_in_timezone(user_timezone)
@@ -222,6 +223,114 @@ class PlanAheadPipeline:
             f"\nThis rule overrides everything else, regardless of what language the user writes in."
         )
 
+        # --- User meal blueprint (hard constraints from DB) ---
+        if user_profile:
+            ctx += "\n\n=== USER MEAL BLUEPRINT (HARD CONSTRAINTS — MUST FOLLOW) ==="
+            _servings = user_profile.get("default_servings", 1)
+            ctx += f"\n- Default servings per dish: {_servings} person(s). Scale all ingredient quantities accordingly."
+            _ratio = user_profile.get("meat_veg_ratio", "1:1:1")
+            _ratio_parts = _ratio.split(":")
+            if len(_ratio_parts) == 3:
+                ctx += f"\n- Dish composition per meal: {_ratio_parts[0]} meat dish(es), {_ratio_parts[1]} vegetable dish(es), {_ratio_parts[2]} staple(s)."
+            _soup = user_profile.get("include_soup", True)
+            if _soup:
+                ctx += "\n- MUST include at least one soup dish in every meal plan."
+            _cal = user_profile.get("calorie_target")
+            if _cal:
+                ctx += f"\n- Per-meal calorie target: ~{_cal} kcal. Prefer lighter dishes if near the limit."
+            _disliked = user_profile.get("disliked_ingredients") or []
+            if _disliked:
+                ctx += f"\n- FORBIDDEN ingredients (user dislikes): {', '.join(_disliked)}. Do NOT include any of these in any dish."
+            _cw = user_profile.get("cuisine_weights") or {}
+            if _cw:
+                _sorted_cw = sorted(_cw.items(), key=lambda x: -x[1])
+                _cw_str = ", ".join(f"{k}({v}%)" for k, v in _sorted_cw if v > 0)
+                ctx += f"\n- Cuisine preference weights: {_cw_str}. Higher weight = recommend more dishes from that cuisine."
+
+            _blueprint_summary = (
+                f"servings={_servings}, soup={'yes' if _soup else 'no'}, "
+                f"cal={_cal or 'none'}, "
+                f"disliked={_disliked if _disliked else '(none)'}, "
+                f"cuisine_weights={'yes' if _cw else 'none'}"
+            )
+            logger.info(f"[PLAN_AHEAD_PIPELINE] USER MEAL BLUEPRINT injected: {_blueprint_summary}")
+        else:
+            logger.info("[PLAN_AHEAD_PIPELINE] USER MEAL BLUEPRINT skipped (no profile)")
+
+        # --- Phase 2: Diversity Engine directive ---
+        if user_profile:
+            try:
+                from app.services.diversity_engine import compute_diversity_directive
+                _recent = user_profile.get("recent_dishes") or []
+                _cw_for_engine = user_profile.get("cuisine_weights") or {}
+                _diversity_directive = compute_diversity_directive(_recent, _cw_for_engine)
+                ctx += "\n\n=== DIVERSITY ENGINE: VARIETY DIRECTIVE (applies to AI-generated suggestions only) ==="
+                ctx += "\nTo ensure meal variety when YOU are recommending dishes, prefer avoiding repetition:"
+                ctx += f"\n{_diversity_directive}"
+                ctx += (
+                    "\n\n⚠️  OVERRIDE RULE: These diversity constraints apply ONLY when you are autonomously"
+                    " choosing dishes. If the user explicitly names a specific dish they want"
+                    " (e.g. '我想吃萝卜炖牛腩', '加个红烧肉'), you MUST honor their request"
+                    " and add that exact dish — even if it appears in a SOFT AVOID or HARD BAN list above."
+                    " User's explicit choice always takes priority over diversity rules."
+                )
+                _hard_bans = [l for l in _diversity_directive.splitlines() if "HARD BAN" in l]
+                _soft_avoids = [l for l in _diversity_directive.splitlines() if "SOFT AVOID" in l]
+                logger.info(
+                    f"[PLAN_AHEAD_PIPELINE] DIVERSITY ENGINE injected: "
+                    f"recent_count={len(_recent)}, "
+                    f"hard_bans={'yes' if _hard_bans else 'none'}, "
+                    f"soft_avoids={'yes' if _soft_avoids else 'none'}, "
+                    f"variety_target={'yes' if _cw_for_engine else 'none'}"
+                )
+            except Exception as _de_err:
+                logger.warning(f"[PLAN_AHEAD_PIPELINE] DiversityEngine failed (non-fatal): {_de_err}")
+        else:
+            logger.info("[PLAN_AHEAD_PIPELINE] DIVERSITY ENGINE skipped (no profile)")
+
+        # --- Phase 3: Seed Library candidate reference ---
+        if user_profile:
+            try:
+                from app.services import seed_library as _seed_lib
+                _sl_recent = user_profile.get("recent_dishes") or []
+                _sl_cw = user_profile.get("cuisine_weights") or {}
+                _sl_disliked = user_profile.get("disliked_ingredients") or []
+                _candidates = _seed_lib.select_candidates(
+                    cuisine_weights=_sl_cw,
+                    disliked_ingredients=_sl_disliked,
+                    recent_dishes=_sl_recent,
+                )
+                if _candidates:
+                    ctx += f"\n\n{_seed_lib.build_seed_context(_candidates)}"
+                    logger.info(
+                        "[PLAN_AHEAD_PIPELINE] SEED LIBRARY injected: %d candidates",
+                        len(_candidates),
+                    )
+            except Exception as _sl_err:
+                logger.warning("[PLAN_AHEAD_PIPELINE] SeedLibrary failed (non-fatal): %s", _sl_err)
+        else:
+            logger.debug("[PLAN_AHEAD_PIPELINE] SEED LIBRARY skipped (no profile)")
+
+        # --- Phase 3b: Rejected / already-tried dishes (current draft session) ---
+        _rejected: set = state.get("draft_rejected_dishes") or set()
+        if _rejected:
+            ctx += "\n\n=== DISHES ALREADY TRIED / REJECTED THIS SESSION ==="
+            ctx += (
+                "\nThe user has already replaced or rejected the following dishes during this planning session. "
+                "Do NOT suggest any of them again:"
+            )
+            for _rd in sorted(_rejected):
+                ctx += f"\n- {_rd}"
+            ctx += (
+                "\n\nWhen suggesting a replacement dish, FIRST pick from the SEED LIBRARY CANDIDATES above "
+                "that have not been used in the current plan and are not in the rejected list. "
+                "Only freely invent a new dish if no suitable unused seed candidate exists."
+            )
+            logger.info(
+                "[PLAN_AHEAD_PIPELINE] Rejected dishes injected: %d — %s",
+                len(_rejected), sorted(_rejected),
+            )
+
         # --- Live schedule context from SchedulingAgent ---
         if scheduling_context:
             ctx += "\n\n=== LIVE CALENDAR CONTEXT (from SchedulingAgent — most up-to-date) ==="
@@ -238,23 +347,46 @@ class PlanAheadPipeline:
                 "\n- Do NOT add a dish to a meal slot if that slot already contains the same dish in the CURRENT MEAL PLAN above."
             )
 
+        # Inject session flow state so the LLM knows which step it's on
+        _last_pa_action = state.get("last_pipeline_action")
+        if _last_pa_action == "ask":
+            ctx += (
+                "\n\n=== SESSION FLOW STATE ==="
+                "\nPREVIOUS TURN: You asked the user for their meal preferences (action=ask)."
+                "\nCURRENT TURN: The user has now provided their preferences."
+                "\nNEXT STEP REQUIRED: Use action='suggest_options' to present 2-3 alternative meal plan options."
+                "\nDO NOT use 'recommend' directly — present options first so the user can choose."
+                "\nDO NOT use 'ask' again — the user already provided their preferences."
+            )
+        elif _last_pa_action == "suggest_options":
+            ctx += (
+                "\n\n=== SESSION FLOW STATE ==="
+                "\nPREVIOUS TURN: You presented meal plan options (action=suggest_options)."
+                "\nCURRENT TURN: The user is selecting/modifying an option."
+                "\nNEXT STEP REQUIRED: Use action='recommend' with the selected option's meal_entries as the draft."
+            )
+
         ctx += "\n\n=== INSTRUCTIONS ==="
         ctx += (
             "\n1. Understand the user's intent and set 'action' to one of:"
-            " add, modify, remove, update_ingredients, remove_ingredients, view, ask, recommend, confirm."
+            " add, modify, remove, update_ingredients, remove_ingredients, view, ask, recommend, suggest_options, confirm."
         )
         ctx += (
             "\n2. Set 'target_date' (YYYY-MM-DD) for the affected date,"
             " and 'meal_time' (breakfast/lunch/dinner)."
         )
-        ctx += "\n3. Apply the change and output the COMPLETE updated plan in 'meal_entries':"
-        ctx += "\n   - Include ALL dates from the current plan above."
-        ctx += "\n   - For unchanged dates, copy them exactly (same dishes + same ingredients)."
-        ctx += "\n   - For changed dates, apply the user's modification."
+        ctx += "\n3. Apply the change and output the relevant dates in 'meal_entries':"
+        ctx += "\n   - For 'add': include ONLY the new date(s) the user mentioned. Do NOT echo back dates that already exist in the current plan."
+        ctx += "\n   - For 'modify'/'remove'/'update_ingredients'/'remove_ingredients': include ONLY the date(s) being changed."
+        ctx += "\n   - For 'view'/'confirm': mirror the current plan exactly (all dates)."
+        ctx += "\n   - For unchanged dates in a modify/remove operation, you may omit them — they are preserved automatically."
         ctx += (
             f"\n   - Each dish MUST include ingredients as an array of objects."
             f" Each ingredient object MUST have 'name' (write in {_lang_name}), 'category' (from the list below, keep in English), and an optional 'quantity' (e.g. '200g', '2 pieces', '1 tbsp')."
             "\n     category values (keep these exact English codes): vegetable, protein, dairy, grain, spice, other."
+            "\n   - Each dish SHOULD include a 'slot' field (keep in English) to indicate its role in the meal:"
+            "\n     slot values: 'main' (主菜, e.g. meat/fish/tofu dish), 'side' (配菜, e.g. stir-fried vegetables),"
+            "\n     'soup' (汤品, any soup/broth/congee), 'staple' (主食, e.g. rice/noodles/bread), 'other'."
         )
         ctx += "\n   - If user removes a date, omit it from meal_entries entirely."
         ctx += (
@@ -266,6 +398,13 @@ class PlanAheadPipeline:
         )
         ctx += "\n\nRULES:"
         ctx += "\n- NEVER invent meals for dates not mentioned unless user explicitly asks."
+        ctx += (
+            "\n- EXPLICIT DISH RULE: If the user explicitly names specific dish(es) they want"
+            " (e.g. '吃个萝卜炖牛腩', '加个红烧肉', 'I want beef stew'):"
+            "\n  1. Use action='add' and include ONLY those exact dishes — do NOT pad the meal with extra dishes."
+            "\n  2. IGNORE diversity soft-avoids and hard-bans for those dishes — user's explicit choice overrides variety rules."
+            "\n  3. NEVER refuse or redirect with 'you ate this recently' — honor the request directly."
+        )
         ctx += "\n- For 'view', meal_entries should mirror the current plan exactly."
         ctx += "\n- For 'update_ingredients'/'remove_ingredients', keep the same meals but update dish ingredients."
         ctx += "\n- For 'remove' of a date, that date MUST NOT appear in meal_entries."
@@ -285,8 +424,31 @@ class PlanAheadPipeline:
             "\n  * NEVER jump straight to generating a full meal plan on the first request without context."
         )
         ctx += (
-            "\n- Use 'recommend' ONLY after the user has provided enough preference context"
-            " (in current message or recent chat history). This generates a DRAFT — it is NOT saved yet."
+            "\n- Use 'suggest_options' AFTER the user has provided enough preference context (current or prior turns)."
+            " This presents 2-3 alternative meal plan styles so the user can choose — NO plan is saved yet."
+            "\n  * Set meal_entries=[] (the primary plan slot is empty for suggest_options)."
+            "\n  * In 'dish_options', provide exactly 2-3 complete alternative plans."
+            "\n    Each option MUST have: option_id ('1','2','3'), label (e.g. '方案一：家常风味'), and full meal_entries."
+            "\n    Each option's meal_entries must be a fully detailed plan (same format as normal meal_entries)."
+            "\n  * In user_message, present the options clearly:"
+            "\n    - List each option with its label and a one-line summary of the dishes."
+            "\n    - Tell the user to reply with '选方案X' or 'I choose option X' to select."
+            "\n    - Invite the user to request modifications (e.g. 'add more vegetables', 'make it simpler')."
+            "\n  * PRIORITIZE dishes that use ingredients from the FOOD INVENTORY for ALL options."
+            "\n  * Ensure variety across options (different cuisines/flavors/complexity levels)."
+        )
+        ctx += (
+            "\n- Use 'add' (NOT 'recommend') when the user explicitly names a specific dish they want to add"
+            " (e.g. '明天晚上加个萝卜炖牛腩', '帮我加上红烧肉', 'add beef stew for dinner')."
+            " Just add that exact dish — do NOT pad the meal with extra dishes unless the user asks for a full plan."
+        )
+        ctx += (
+            "\n- Use 'recommend' when:"
+            "\n  (a) The user has SELECTED one of the suggested options (e.g. '选方案2', 'I choose option 1')."
+            "    Use the EXACT meal_entries from that option as the draft."
+            "\n  (b) The user has selected AND requested modifications: apply the modifications to the option's plan."
+            "\n  (c) The user explicitly requests a FULL meal plan (not a single dish) without naming specific dishes."
+            "\n  This generates a DRAFT — it is NOT saved to calendar yet."
             "\n  * Fill requested slots with suitable dishes based on stated preferences."
             "\n  * PRIORITIZE dishes that use ingredients from the FOOD INVENTORY above."
             "\n  * Prefer [USE SOON] items — help the user avoid food waste."
@@ -336,6 +498,151 @@ class PlanAheadPipeline:
         refs = ", ".join(f"{d}={(next_monday + timedelta(days=i)).strftime('%Y-%m-%d')}" for i, d in enumerate(days_labels))
         ctx += refs
         return ctx
+
+    def _inject_pending_options(self, ctx: str, state: Dict[str, Any]) -> str:
+        """Append pending_options section to the context string when options exist."""
+        pending_options = state.get("pending_options")
+        if not pending_options:
+            return ctx
+
+        ctx += "\n\n=== PENDING MEAL PLAN OPTIONS (user has NOT selected yet) ==="
+        ctx += "\nThe following options were presented to the user. They are now selecting or modifying:"
+        for opt in pending_options:
+            oid = opt.get("option_id", "?")
+            label = opt.get("label", f"方案{oid}")
+            slots = opt.get("meal_plan_slots") or {}
+            ctx += f"\n\n[方案{oid}] {label}:"
+            for date_str in sorted(slots.keys()):
+                for mt in ("breakfast", "lunch", "dinner"):
+                    dishes = (slots.get(date_str) or {}).get(mt)
+                    if dishes:
+                        dish_list = dishes if isinstance(dishes, list) else [dishes]
+                        ctx += f"\n  {date_str} {mt}: {', '.join(dish_list)}"
+        ctx += (
+            "\n\nWhen the user selects an option (e.g. '选方案2', 'option 1', '我要第三个'):"
+            "\n  - Use 'recommend' action."
+            "\n  - Copy the selected option's meal_entries EXACTLY into the main meal_entries field."
+            "\n  - If the user also requests a modification, apply it to the selected option's plan."
+            "\n  - Clear pending options (they are resolved once the user selects)."
+        )
+        return ctx
+
+    # ------------------------------------------------------------------
+    # Lightweight intent classifier: explicit-add vs recommendation request
+    # ------------------------------------------------------------------
+
+    # Keywords that strongly signal the user is explicitly naming a dish to add/modify
+    _EXPLICIT_DISH_KEYWORDS = (
+        "加", "加个", "加上", "加一个", "吃个", "吃一个", "想吃", "要吃",
+        "做", "做个", "做一个", "换成", "换个", "改成",
+        "add", "want", "have",
+    )
+
+    @staticmethod
+    def _keyword_fallback_classify(query: str) -> Dict[str, Any]:
+        """Last-resort keyword-based classifier used when the LLM call fails.
+
+        Returns same shape as _classify_dish_intent but with intent only (no dish extraction).
+        """
+        q_lower = query.lower()
+        for kw in PlanAheadPipeline._EXPLICIT_DISH_KEYWORDS:
+            if kw in q_lower:
+                return {"is_explicit": False, "dishes": [], "intent": "EXPLICIT_HINT"}
+        return {"is_explicit": False, "dishes": [], "intent": "UNKNOWN"}
+
+    async def _classify_dish_intent(
+        self, query: str, history: List[Dict]
+    ) -> Dict[str, Any]:
+        """Classify the user's query intent and extract any explicitly named dishes.
+
+        Returns a dict:
+          {
+            "is_explicit": bool,        # True if user named specific dish(es)
+            "dishes": List[str],        # extracted dish names (may be empty)
+            "intent": str,              # "EXPLICIT" | "RECOMMEND" | "UNKNOWN"
+          }
+
+        Uses responseMimeType=application/json to force clean JSON output.
+        Falls back to keyword heuristic, then to UNKNOWN on error.
+        """
+        import json as _json
+        import re as _re
+
+        _system = (
+            "You are a meal-planning intent classifier.\n"
+            "Analyze the user's latest message and return a JSON object with exactly two keys:\n"
+            '  "intent": "EXPLICIT" if the user names specific dish(es) they want to eat/add/change, '
+            'or "RECOMMEND" if they ask the AI to suggest or plan meals without naming a dish.\n'
+            '  "dishes": an array of the explicitly named dish names (empty array [] for RECOMMEND).\n'
+            "Examples:\n"
+            '  Input: "加个萝卜炖牛腩"  → {"intent":"EXPLICIT","dishes":["萝卜炖牛腩"]}\n'
+            '  Input: "明天晚饭及一个小笼包" → {"intent":"EXPLICIT","dishes":["小笼包"]}\n'
+            '  Input: "换成照烧鸡腿"    → {"intent":"EXPLICIT","dishes":["照烧鸡腿"]}\n'
+            '  Input: "帮我计划今晚吃什么" → {"intent":"RECOMMEND","dishes":[]}\n'
+            '  Input: "给我推荐几个菜"  → {"intent":"RECOMMEND","dishes":[]}'
+        )
+
+        _history_turns = []
+        for msg in (history or [])[-4:]:
+            role = "user" if msg.get("role") == "user" else "model"
+            _history_turns.append({"role": role, "parts": [{"text": msg.get("content", "")}]})
+        _history_turns.append({"role": "user", "parts": [{"text": query}]})
+
+        payload = {
+            "contents": _history_turns,
+            "systemInstruction": {"parts": [{"text": _system}]},
+            "generationConfig": {
+                "temperature": 0.0,
+                "maxOutputTokens": 80,
+                "responseMimeType": "application/json",
+            },
+        }
+        _fallback = {"is_explicit": False, "dishes": [], "intent": "UNKNOWN"}
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.post(
+                    self.gemini_api_url,
+                    headers={"Content-Type": "application/json"},
+                    json=payload,
+                )
+                resp.raise_for_status()
+                result = resp.json()
+            candidates = result.get("candidates") or []
+            if candidates:
+                raw = (
+                    candidates[0]
+                    .get("content", {})
+                    .get("parts", [{}])[0]
+                    .get("text", "")
+                    .strip()
+                )
+                # Try to extract JSON even if LLM added markdown fences or extra text
+                _json_match = _re.search(r"\{.*\}", raw, _re.DOTALL)
+                raw_json = _json_match.group(0) if _json_match else raw
+                parsed = _json.loads(raw_json)
+                intent = str(parsed.get("intent", "UNKNOWN")).upper()
+                dishes = [str(d) for d in (parsed.get("dishes") or []) if d]
+                is_explicit = intent == "EXPLICIT" and bool(dishes)
+                logger.info(
+                    "[PLAN_AHEAD_PIPELINE] dish-intent classifier: query=%r → intent=%s dishes=%s",
+                    query[:60], intent, dishes,
+                )
+                return {"is_explicit": is_explicit, "dishes": dishes, "intent": intent}
+        except Exception as _clf_err:
+            logger.warning(
+                "[PLAN_AHEAD_PIPELINE] dish-intent classifier failed, trying keyword fallback: %s",
+                _clf_err,
+            )
+        # Keyword fallback: can detect EXPLICIT_HINT but cannot extract dish names
+        return self._keyword_fallback_classify(query)
+
+    # Kept as a thin wrapper for the Fresh-session guard (uses only the bool result)
+    async def _classify_explicit_add(self, query: str, history: List[Dict]) -> bool:
+        result = await self._classify_dish_intent(query, history)
+        # Also treat keyword-fallback EXPLICIT_HINT as explicit (LLM failed but keywords matched)
+        if result["intent"] == "EXPLICIT_HINT":
+            return True
+        return result["is_explicit"]
 
     # ------------------------------------------------------------------
     # Step 3: Single LLM call
@@ -456,16 +763,13 @@ class PlanAheadPipeline:
         orphaned_dates: List[str],
         storage_client: Any,
     ) -> None:
-        """Delete schedules for dates that no longer exist in the new plan.
+        """Remove specific dates from schedules.
 
-        Safety note: the storage layer creates one schedule record *per date*
-        (see pipeline_storage.py "Creating separate schedules for N dates").
-        Deleting a schedule only removes that specific day's record; other dates
-        are stored in separate records and are unaffected.  A multi-meal day
-        (breakfast + dinner) is stored inside the *same* per-date record, so if
-        the user moved dinner to another day and breakfast remains, the pipeline
-        should NOT include that date in `orphaned_dates` — orphaned_dates must
-        only contain dates that are completely absent from the new plan.
+        If a schedule contains ONLY the date being removed, the entire schedule is
+        deleted.  If a schedule contains multiple dates (the common case — all plan
+        dates share a single schedule record), only that date is stripped from the
+        schedule metadata and the record is updated in-place, leaving the remaining
+        dates intact.
         """
         if not orphaned_dates:
             return
@@ -475,15 +779,59 @@ class PlanAheadPipeline:
                 for s in schedules:
                     if s.get("event_type") not in ("meal_plan_draft", "shopping_list"):
                         continue
-                    mp, _, _, _ = storage_client._extract_meal_plan_from_schedule(s)
-                    if date_str in mp:
+                    mp, _sl, di, slots = storage_client._extract_meal_plan_from_schedule(s)
+                    if date_str not in mp:
+                        continue
+
+                    remaining_mp = {k: v for k, v in mp.items() if k != date_str}
+                    remaining_slots = {k: v for k, v in slots.items() if k != date_str}
+
+                    if not remaining_mp:
+                        # This was the only date in the schedule — delete entirely.
                         await storage_client.delete_schedule(s.get("id"), owner_id)
                         logger.info(
-                            f"[PLAN_AHEAD_PIPELINE] Deleted orphaned schedule id={s.get('id')} for date {date_str}"
+                            "[PLAN_AHEAD_PIPELINE] Deleted schedule id=%s (last date %s removed)",
+                            s.get("id"), date_str,
                         )
-                        break
+                    else:
+                        # Other dates remain — update the schedule without this date.
+                        _rem_dishes: set = {
+                            dish
+                            for d_slots in remaining_slots.values()
+                            for mt_dishes in d_slots.values()
+                            for dish in (mt_dishes if isinstance(mt_dishes, list) else [])
+                        }
+                        remaining_di = {k: v for k, v in di.items() if k in _rem_dishes}
+                        existing_dd = storage_client._extract_existing_dish_data(s)
+                        remaining_dd = {k: v for k, v in existing_dd.items() if k in _rem_dishes}
+                        remaining_shopping = compute_shopping_list(remaining_di)
+                        new_metadata = storage_client._convert_to_feature_format(
+                            remaining_mp,
+                            remaining_shopping,
+                            dish_ingredients=remaining_di,
+                            meal_plan_slots=remaining_slots if remaining_slots else None,
+                            existing_dish_data=remaining_dd if remaining_dd else None,
+                        )
+                        ok = await storage_client.update_schedule(
+                            owner_id=owner_id,
+                            schedule_id=s.get("id"),
+                            metadata=new_metadata,
+                        )
+                        if ok:
+                            logger.info(
+                                "[PLAN_AHEAD_PIPELINE] Removed date %s from schedule id=%s, "
+                                "%d date(s) remain",
+                                date_str, s.get("id"), len(remaining_mp),
+                            )
+                        else:
+                            logger.warning(
+                                "[PLAN_AHEAD_PIPELINE] Failed to update schedule id=%s "
+                                "after removing date %s",
+                                s.get("id"), date_str,
+                            )
+                    break
         except Exception as e:
-            logger.warning(f"[PLAN_AHEAD_PIPELINE] Failed to delete orphaned schedules: {e}")
+            logger.warning("[PLAN_AHEAD_PIPELINE] Failed to remove orphaned date: %s", e)
 
     async def _persist(
         self,
@@ -512,25 +860,65 @@ class PlanAheadPipeline:
                 await self._delete_orphaned_schedules(owner_id, [target_date], storage_client)
                 return None
 
-        # Find dates that were in the old plan but are absent from the new plan (e.g. move operation)
+        # Find dates that were in the old plan but are absent from the new plan (e.g. move operation).
+        # For 'add', the LLM correctly outputs ONLY the new dates — do NOT treat existing dates
+        # as orphans; they should be preserved as-is.
         old_dates = set((old_state.get("meal_plan") or {}).keys())
         new_dates = set(new_meal_plan.keys())
-        orphaned_dates = list(old_dates - new_dates)
+
+        # HARDCODED SAFETY RULE: only delete a date if ALL conditions hold:
+        #   1. It was in the old plan (i.e. it existed before this operation)
+        #   2. It falls WITHIN the date range of the new plan [min_new_date, max_new_date]
+        #      (dates outside that range were never "addressed" by this operation)
+        #   3. It is NOT present in the new plan (i.e. it was intentionally removed)
+        #   4. This is NOT an 'add' action (adds never delete)
+        # This prevents "鸡蛋是给早上的" from deleting 2026-03-13 / 2026-03-14 just because
+        # the LLM only output 2026-03-16.
+        if action == "add" or not new_dates:
+            orphaned_dates = []
+        else:
+            _new_min = min(new_dates)
+            _new_max = max(new_dates)
+            orphaned_dates = [
+                d for d in (old_dates - new_dates)
+                if _new_min <= d <= _new_max
+            ]
+
         if orphaned_dates:
             logger.info(f"[PLAN_AHEAD_PIPELINE] Dates removed from plan: {orphaned_dates}")
             await self._delete_orphaned_schedules(owner_id, orphaned_dates, storage_client)
 
-        existing_id = old_state.get("schedule_id")
+        # For 'add', only persist the newly added dates.
+        # Existing dates already have their own DB schedules and must NOT be re-created here
+        # (doing so would create duplicate schedules for the same date).
+        # Orphan deletion is already disabled above (orphaned_dates = []), so old schedules
+        # are preserved without any merging.
+        if action == "add":
+            logger.info(
+                "[PLAN_AHEAD_PIPELINE] add: persisting only new dates (%d) → %s",
+                len(new_meal_plan_slots), list(new_meal_plan_slots.keys()),
+            )
+
+        persist_meal_plan = new_meal_plan
+        persist_slots = new_meal_plan_slots
+        persist_ingr = dish_ingredients
+        persist_shopping = shopping_list
+
+        # For 'add': never pass existing_schedule_id — storage will do a per-date
+        # lookup so each date lands in its own schedule, never merged into an old one.
+        # For 'modify'/'confirm': pass existing_id as a hint so the right schedule
+        # is updated in-place for the same date.
+        existing_id = old_state.get("schedule_id") if action != "add" else None
         schedule_id = await self.plan_ahead_agent.persist_meal_plan(
-            meal_plan=new_meal_plan,
-            shopping_list=shopping_list,
+            meal_plan=persist_meal_plan,
+            shopping_list=persist_shopping,
             owner_id=owner_id,
             existing_schedule_id=existing_id,
             storage_client=storage_client,
             user_timezone=user_timezone,
             event_type="meal_plan_draft",
-            dish_ingredients=dish_ingredients,
-            meal_plan_slots=new_meal_plan_slots,
+            dish_ingredients=persist_ingr,
+            meal_plan_slots=persist_slots,
         )
         return schedule_id
 
@@ -549,6 +937,7 @@ class PlanAheadPipeline:
         intent_result: Any = None,
         cooking_level: Optional[str] = "beginner",
         language: Optional[str] = "zh",
+        user_profile: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
         Execute the full PLAN_AHEAD pipeline and return a chat.py-compatible result dict.
@@ -657,7 +1046,10 @@ class PlanAheadPipeline:
             cooking_level=cooking_level,
             language=language,
             scheduling_context=_scheduling_ctx,
+            user_profile=user_profile,
         )
+        # Inject pending options so the LLM can reference them when user selects
+        system_context = self._inject_pending_options(system_context, current_state)
 
         # ---- Step 3: Single LLM call ----
         parsed = await self._call_llm(system_context, history, user_input)
@@ -677,29 +1069,176 @@ class PlanAheadPipeline:
         new_meal_plan = parsed["meal_plan"]
         new_meal_plan_slots = parsed["meal_plan_slots"]
         new_dish_ingredients = parsed["dish_ingredients"]
+        new_dish_slots = parsed.get("dish_slots") or {}
         action = parsed["action"]
         target_date = parsed.get("target_date")
 
-        # ---- Guard: enforce ask-before-recommend on fresh sessions ----
-        # If the LLM jumps straight to "recommend" without any prior exchange in this
-        # planning session, intercept and ask for preferences first.
-        last_action = current_state.get("last_pipeline_action")
-        if action == "recommend" and last_action is None:
-            action = "ask"
-            # Keep LLM's user_message only if it looks like a question, otherwise replace.
-            if "?" not in user_message and "？" not in user_message:
-                user_message = (
-                    "在我为您制定计划之前，想先了解一下您的偏好 😊\n"
-                    "您喜欢什么口味或菜系（比如家常菜、川菜、日料）？有没有不吃的食材或饮食要求？"
+        # ---- Phase 3: Guardian validation (non-blocking) ----
+        try:
+            from app.services import guardian as _guardian
+            from app.services import seed_library as _seed_lib_g
+            _all_dish_names: List[str] = []
+            for _date_slots in (new_meal_plan_slots or {}).values():
+                for _mt_dishes in (_date_slots or {}).values():
+                    if isinstance(_mt_dishes, list):
+                        _all_dish_names.extend(_mt_dishes)
+                    elif isinstance(_mt_dishes, str):
+                        _all_dish_names.append(_mt_dishes)
+            if _all_dish_names:
+                _guardian_entries = [{"dish": n} for n in _all_dish_names]
+                _guardian_issues = _guardian.validate_meal_entries(_guardian_entries)
+                _in_seed_count = sum(1 for n in _all_dish_names if _seed_lib_g.lookup_dish(n))
+                logger.info(
+                    "[PLAN_AHEAD_PIPELINE][GUARDIAN] %d dish(es): %d from seed library, %d issue(s) detected",
+                    len(_all_dish_names),
+                    _in_seed_count,
+                    len(_guardian_issues),
                 )
+        except Exception as _g_err:
+            logger.warning("[PLAN_AHEAD_PIPELINE][GUARDIAN] validation failed (non-fatal): %s", _g_err)
+
+        # ---- Guard: enforce ask-before-recommend/suggest_options on fresh sessions ----
+        last_action = current_state.get("last_pipeline_action")
+
+        def _build_ask_fallback(profile: Optional[Dict[str, Any]]) -> str:
+            """Build a context-aware clarifying question using what's already known from the user profile."""
+            _lang_map_local = {
+                "zh": "zh", "en": "en", "ja": "ja", "ko": "ko",
+            }
+            _is_zh = (_lang_map_local.get(language or "zh", "zh") == "zh")
+
+            # Extract what we already know from the profile
+            _disliked: List[str] = (profile or {}).get("disliked_ingredients") or []
+            _cw: Dict[str, int] = (profile or {}).get("cuisine_weights") or {}
+            _top_cuisines = sorted(_cw.items(), key=lambda x: -x[1])[:2] if _cw else []
+
+            # Build "already know" acknowledgement
+            _known_parts: List[str] = []
+            if _top_cuisines:
+                _cuisine_str = "、".join(n for n, _ in _top_cuisines) if _is_zh else " and ".join(n for n, _ in _top_cuisines)
+                _known_parts.append(
+                    f"您偏好 {_cuisine_str} 菜系" if _is_zh else f"you prefer {_cuisine_str} cuisine"
+                )
+            if _disliked:
+                _dis_str = "、".join(_disliked[:4]) if _is_zh else ", ".join(_disliked[:4])
+                _known_parts.append(
+                    f"不吃 {_dis_str}" if _is_zh else f"avoiding {_dis_str}"
+                )
+
+            if _known_parts and _is_zh:
+                _known_line = "我已知道" + "，".join(_known_parts) + "。"
+                return (
+                    f"{_known_line}\n"
+                    "想帮您推荐几套菜单方案 😊 请问您想规划哪天的饮食？（比如今天晚饭、下周几天等）"
+                )
+            elif _known_parts:
+                _known_line = "I see that " + " and ".join(_known_parts) + "."
+                return (
+                    f"{_known_line}\n"
+                    "I'd love to suggest a few meal plan options! Which day(s) are you planning for?"
+                )
+            elif _is_zh:
+                return (
+                    "想帮您推荐几套菜单方案 😊\n"
+                    "请问您喜欢什么口味或菜系（比如家常菜、川菜、日料）？有没有不吃的食材或饮食要求？"
+                    "以及想规划哪天的饮食？"
+                )
+            else:
+                return (
+                    "I'd love to suggest a few meal plan options!\n"
+                    "What cuisine style do you prefer (e.g. Chinese home-style, Japanese, Western)? "
+                    "Any ingredients to avoid? And which day(s) are you planning for?"
+                )
+
+        # Fresh-plan guard: intercept LLM "recommend/suggest_options" for genuinely new dates
+        # when the user is NOT in the middle of an active draft session (suggest_options →
+        # selection → modify flow).  This forces the proper option-selection UX.
+        #
+        # DRAFT-SESSION continuations — do NOT intercept:
+        #   suggest_options → user picks option  (last_action="suggest_options")
+        #   recommend draft → user modifies dish (last_action="recommend")
+        #   modify draft    → user modifies more (last_action="modify")
+        #
+        # All other states (None, "add", "confirm", "ask", "view", …) are treated as
+        # "fresh planning context" and MUST go through the guard.
+        #
+        # EXCEPTION: If the user explicitly names a specific dish
+        # (e.g. "加个萝卜炖牛腩"), downgrade recommend → add (do NOT force ask).
+        # Actions where an ongoing conversation is already in progress — do NOT intercept.
+        # "ask": user answered a clarification question, let the next step through.
+        _DRAFT_SESSION_ACTIONS = {"suggest_options", "recommend", "modify", "ask"}
+        # Only intercept "recommend" — suggest_options is ALWAYS valid and must never be blocked.
+        if action == "recommend" and last_action not in _DRAFT_SESSION_ACTIONS:
+            _new_dates = set(new_meal_plan_slots.keys()) if new_meal_plan_slots else set()
+            _old_dates = set((old_state.get("meal_plan_slots") or {}).keys())
+            # Only bother classifying if there are new meal entries and genuinely new dates
+            _candidate_for_add = (
+                action == "recommend"
+                and bool(new_meal_plan_slots)
+                and _new_dates.isdisjoint(_old_dates)
+                and not current_state.get("pending_options")
+            )
+            _is_explicit_add = False
+            if _candidate_for_add:
+                _is_explicit_add = await self._classify_explicit_add(
+                    query=user_input or "", history=history or []
+                )
+            if _is_explicit_add:
+                action = "add"
+                logger.info(
+                    "[PLAN_AHEAD_PIPELINE] Fresh session: classifier=EXPLICIT_ADD, intercepted recommend "
+                    "with new date(s) %s → downgraded to add.",
+                    sorted(_new_dates),
+                )
+            else:
+                _orig_action = action
+                action = "ask"
+                # If the LLM already identified specific dates, give a targeted nudge
+                # ("tell me which meals for 2026-03-18") instead of the generic
+                # "which day do you want to plan?" fallback.
+                if _new_dates:
+                    _date_hint = "、".join(sorted(_new_dates))
+                    user_message = (
+                        f"好的，我来为您规划 {_date_hint} 的饮食！\n"
+                        "请告诉我具体想安排哪一餐（早餐/午餐/晚餐），"
+                        "我会为您推荐几套方案供您选择。"
+                    )
+                else:
+                    user_message = _build_ask_fallback(user_profile)
+                logger.info(
+                    "[PLAN_AHEAD_PIPELINE] Fresh-plan guard: classifier=RECOMMEND (or non-candidate), "
+                    "intercepted %s (last_action=%s) → forced ask.", _orig_action, last_action
+                )
+        # Also catch: LLM returned 'ask' action but put meal data in user_message.
+        # Detectable by 📅 emoji or a meal_entries payload on a fresh session.
+        elif action == "ask" and last_action not in _DRAFT_SESSION_ACTIONS and (
+            "📅" in user_message or new_meal_plan
+        ):
+            user_message = _build_ask_fallback(user_profile)
             logger.info(
-                "[PLAN_AHEAD_PIPELINE] Fresh session: intercepted recommend → forced ask."
+                "[PLAN_AHEAD_PIPELINE] Fresh session: ask with embedded meal data — replaced with preferences question."
             )
 
         # ---- Step 4: Early exits for non-plan actions ----
 
         # 'ask': AI is gathering preferences — no plan change, no persist.
         if action == "ask":
+            # Guard: if the AI has already asked once (last_action == "ask") and the user's message
+            # looks like an explicit dish request, the LLM is likely stuck because of diversity rules.
+            # In this case, override to a helpful message that acknowledges the user's intent.
+            if last_action == "ask" and not new_meal_plan_slots:
+                _q = (user_input or "").strip()
+                _explicit_add_keywords = ["加", "吃", "想要", "来个", "来一个", "做个", "加个", "add", "want"]
+                if any(kw in _q for kw in _explicit_add_keywords):
+                    user_message = (
+                        "抱歉，您提到的菜品刚好在近期吃过，系统建议多样化饮食。"
+                        "不过如果您坚持想吃，可以直接说「就要这个，帮我加上」，我会按您的意愿添加。"
+                        "或者告诉我想要哪天哪餐，我来给您推荐几个新方案。"
+                    )
+                    logger.info(
+                        "[PLAN_AHEAD_PIPELINE] action=ask (second consecutive): LLM stuck on diversity rules, "
+                        "replaced with override-hint message."
+                    )
             update_plan_state(owner_id=owner_id, last_pipeline_action="ask")
             logger.info("[PLAN_AHEAD_PIPELINE] action=ask: returning clarification question, skipping persist.")
             return self._build_result(
@@ -712,6 +1251,106 @@ class PlanAheadPipeline:
                 is_draft=is_currently_draft,
                 intent_result=intent_result,
             )
+
+        # 'suggest_options': AI presents multiple plan choices — store options, no draft yet.
+        if action == "suggest_options":
+            dish_options = parsed.get("dish_options") or []
+            if not dish_options:
+                # LLM returned suggest_options but no dish_options — fall back to ask
+                logger.warning(
+                    "[PLAN_AHEAD_PIPELINE] suggest_options with empty dish_options — falling back to ask."
+                )
+                update_plan_state(owner_id=owner_id, last_pipeline_action="ask")
+                if "?" not in user_message and "？" not in user_message:
+                    user_message = (
+                        "请告诉我您的饮食偏好（比如口味、菜系、饮食禁忌），我来为您推荐几套方案供选择。"
+                    )
+                return self._build_result(
+                    response_text=user_message,
+                    meal_plan=current_state.get("meal_plan", {}),
+                    meal_plan_slots=current_state.get("meal_plan_slots", {}),
+                    dish_ingredients=current_state.get("dish_ingredients", {}),
+                    shopping_list=current_state.get("shopping_list", []),
+                    schedule_id=current_state.get("schedule_id"),
+                    is_draft=False,
+                    intent_result=intent_result,
+                )
+
+            update_plan_state(
+                owner_id=owner_id,
+                last_pipeline_action="suggest_options",
+                pending_options=dish_options,
+            )
+            logger.info(
+                "[PLAN_AHEAD_PIPELINE] suggest_options: %d options stored, awaiting user selection.",
+                len(dish_options),
+            )
+            return self._build_result(
+                response_text=user_message,
+                meal_plan=current_state.get("meal_plan", {}),
+                meal_plan_slots=current_state.get("meal_plan_slots", {}),
+                dish_ingredients=current_state.get("dish_ingredients", {}),
+                shopping_list=current_state.get("shopping_list", []),
+                schedule_id=current_state.get("schedule_id"),
+                is_draft=False,
+                intent_result=intent_result,
+                dish_options=dish_options,
+            )
+
+        # After user selects an option: clear pending_options so they don't linger.
+        if action == "recommend" and current_state.get("pending_options"):
+            # Build a whitelist of (date, meal_type) pairs covered by the options.
+            # This prevents the LLM from "echoing back" existing DB meals (e.g. yesterday's
+            # lunch/breakfast) that appear in its context but were not part of the new plan.
+            pending = current_state.get("pending_options") or []
+            option_pairs: set = set()
+            for opt in pending:
+                for date, meals in (opt.get("meal_plan_slots") or {}).items():
+                    for meal_type in meals.keys():
+                        option_pairs.add((date, meal_type))
+
+            if option_pairs:
+                # Filter new_meal_plan_slots to only include whitelisted (date, meal_type) pairs
+                filtered_slots: dict = {}
+                for date, meals in new_meal_plan_slots.items():
+                    kept_meals = {
+                        mt: dishes
+                        for mt, dishes in meals.items()
+                        if (date, mt) in option_pairs
+                    }
+                    if kept_meals:
+                        filtered_slots[date] = kept_meals
+
+                removed_pairs = {
+                    (d, mt)
+                    for d, meals in new_meal_plan_slots.items()
+                    for mt in meals
+                    if (d, mt) not in option_pairs
+                }
+                if removed_pairs:
+                    logger.info(
+                        "[PLAN_AHEAD_PIPELINE] recommend after suggest_options: "
+                        "stripped %d echoed-back DB (date, meal_type) pair(s): %s",
+                        len(removed_pairs),
+                        sorted(removed_pairs),
+                    )
+
+                new_meal_plan_slots = filtered_slots
+                # Rebuild flat meal_plan from filtered slots
+                new_meal_plan = {
+                    date: [dish for dishes in meals.values() for dish in dishes]
+                    for date, meals in new_meal_plan_slots.items()
+                }
+                # Re-filter dish_ingredients and dish_slots to only kept dishes
+                kept_dishes: set = set()
+                for meals in new_meal_plan_slots.values():
+                    for dish_list in meals.values():
+                        kept_dishes.update(dish_list)
+                new_dish_ingredients = {d: v for d, v in new_dish_ingredients.items() if d in kept_dishes}
+                new_dish_slots = {d: v for d, v in new_dish_slots.items() if d in kept_dishes}
+
+            update_plan_state(owner_id=owner_id, pending_options=None)
+            logger.info("[PLAN_AHEAD_PIPELINE] recommend after suggest_options: clearing pending_options.")
 
         # 'confirm': user approved the draft — persist whatever is in current in-memory state.
         if action == "confirm":
@@ -776,9 +1415,36 @@ class PlanAheadPipeline:
                 dish_ingredients=draft_di,
                 is_draft=False,
                 last_pipeline_action=None,  # reset session after confirm
+                draft_rejected_dishes=None,  # clear rejected list on confirm
                 merge=False,
             )
             logger.info(f"[PLAN_AHEAD_PIPELINE] confirm: draft persisted, schedule_id={schedule_id}")
+
+            # Phase 2: update recent_dishes after confirmed commit
+            if user_profile is not None and new_sid:
+                try:
+                    from app.services.diversity_engine import extract_dishes_for_history
+                    _new_dish_entries = extract_dishes_for_history(draft_slots)
+                    if _new_dish_entries:
+                        _dish_names_log = [e["dish"] for e in _new_dish_entries[:5]]
+                        logger.info(
+                            f"[PLAN_AHEAD_PIPELINE] confirm: writing {len(_new_dish_entries)} dishes "
+                            f"to recent_dishes for user {owner_id}: {_dish_names_log}"
+                            + (" ..." if len(_new_dish_entries) > 5 else "")
+                        )
+                        import asyncio
+                        asyncio.ensure_future(
+                            storage_client.update_user_recent_dishes(
+                                owner_id=owner_id,
+                                new_entries=_new_dish_entries,
+                                existing_recent_dishes=user_profile.get("recent_dishes") or [],
+                            )
+                        )
+                    else:
+                        logger.info(f"[PLAN_AHEAD_PIPELINE] confirm: no new dish entries to write to recent_dishes")
+                except Exception as _rd_err:
+                    logger.warning(f"[PLAN_AHEAD_PIPELINE] recent_dishes update failed (non-fatal): {_rd_err}")
+
             return self._build_result(
                 response_text=user_message,
                 meal_plan=draft_plan,
@@ -816,6 +1482,149 @@ class PlanAheadPipeline:
                     f"covered by inventory, {len(need_to_buy)} still needed."
                 )
 
+        # ---- Step 4c: For explicit single-dish add/modify, strip LLM auto-completed extra dishes ----
+        # When the user explicitly names specific dish(es) (e.g. "加个萝卜炖牛腩"),
+        # the LLM may add extra dishes (sides, staples) that were not requested.
+        # We detect this via a lightweight classifier and keep only the requested dishes.
+        #
+        # Two-tier detection:
+        #   Tier 1 (LLM): _classify_dish_intent returns is_explicit=True + dish list → use it
+        #   Tier 2 (query-substring): LLM failed / returned EXPLICIT_HINT with empty dishes →
+        #       check which of the LLM's proposed dishes actually appear in the user's query.
+        #       A dish the user never typed is by definition an AI hallucination; strip it.
+        if action in ("add", "modify") and new_meal_plan_slots:
+            _dish_intent = await self._classify_dish_intent(
+                query=user_input or "", history=history or []
+            )
+
+            # Tier-2 fallback: LLM classifier returned EXPLICIT_HINT (keyword match,
+            # no dish extraction) or any other state where dishes==[].
+            # Derive dish list by checking which proposed dishes appear in the query.
+            if not _dish_intent["dishes"] and (
+                _dish_intent.get("intent") == "EXPLICIT_HINT"
+                or _dish_intent["is_explicit"]
+            ):
+                _query_clean = (user_input or "").lower().replace(" ", "")
+                _all_proposed: list = [
+                    d
+                    for _meals in new_meal_plan_slots.values()
+                    for _mt_dishes in _meals.values()
+                    for d in _mt_dishes
+                ]
+                _in_query = [
+                    d for d in _all_proposed
+                    if d.lower().replace(" ", "") in _query_clean
+                ]
+                if _in_query:
+                    _dish_intent = {
+                        "is_explicit": True,
+                        "dishes": _in_query,
+                        "intent": "QUERY_EXTRACTED",
+                    }
+                    logger.info(
+                        "[PLAN_AHEAD_PIPELINE] Tier-2 dish extraction: found %s in query",
+                        _in_query,
+                    )
+
+            if _dish_intent["is_explicit"] and _dish_intent["dishes"]:
+                _requested = _dish_intent["dishes"]
+                _explicit_slots: dict = {}
+                _removed_extras: list = []
+                for _date, _meals in new_meal_plan_slots.items():
+                    _kept_meals_ex = {}
+                    for _mt, _dishes in _meals.items():
+                        # Keep a dish if it fuzzy-matches any requested dish name
+                        _kept: list = []
+                        _removed: list = []
+                        for _d in _dishes:
+                            _d_lower = _d.lower().replace(" ", "")
+                            _match = any(
+                                _req.lower().replace(" ", "") in _d_lower
+                                or _d_lower in _req.lower().replace(" ", "")
+                                for _req in _requested
+                            )
+                            if _match:
+                                _kept.append(_d)
+                            else:
+                                _removed.append(_d)
+                        if _kept:
+                            _kept_meals_ex[_mt] = _kept
+                        _removed_extras.extend(_removed)
+                    if _kept_meals_ex:
+                        _explicit_slots[_date] = _kept_meals_ex
+                if _removed_extras:
+                    logger.info(
+                        "[PLAN_AHEAD_PIPELINE] explicit-dish filter: kept %s, stripped extra: %s",
+                        _requested, _removed_extras,
+                    )
+                    new_meal_plan_slots = _explicit_slots
+                    new_meal_plan = {
+                        d: [dish for mt_dishes in meals.values() for dish in mt_dishes]
+                        for d, meals in new_meal_plan_slots.items()
+                    }
+                    _kept_dishes_ex: set = {
+                        dish for meals in new_meal_plan_slots.values()
+                        for mt_dishes in meals.values() for dish in mt_dishes
+                    }
+                    new_dish_ingredients = {k: v for k, v in new_dish_ingredients.items() if k in _kept_dishes_ex}
+                    new_dish_slots = {k: v for k, v in new_dish_slots.items() if k in _kept_dishes_ex}
+                    shopping_list = compute_shopping_list(new_dish_ingredients)
+
+                    # Rebuild the response message to match what was actually saved.
+                    # The LLM's original message mentioned dishes that were filtered out.
+                    _meal_type_labels = {"breakfast": "早餐", "lunch": "午餐", "dinner": "晚餐", "snack": "加餐"}
+                    _lines: list = []
+                    for _d in sorted(new_meal_plan_slots):
+                        for _mt, _ds in new_meal_plan_slots[_d].items():
+                            _mt_label = _meal_type_labels.get(_mt, _mt)
+                            _dish_str = "、".join(_ds)
+                            _lines.append(f"📅 {_d} {_mt_label}: {_dish_str}")
+                    if _lines:
+                        _verb = "已为您" + ("添加" if action == "add" else "调整为")
+                        user_message = _verb + "\n" + "\n".join(_lines)
+                    logger.info(
+                        "[PLAN_AHEAD_PIPELINE] explicit-dish filter: rebuilt response message to match filtered plan."
+                    )
+
+        # ---- Step 4d: For 'add', strip echoed-back confirmed dates ----
+        # The LLM may include existing confirmed dates in its output (copied from context).
+        # For 'add', we only want truly new (date, meal_type) pairs — remove anything that
+        # already exists in the confirmed plan with identical content.
+        if action == "add" and not is_currently_draft:
+            _old_slots = old_state.get("meal_plan_slots") or {}
+            _add_filtered_slots: dict = {}
+            _add_echoed_pairs: list = []
+            for _date, _meals in new_meal_plan_slots.items():
+                _old_date_meals = _old_slots.get(_date, {})
+                _kept_meals = {}
+                for _mt, _dishes in _meals.items():
+                    _old_dishes = set(_old_date_meals.get(_mt, []))
+                    _new_set = set(_dishes)
+                    if _mt not in _old_date_meals or _new_set != _old_dishes:
+                        _kept_meals[_mt] = _dishes
+                    else:
+                        _add_echoed_pairs.append((_date, _mt))
+                if _kept_meals:
+                    _add_filtered_slots[_date] = _kept_meals
+            if _add_echoed_pairs:
+                logger.info(
+                    "[PLAN_AHEAD_PIPELINE] add: stripped %d echoed-back confirmed (date, meal_type) pair(s): %s",
+                    len(_add_echoed_pairs), sorted(_add_echoed_pairs),
+                )
+                new_meal_plan_slots = _add_filtered_slots
+                new_meal_plan = {
+                    d: [dish for mt_dishes in meals.values() for dish in mt_dishes]
+                    for d, meals in new_meal_plan_slots.items()
+                }
+                _kept_add_dishes: set = {
+                    dish for meals in new_meal_plan_slots.values()
+                    for mt_dishes in meals.values() for dish in mt_dishes
+                }
+                new_dish_ingredients = {d: v for d, v in new_dish_ingredients.items() if d in _kept_add_dishes}
+                new_dish_slots = {d: v for d, v in new_dish_slots.items() if d in _kept_add_dishes}
+                # Recompute shopping list after filtering
+                shopping_list = compute_shopping_list(new_dish_ingredients)
+
         # ---- Step 5: Draft-mode check ----
         # recommend always creates a draft.
         # Mutations (modify/add/remove/…) while a draft is active stay in draft — don't persist.
@@ -831,6 +1640,21 @@ class PlanAheadPipeline:
             if action == "recommend" and not is_currently_draft:
                 base_db_dates_kwarg["draft_base_db_dates"] = set(old_state.get("meal_plan", {}).keys())
 
+            # Compute which dishes were replaced/removed in this operation so we can track
+            # them as "rejected" and avoid re-suggesting them in subsequent turns.
+            _prev_draft_slots = current_state.get("meal_plan_slots") or {}
+            _prev_dishes: set = set()
+            for _pdate, _pmeals in _prev_draft_slots.items():
+                for _pmt, _pdishes in _pmeals.items():
+                    _prev_dishes.update(_pdishes)
+            _new_dishes: set = set()
+            for _ndate, _nmeals in new_meal_plan_slots.items():
+                for _nmt, _ndishes in _nmeals.items():
+                    _new_dishes.update(_ndishes)
+            _newly_rejected = _prev_dishes - _new_dishes
+            # Preserve existing rejected dishes across turns (union-merge in update_plan_state)
+            _existing_rejected: set = current_state.get("draft_rejected_dishes") or set()
+
             update_plan_state(
                 owner_id=owner_id,
                 meal_plan=new_meal_plan,
@@ -840,9 +1664,15 @@ class PlanAheadPipeline:
                 dish_ingredients=new_dish_ingredients,
                 is_draft=True,
                 last_pipeline_action=action,
+                draft_rejected_dishes=_existing_rejected | _newly_rejected,
                 merge=False,
                 **base_db_dates_kwarg,
             )
+            if _newly_rejected:
+                logger.info(
+                    "[PLAN_AHEAD_PIPELINE] Tracking %d newly rejected dish(es): %s",
+                    len(_newly_rejected), sorted(_newly_rejected),
+                )
             logger.info(
                 f"[PLAN_AHEAD_PIPELINE] action={action} (draft): memory updated, DB persist deferred. "
                 f"dates={list(new_meal_plan.keys())}"
@@ -856,11 +1686,32 @@ class PlanAheadPipeline:
                 schedule_id=current_state.get("schedule_id"),
                 is_draft=True,
                 intent_result=intent_result,
+                dish_slots=new_dish_slots,
             )
 
         # ---- Step 6: Persist (non-draft direct operations) ----
         schedule_id = current_state.get("schedule_id")
         if action != "view":
+            # For 'remove': the LLM returns action=remove + target_date but empty
+            # meal_entries.  Rebuild new_meal_plan as the surviving plan (old state
+            # minus the removed date) so (a) _delete_orphaned_schedules only strips
+            # that one date from the schedule instead of deleting the whole record,
+            # and (b) update_plan_state below reflects the remaining meals correctly.
+            if action == "remove" and target_date and target_date not in new_meal_plan:
+                _old_mp = current_state.get("meal_plan") or {}
+                _old_slots = current_state.get("meal_plan_slots") or {}
+                _old_di = current_state.get("dish_ingredients") or {}
+                new_meal_plan = {k: v for k, v in _old_mp.items() if k != target_date}
+                new_meal_plan_slots = {k: v for k, v in _old_slots.items() if k != target_date}
+                _rem_dishes: set = {
+                    dish
+                    for meals in new_meal_plan_slots.values()
+                    for mt_dishes in meals.values()
+                    for dish in (mt_dishes if isinstance(mt_dishes, list) else [])
+                }
+                new_dish_ingredients = {k: v for k, v in _old_di.items() if k in _rem_dishes}
+                shopping_list = compute_shopping_list(new_dish_ingredients)
+
             new_sid = await self._persist(
                 owner_id=owner_id,
                 action=action,
@@ -875,6 +1726,23 @@ class PlanAheadPipeline:
             )
             if new_sid:
                 schedule_id = new_sid
+
+            # Phase 2: update recent_dishes after direct persist (add / modify)
+            if user_profile is not None and new_sid and action in ("add", "modify"):
+                try:
+                    from app.services.diversity_engine import extract_dishes_for_history
+                    _new_dish_entries = extract_dishes_for_history(new_meal_plan_slots)
+                    if _new_dish_entries:
+                        import asyncio
+                        asyncio.ensure_future(
+                            storage_client.update_user_recent_dishes(
+                                owner_id=owner_id,
+                                new_entries=_new_dish_entries,
+                                existing_recent_dishes=user_profile.get("recent_dishes") or [],
+                            )
+                        )
+                except Exception as _rd_err:
+                    logger.warning(f"[PLAN_AHEAD_PIPELINE] recent_dishes update failed (non-fatal): {_rd_err}")
 
         update_plan_state(
             owner_id=owner_id,
@@ -913,6 +1781,8 @@ class PlanAheadPipeline:
         schedule_id: Optional[int],
         intent_result: Any,
         is_draft: bool = False,
+        dish_options: Optional[List] = None,
+        dish_slots: Optional[Dict] = None,
     ) -> Dict[str, Any]:
         """Build chat.py-compatible response dict."""
         try:
@@ -924,18 +1794,26 @@ class PlanAheadPipeline:
             intent_val = "PLAN_AHEAD"
             confidence = 0.95
             reasoning = ""
+
+        action_str = "SUGGEST_OPTIONS" if dish_options else "PLAN_AHEAD"
+        action_data: Dict[str, Any] = {
+            "meal_plan": meal_plan,
+            "shopping_list": shopping_list,
+            "meal_plan_slots": meal_plan_slots,
+            "dish_ingredients": dish_ingredients,
+            "schedule_id": schedule_id,
+            "is_draft": is_draft,
+        }
+        if dish_options:
+            action_data["dish_options"] = dish_options
+        if dish_slots:
+            action_data["dish_slots"] = dish_slots
+
         return {
             "response": response_text,
             "intent": intent_val,
             "confidence": confidence,
             "reasoning": reasoning,
-            "action": "PLAN_AHEAD",
-            "action_data": {
-                "meal_plan": meal_plan,
-                "shopping_list": shopping_list,
-                "meal_plan_slots": meal_plan_slots,
-                "dish_ingredients": dish_ingredients,
-                "schedule_id": schedule_id,
-                "is_draft": is_draft,
-            },
+            "action": action_str,
+            "action_data": action_data,
         }

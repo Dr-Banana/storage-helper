@@ -169,9 +169,8 @@ LANGUAGE REQUIREMENT: {language_instruction} This applies to ALL text you genera
                     cooking_context=active_cooking_ctx,
                 )
 
-            # 1b. Lightweight safety net: if we're in a plan-ahead flow and the LLM returns
-            #     COOKING_STEPS but downgrades to GENERAL (rare edge case), correct it.
-            #     NOTE: broad "stickiness" is now handled by the LLM via session_mode above.
+            # 1b. Lightweight safety nets for cases where the LLM misclassifies.
+            #     NOTE: broad "stickiness" is handled by the LLM via session_mode above.
             cooking_step_phrases = (
                 "怎么做", "怎么烹饪", "如何做", "做法", "步骤", "教我做",
                 "how to cook", "how to make", "how do i cook", "how do i make",
@@ -191,6 +190,51 @@ LANGUAGE REQUIREMENT: {language_instruction} This applies to ALL text you genera
                     },
                 )()
                 logger.info(f"Cooking-steps override: {old_intent} -> COOKING_STEPS for: {user_input[:50]}")
+
+            # 1c. Meal-declaration safety net: "今天早饭吃个X / 明天晚上整个X / ..."
+            #     When the user states what they intend to eat at a specific meal time /
+            #     date, it is an implicit PLAN_AHEAD add request even without keywords
+            #     like "add" or "plan".  The LLM sometimes routes these to GENERAL.
+            #
+            #     Two-tier matching to avoid false positives:
+            #       Tier 1 (strong): meal-specific words (早饭/午饭/晚饭/breakfast/lunch/dinner)
+            #                        + date word → always override
+            #       Tier 2 (weak):   time-of-day words (早上/中午/晚上) + date + eat/drink verb
+            #                        → override (avoids "明天晚上有空吗" becoming PLAN_AHEAD)
+            if intent_result.intent == Intent.GENERAL:
+                _meal_words = ("早饭", "早餐", "午饭", "午餐", "晚饭", "晚餐",
+                               "breakfast", "lunch", "dinner")
+                _time_of_day = ("早上", "中午", "晚上")   # require eat verb to trigger
+                _eat_verbs   = ("吃", "喝")               # narrow eating verbs for tier-2
+                _date_words = ("今天", "明天", "后天", "昨天", "大后天",
+                               "周一", "周二", "周三", "周四", "周五", "周六", "周日",
+                               "星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日",
+                               "monday", "tuesday", "wednesday", "thursday", "friday",
+                               "saturday", "sunday", "tonight", "tomorrow", "today")
+                _past_markers = ("吃了", "喝了", "做了", "已经", "刚才", "刚刚", "已吃",
+                                 "ate", "had", "already")
+                _has_meal_word = any(w in user_lower for w in _meal_words)
+                _has_tod_with_verb = (
+                    any(w in user_lower for w in _time_of_day)
+                    and any(w in user_lower for w in _eat_verbs)
+                )
+                _has_date = any(w in user_lower for w in _date_words)
+                _is_past  = any(w in user_lower for w in _past_markers)
+                if (_has_meal_word or _has_tod_with_verb) and _has_date and not _is_past:
+                    old_intent = intent_result.intent
+                    intent_result = type(
+                        "IntentResult",
+                        (),
+                        {
+                            "intent": Intent.PLAN_AHEAD,
+                            "reasoning": "Meal-declaration safety net: meal-time + date → implicit add",
+                            "confidence": 0.85,
+                        },
+                    )()
+                    logger.info(
+                        f"[chat] Meal-declaration override: {old_intent} -> PLAN_AHEAD "
+                        f"for: {user_input[:60]}"
+                    )
 
             # 2a. COOKING_STEPS: short-circuit before route_by_intent to pass history.
             #
@@ -987,6 +1031,24 @@ LANGUAGE REQUIREMENT: {language_instruction} This applies to ALL text you genera
                     from app.storage.pipeline_storage import _default_storage
                     _pipeline = PlanAheadPipeline(gemini_api_url=self.api_url)
 
+                    # Fetch user profile for meal blueprint (cuisine weights, disliked ingredients, etc.)
+                    _user_profile = await _default_storage.get_user_profile(owner_id)
+                    if _user_profile:
+                        _disliked   = _user_profile.get("disliked_ingredients") or []
+                        _cw         = _user_profile.get("cuisine_weights") or {}
+                        _recent     = _user_profile.get("recent_dishes") or []
+                        _servings   = _user_profile.get("default_servings", 1)
+                        logger.info(
+                            f"[MEAL_BLUEPRINT] User {owner_id} profile loaded: "
+                            f"servings={_servings}, "
+                            f"disliked={_disliked if _disliked else '(none)'}, "
+                            f"cuisine_weights={_cw}, "
+                            f"recent_dishes_count={len(_recent)}"
+                            + (f", recent_banned={[e['dish'] for e in _recent[:3]]}" if _recent else "")
+                        )
+                    else:
+                        logger.warning(f"[MEAL_BLUEPRINT] User {owner_id} profile NOT loaded — blueprint/diversity skipped.")
+
                     # ── COMPOUND CHECK: PLAN_AHEAD + COOKING_STEPS ──────────────────────
                     # When the user says e.g. "今天晚上加宫保鸡丁和鱼香肉丝，附上做法":
                     #   1. Run PlanAheadPipeline to add the dishes (also persists to DB).
@@ -1018,6 +1080,7 @@ LANGUAGE REQUIREMENT: {language_instruction} This applies to ALL text you genera
                             context=_cmpd_pa_context,
                             intent_result=intent_result,
                             cooking_level=cooking_level,
+                            user_profile=_user_profile,
                         )
                         _plan_data = _plan_result.get("action_data") or {}
 
@@ -1153,6 +1216,7 @@ LANGUAGE REQUIREMENT: {language_instruction} This applies to ALL text you genera
                         intent_result=intent_result,
                         cooking_level=cooking_level,
                         language=language,
+                        user_profile=_user_profile,
                     )
 
                     # ── Log the full AI response ──────────────────────────────────
@@ -1175,7 +1239,8 @@ LANGUAGE REQUIREMENT: {language_instruction} This applies to ALL text you genera
                         _pa_ad_bg = _pa_result.get("action_data") or {}
                         _pa_slots_bg = _pa_ad_bg.get("meal_plan_slots") or {}
                         _pa_sid_bg = _pa_ad_bg.get("schedule_id")
-                        if _pa_slots_bg and _pa_sid_bg:
+                        _pa_is_draft_bg = _pa_ad_bg.get("is_draft", False)
+                        if _pa_slots_bg and _pa_sid_bg and not _pa_is_draft_bg:
                             _bg_dishes: List[str] = []
                             for _date_slots in _pa_slots_bg.values():
                                 for _mt_dishes in (_date_slots or {}).values():

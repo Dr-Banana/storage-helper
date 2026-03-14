@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, memo } from 'react'
-import { X, Send, FileText, Sparkles, User, BrainCircuit, Check, Calendar, ShoppingCart, ArrowRight } from 'lucide-react'
+import { X, Send, FileText, Sparkles, User, BrainCircuit, Check, Calendar, ShoppingCart, ArrowRight, ChefHat, PencilLine, Shuffle } from 'lucide-react'
 import { Link, useNavigate } from 'react-router-dom'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -118,6 +118,222 @@ const MealPlanCard: React.FC<{ plan: MealPlanData; onViewSchedule?: () => void }
   )
 }
 
+interface DishOption {
+  option_id: string
+  label: string
+  meal_plan?: Record<string, string>
+  meal_plan_slots?: Record<string, Record<string, string[]>>
+  dish_ingredients?: Record<string, Array<{ name: string; category: string; quantity?: string }>>
+  dish_slots?: Record<string, string>
+}
+
+// Slot metadata: icon, label, sort priority
+const SLOT_META: Record<string, { icon: string; label: string; order: number }> = {
+  main:   { icon: '🍗', label: '主菜', order: 1 },
+  side:   { icon: '🥬', label: '配菜', order: 2 },
+  soup:   { icon: '🥣', label: '汤品', order: 3 },
+  staple: { icon: '🍜', label: '主食', order: 4 },
+  other:  { icon: '🍽️', label: '其他', order: 5 },
+}
+
+/** Fallback slot classification when LLM doesn't provide it. */
+function inferSlot(dishName: string): string {
+  const n = dishName
+  if (/汤|羹|粥/.test(n)) return 'soup'
+  if (/饭|面|馒头|包子|饺|粉|米饭|乌冬|意面|面包|吐司|米线/.test(n)) return 'staple'
+  if (/炒|烧|蒸|煮|烤|卤|炸|拌|鱼|鸡|肉|虾|牛|猪|羊|排|鸭|蟹|豆腐|蛋/.test(n)) return 'main'
+  if (/菜|瓜|藕|豆角|笋|茄|蔬|素|白菜|生菜|西兰花|花椰菜/.test(n)) return 'side'
+  return 'other'
+}
+
+// ─── Unified meal action card ────────────────────────────────────────────────
+interface MealActionCardProps {
+  title: string
+  statusLabel: string
+  statusVariant: 'option' | 'draft'
+  mealPlanSlots: Record<string, Record<string, string[]>>
+  dishSlots?: Record<string, string>
+  sortedDates: string[]
+  onConfirm: () => void
+  confirmLabel: string
+  onReplace: (dishName: string) => void
+  onPrepareAdjustment: (dishName: string) => void
+}
+
+const MealActionCard: React.FC<MealActionCardProps> = ({
+  title, statusLabel, statusVariant,
+  mealPlanSlots, dishSlots, sortedDates,
+  onConfirm, confirmLabel, onReplace, onPrepareAdjustment,
+}) => {
+  const dishSlotMap = dishSlots || {}
+
+  const allDishNames: string[] = []
+  for (const date of sortedDates) {
+    for (const mt of ['breakfast', 'lunch', 'dinner', 'snack']) {
+      const dishes = (mealPlanSlots[date] || {})[mt] || []
+      for (const d of dishes) {
+        if (!allDishNames.includes(d)) allDishNames.push(d)
+      }
+    }
+  }
+
+  type DishEntry = { name: string; slot: string }
+  const grouped: Record<string, DishEntry[]> = {}
+  for (const name of allDishNames) {
+    const slot = dishSlotMap[name] || inferSlot(name)
+    if (!grouped[slot]) grouped[slot] = []
+    grouped[slot].push({ name, slot })
+  }
+  const slotOrder = ['main', 'side', 'soup', 'staple', 'other']
+  const presentSlots = slotOrder.filter(s => grouped[s]?.length)
+
+  const badgeClass = statusVariant === 'option'
+    ? 'border border-home-primary-200 bg-home-primary-50 text-home-primary-600'
+    : 'border border-gray-200 bg-gray-100 text-gray-500'
+
+  return (
+    <div className="overflow-hidden rounded-2xl border border-gray-200 bg-white shadow-sm">
+      {/* Header */}
+      <div className="flex items-center gap-2 border-b border-gray-100 bg-white px-4 py-3">
+        <div className="flex h-6 w-6 shrink-0 items-center justify-center rounded-lg bg-home-primary-50 text-home-primary-600">
+          <ChefHat size={13} />
+        </div>
+        <span className="flex-1 text-sm font-bold text-gray-800">{title}</span>
+        <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${badgeClass}`}>
+          {statusLabel}
+        </span>
+      </div>
+
+      {/* Date chips */}
+      {sortedDates.length > 1 && (
+        <div className="border-b border-gray-50 bg-gray-50/60 px-4 py-2">
+          <div className="flex flex-wrap gap-1.5">
+            {sortedDates.map(date => {
+              let label = date
+              try {
+                const [y, m, d] = date.split('-').map(Number)
+                label = new Date(y, m - 1, d).toLocaleDateString(undefined, { month: 'short', day: 'numeric', weekday: 'short' })
+              } catch { /* keep raw */ }
+              return (
+                <span key={date} className="rounded-md border border-gray-100 bg-white px-2 py-0.5 text-[10px] text-gray-500">
+                  {label}
+                </span>
+              )
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* Dish rows */}
+      <div className="divide-y divide-gray-50 px-1 py-1">
+        {presentSlots.map(slot => {
+          const meta = SLOT_META[slot] || SLOT_META.other
+          return (grouped[slot] || []).map(({ name }) => (
+            <div key={name} className="group flex items-center gap-2 px-3 py-2.5 transition-colors hover:bg-gray-50/80">
+              <span className="text-base leading-none">{meta.icon}</span>
+              <div className="w-10 shrink-0">
+                <span className="text-[10px] font-semibold uppercase tracking-wide text-gray-400">{meta.label}</span>
+              </div>
+              <span className="flex-1 text-sm font-medium text-gray-800">{name}</span>
+              {/* Action buttons — revealed on row hover */}
+              <div className="flex items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100">
+                <button
+                  onClick={() => onPrepareAdjustment(name)}
+                  title="调整细节"
+                  className="flex h-6 items-center gap-1 rounded-lg px-1.5 text-xs font-medium text-gray-500 transition-colors hover:bg-home-primary-50 hover:text-home-primary-600"
+                >
+                  <PencilLine size={12} /> 调整
+                </button>
+                <button
+                  onClick={() => onReplace(name)}
+                  title="直接换掉"
+                  className="flex h-6 items-center gap-1 rounded-lg px-1.5 text-xs font-medium text-gray-500 transition-colors hover:bg-gray-100 hover:text-gray-700"
+                >
+                  <Shuffle size={12} /> 换菜
+                </button>
+              </div>
+            </div>
+          ))
+        })}
+      </div>
+
+      {/* Confirm button */}
+      <div className="border-t border-gray-100 bg-gray-50/30 px-4 py-3">
+        <button
+          onClick={onConfirm}
+          className="flex w-full items-center justify-center gap-2 rounded-xl bg-home-primary-600 py-2.5 text-sm font-bold text-white shadow-sm transition-all hover:bg-home-primary-700 active:scale-[0.98]"
+        >
+          <Check size={14} />
+          {confirmLabel}
+        </button>
+      </div>
+    </div>
+  )
+}
+
+// ─── Options list (SUGGEST_OPTIONS) ─────────────────────────────────────────
+interface MealOptionsCardProps {
+  options: DishOption[]
+  onConfirm: (optionId: string, label: string) => void
+  onReplace: (optionId: string, label: string, dishName: string) => void
+  onPrepareAdjustment: (optionId: string, label: string, dishName: string) => void
+}
+
+const MealOptionsCard: React.FC<MealOptionsCardProps> = ({ options, onConfirm, onReplace, onPrepareAdjustment }) => {
+  if (!options || options.length === 0) return null
+  return (
+    <div className="mt-3 w-full space-y-3">
+      {options.map((opt) => {
+        const mealSlots = opt.meal_plan_slots || {}
+        const sortedDates = Object.keys(mealSlots).sort()
+        return (
+          <MealActionCard
+            key={opt.option_id}
+            title={opt.label || `方案 ${opt.option_id}`}
+            statusLabel="可选方案"
+            statusVariant="option"
+            mealPlanSlots={mealSlots}
+            dishSlots={opt.dish_slots}
+            sortedDates={sortedDates}
+            onConfirm={() => onConfirm(opt.option_id, opt.label)}
+            confirmLabel="确认此方案"
+            onReplace={(dishName) => onReplace(opt.option_id, opt.label, dishName)}
+            onPrepareAdjustment={(dishName) => onPrepareAdjustment(opt.option_id, opt.label, dishName)}
+          />
+        )
+      })}
+    </div>
+  )
+}
+
+// ─── Draft confirm card (PLAN_AHEAD is_draft) ────────────────────────────────
+interface DraftPlanCardProps {
+  actionData: any
+  onConfirm: () => void
+  onReplace: (dishName: string) => void
+  onPrepareAdjustment: (dishName: string) => void
+}
+
+const DraftPlanCard: React.FC<DraftPlanCardProps> = ({ actionData, onConfirm, onReplace, onPrepareAdjustment }) => {
+  const mealPlanSlots: Record<string, Record<string, string[]>> = actionData?.meal_plan_slots || {}
+  const sortedDates = Object.keys(mealPlanSlots).sort()
+  if (!sortedDates.length) return null
+  return (
+    <MealActionCard
+      title="调整后的方案"
+      statusLabel="待确认"
+      statusVariant="draft"
+      mealPlanSlots={mealPlanSlots}
+      dishSlots={actionData?.dish_slots}
+      sortedDates={sortedDates}
+      onConfirm={onConfirm}
+      confirmLabel="确认保存计划"
+      onReplace={onReplace}
+      onPrepareAdjustment={onPrepareAdjustment}
+    />
+  )
+}
+
 // Define props interface
 interface MessageItemProps {
   msg: Message;
@@ -127,11 +343,19 @@ interface MessageItemProps {
   overwriteDismissed?: boolean;
   onOverwriteSaved?: (scheduleId: number) => void;
   onOverwriteDismiss?: () => void;
+  onSelectOption?: (optionId: string, label: string) => void;
+  onReplaceInOption?: (optionId: string, label: string, dishName: string) => void;
+  onPrepareAdjustmentInOption?: (optionId: string, label: string, dishName: string) => void;
+  onConfirmDraft?: () => void;
+  onReplaceDraftDish?: (dishName: string) => void;
+  onPrepareAdjustmentDraftDish?: (dishName: string) => void;
 }
 
 const MessageItem = memo(({
   msg, index, setMessages, setIsLoading,
   overwriteDismissed, onOverwriteSaved, onOverwriteDismiss,
+  onSelectOption, onReplaceInOption, onPrepareAdjustmentInOption,
+  onConfirmDraft, onReplaceDraftDish, onPrepareAdjustmentDraftDish,
 }: MessageItemProps) => {
     const navigate = useNavigate();
 
@@ -255,6 +479,26 @@ const MessageItem = memo(({
           />
         )}
 
+        {/* Meal Plan Options (suggest_options flow) */}
+        {msg.role === 'model' && msg.action === 'SUGGEST_OPTIONS' && msg.actionData?.dish_options?.length > 0 && onSelectOption && (
+          <MealOptionsCard
+            options={msg.actionData.dish_options}
+            onConfirm={onSelectOption}
+            onReplace={onReplaceInOption || (() => {})}
+            onPrepareAdjustment={onPrepareAdjustmentInOption || (() => {})}
+          />
+        )}
+
+        {/* Draft Plan Confirm Card (recommend draft flow) */}
+        {msg.role === 'model' && msg.action === 'PLAN_AHEAD' && msg.actionData?.is_draft && onConfirmDraft && (
+          <DraftPlanCard
+            actionData={msg.actionData}
+            onConfirm={onConfirmDraft}
+            onReplace={onReplaceDraftDish || (() => {})}
+            onPrepareAdjustment={onPrepareAdjustmentDraftDish || (() => {})}
+          />
+        )}
+
         {/* Action Buttons for Correction */}
         {msg.role === 'model' && msg.action === 'APPLY_CORRECTION' && msg.actionData?.corrected_items && (
              <div className="mt-1 flex gap-2">
@@ -341,6 +585,7 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ isOpen, onClose }) => {
   const [isLoading, setIsLoading] = useState(false)
   const [input, setInput] = useState('')
   const [activeContext, setActiveContext] = useState<any>(null)
+  const [pendingAdjustment, setPendingAdjustment] = useState<{ dishName: string } | null>(null)
   // Indices of ASK_OVERWRITE messages whose diff card has been acted on (saved or dismissed).
   const [dismissedOverwrites, setDismissedOverwrites] = useState<Set<number>>(new Set())
   const messagesEndRef = useRef<HTMLDivElement>(null)
@@ -369,9 +614,15 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ isOpen, onClose }) => {
   }, [isOpen])
 
   const handleSend = async (overrideInput?: string, overrideContext?: any) => {
-    const messageToSend = overrideInput || input.trim()
+    let messageToSend = overrideInput || input.trim()
     const contextToSend = overrideContext || activeContext
     if (!messageToSend || !userId || isLoading) return
+
+    // Prepend adjustment context if the user is replying to a targeted dish
+    if (pendingAdjustment && !overrideInput) {
+      messageToSend = `[针对菜品：${pendingAdjustment.dishName}] 用户要求：${messageToSend}`
+      setPendingAdjustment(null)
+    }
 
     if (!overrideInput) setInput('')
     setMessages(prev => [...prev, { role: 'user', content: messageToSend }])
@@ -418,7 +669,10 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ isOpen, onClose }) => {
       }])
 
       // Update or clear context based on action
-      if (response.action === 'PLAN_AHEAD' && response.action_data) {
+      if (response.action === 'SUGGEST_OPTIONS' && response.action_data) {
+        // Options presented — keep plan_ahead context so subsequent selection works.
+        setActiveContext({ type: 'plan_ahead', data: response.action_data })
+      } else if (response.action === 'PLAN_AHEAD' && response.action_data) {
         setActiveContext({ type: 'plan_ahead', data: response.action_data })
         const _planSid = response.action_data.schedule_id
         // Immediate refresh to show the saved meal plan
@@ -460,6 +714,7 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ isOpen, onClose }) => {
         // Keep plan_ahead context active so the user can still confirm after reviewing.
       } else if (
         response.action !== 'PLAN_AHEAD' &&
+        response.action !== 'SUGGEST_OPTIONS' &&
         response.action !== 'COOKING_STEPS' &&
         response.action !== 'ASK_OVERWRITE' &&
         activeContext?.type === 'plan_ahead'
@@ -472,6 +727,36 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ isOpen, onClose }) => {
     } finally {
       setIsLoading(false)
     }
+  }
+
+  /** 用户点击"确认此方案" — 选中并请求 AI 转为草稿 */
+  const handleSelectOption = (optionId: string, label: string) => {
+    handleSend(`选方案${optionId}：${label}`)
+  }
+
+  /** 用户点击 🔄 换一个 — 保留该方案但替换指定菜品 */
+  const handleReplaceInOption = (optionId: string, _label: string, dishName: string) => {
+    handleSend(`我想要方案${optionId}，但请把"${dishName}"换成另一道类似的菜，其他菜品保持不变`)
+  }
+
+  /** 用户点击 📝 调整 — 进入引用模式，不直接发送 */
+  const handlePrepareAdjustmentInOption = (_optionId: string, _label: string, dishName: string) => {
+    setPendingAdjustment({ dishName })
+  }
+
+  /** 草稿方案：用户点击"确认保存计划" */
+  const handleConfirmDraft = () => {
+    handleSend('确认保存计划')
+  }
+
+  /** 草稿方案：用户点击 换菜 — 直接替换 */
+  const handleReplaceDraftDish = (dishName: string) => {
+    handleSend(`当前方案中，请把"${dishName}"换成另一道类似的菜，其他菜品保持不变`)
+  }
+
+  /** 草稿方案：用户点击 📝 调整 — 进入引用模式 */
+  const handlePrepareAdjustmentDraftDish = (dishName: string) => {
+    setPendingAdjustment({ dishName })
   }
 
   // Event Listeners (Open Chat, Context Updates)
@@ -572,6 +857,12 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ isOpen, onClose }) => {
               }))
             }}
             onOverwriteDismiss={() => setDismissedOverwrites(prev => new Set([...prev, index]))}
+            onSelectOption={handleSelectOption}
+            onReplaceInOption={handleReplaceInOption}
+            onPrepareAdjustmentInOption={handlePrepareAdjustmentInOption}
+            onConfirmDraft={handleConfirmDraft}
+            onReplaceDraftDish={handleReplaceDraftDish}
+            onPrepareAdjustmentDraftDish={handlePrepareAdjustmentDraftDish}
           />
         ))}
         
@@ -596,31 +887,55 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ isOpen, onClose }) => {
           onSubmit={(e) => { e.preventDefault(); handleSend(); }} 
           className="relative"
         >
-          <div className="flex items-end gap-2 w-full bg-gray-100 border border-transparent focus-within:bg-white focus-within:border-home-primary-300 focus-within:ring-4 focus-within:ring-home-primary-50 rounded-xl transition-all">
-            <textarea
-              ref={inputRef}
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter' && !e.shiftKey) {
-                  e.preventDefault();
-                  handleSend();
+          <div className="w-full overflow-hidden rounded-xl border border-transparent bg-gray-100 transition-all focus-within:border-home-primary-300 focus-within:bg-white focus-within:ring-4 focus-within:ring-home-primary-50">
+            {/* Targeted-reply reference bar */}
+            {pendingAdjustment && (
+              <div className="flex items-center gap-2 border-b border-home-primary-100 bg-home-primary-50 px-3 py-1.5">
+                <PencilLine size={12} className="shrink-0 text-home-primary-500" />
+                <span className="flex-1 truncate text-xs font-medium text-home-primary-700">
+                  正在调整：{pendingAdjustment.dishName}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setPendingAdjustment(null)}
+                  className="text-home-primary-400 transition-colors hover:text-home-primary-600"
+                >
+                  <X size={13} />
+                </button>
+              </div>
+            )}
+            <div className="flex items-end gap-2">
+              <textarea
+                ref={inputRef}
+                value={input}
+                onChange={(e) => setInput(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && !e.shiftKey) {
+                    e.preventDefault();
+                    handleSend();
+                  }
+                }}
+                placeholder={
+                  pendingAdjustment
+                    ? `想怎么调整"${pendingAdjustment.dishName}"？`
+                    : activeContext
+                      ? 'Type correction...'
+                      : 'Ask me anything...'
                 }
-              }}
-              placeholder={activeContext ? "Type correction..." : "Ask me anything..."}
-              className="flex-1 pl-4 py-3.5 bg-transparent border-none focus:ring-0 text-sm text-gray-800 placeholder-gray-400 outline-none resize-none custom-scrollbar"
-              disabled={isLoading}
-              rows={1}
-              style={{ minHeight: '48px', maxHeight: '120px' }}
-            />
-            <div className="pb-2.5 pr-2">
-              <button
-                type="submit"
-                disabled={!input.trim() || isLoading}
-                className="aspect-square p-2 bg-home-primary-600 text-white rounded-lg flex items-center justify-center hover:bg-home-primary-700 disabled:opacity-50 disabled:hover:bg-home-primary-600 transition-colors"
-              >
-                <Send size={16} />
-              </button>
+                className="flex-1 resize-none border-none bg-transparent py-3.5 pl-4 text-sm text-gray-800 placeholder-gray-400 outline-none focus:ring-0 custom-scrollbar"
+                disabled={isLoading}
+                rows={1}
+                style={{ minHeight: '48px', maxHeight: '120px' }}
+              />
+              <div className="pb-2.5 pr-2">
+                <button
+                  type="submit"
+                  disabled={!input.trim() || isLoading}
+                  className="flex aspect-square items-center justify-center rounded-lg bg-home-primary-600 p-2 text-white transition-colors hover:bg-home-primary-700 disabled:opacity-50 disabled:hover:bg-home-primary-600"
+                >
+                  <Send size={16} />
+                </button>
+              </div>
             </div>
           </div>
         </form>

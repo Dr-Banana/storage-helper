@@ -365,6 +365,12 @@ def steps_have_action_verbs(steps: List[str]) -> bool:
         "slice", "chop", "dice", "fry", "sauté", "saute", "simmer",
         "boil", "toss", "season", "remove", "return", "marinate",
         "combine", "whisk", "beat", "drain", "serve", "coat", "rub",
+        # Additional English verbs covering LLM markdown-bold style output
+        "scramble", "transfer", "garnish", "prepare", "mince", "peel",
+        "grate", "blanch", "preheat", "reduce", "fold", "knead", "roll",
+        "bake", "roast", "grill", "steam", "poach", "braise", "deglaze",
+        "sear", "flip", "press", "squeeze", "spread", "sprinkle", "cover",
+        "uncover", "bring", "let", "allow", "set", "reserve", "separate",
         # Chinese verbs (kept for backward compatibility)
         "将", "把", "加", "放", "切", "炒", "煮", "焯", "腌", "搅",
         "混", "拌", "烧", "蒸", "烤", "炸", "盛", "撒", "倒", "取",

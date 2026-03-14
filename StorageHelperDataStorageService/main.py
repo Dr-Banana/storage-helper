@@ -77,8 +77,17 @@ try:
         _conn.execute(_sql_text(
             "ALTER TABLE \"user\" ADD COLUMN IF NOT EXISTS calorie_target INTEGER"
         ))
+        _conn.execute(_sql_text(
+            "ALTER TABLE \"user\" ADD COLUMN IF NOT EXISTS disliked_ingredients JSON DEFAULT '[]'::json"
+        ))
+        _conn.execute(_sql_text(
+            "ALTER TABLE \"user\" ADD COLUMN IF NOT EXISTS cuisine_weights JSON DEFAULT '{\"Chinese\": 50, \"Western\": 20, \"Japanese\": 15, \"Korean\": 10, \"Other\": 5}'::json"
+        ))
+        _conn.execute(_sql_text(
+            "ALTER TABLE \"user\" ADD COLUMN IF NOT EXISTS recent_dishes JSON DEFAULT '[]'::json"
+        ))
         _conn.commit()
-    logger.info("DB migration: storage_location.content_analysis, user.cooking_level, user.language, user.dining_preference columns ensured")
+    logger.info("DB migration: user preference columns (disliked_ingredients, cuisine_weights, recent_dishes) ensured")
 except Exception as _e:
     logger.warning(f"DB migration check skipped: {_e}")
 

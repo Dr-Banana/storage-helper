@@ -2,7 +2,7 @@
 Database models for User
 """
 from datetime import datetime
-from sqlalchemy import Boolean, Column, Integer, String, Text, DateTime, func, UniqueConstraint
+from sqlalchemy import Boolean, Column, Integer, String, Text, DateTime, JSON, func, UniqueConstraint
 from sqlalchemy.orm import relationship
 
 from app.core.database import Base
@@ -35,6 +35,10 @@ class User(Base):
     meat_veg_ratio = Column(String(20), nullable=False, server_default="1:1:1")
     include_soup = Column(Boolean, nullable=False, server_default="true")
     calorie_target = Column(Integer, nullable=True)
+    # Meal diversity & personalization fields
+    disliked_ingredients = Column(JSON, nullable=True, server_default="[]")
+    cuisine_weights = Column(JSON, nullable=True, server_default='{"Chinese": 50, "Western": 20, "Japanese": 15, "Korean": 10, "Other": 5}')
+    recent_dishes = Column(JSON, nullable=True, server_default="[]")
     created_at = Column(DateTime, default=func.now(), nullable=False)
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now(), nullable=False)
 

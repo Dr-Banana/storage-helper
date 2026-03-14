@@ -51,12 +51,20 @@ def get_plan_state(owner_id: int) -> Dict[str, Any]:
             # Holds the proposed new recipe when the dish already has a saved recipe,
             # waiting for the user to click "Save this version" in the RecipeDiffCard.
             "pending_overwrite": state.get("pending_overwrite"),
+            # Pending meal plan options presented to the user (suggest_options action).
+            # Each option is a dict with {option_id, label, meal_plan_slots, dish_ingredients}.
+            # Cleared when user selects an option (recommend action follows).
+            "pending_options": state.get("pending_options"),
+            # Dishes explicitly replaced/rejected by the user in the current draft session.
+            # Used to avoid re-suggesting the same dishes and to guide the seed library fallback.
+            "draft_rejected_dishes": state.get("draft_rejected_dishes", set()),
             "updated_at": state.get("updated_at"),
         }
     return {
         "meal_plan": {}, "shopping_list": [], "meal_plan_slots": {}, "dish_ingredients": {},
         "is_draft": False, "draft_base_db_dates": set(), "last_pipeline_action": None,
         "cooking_context": None, "pending_modify_action": None, "pending_overwrite": None,
+        "pending_options": None, "draft_rejected_dishes": set(),
     }
 
 
@@ -73,6 +81,8 @@ def update_plan_state(
     cooking_context = _UNSET,  # Dict with dish_name + steps, or None to clear
     pending_modify_action = _UNSET,  # Deferred MODIFY_RECIPE request awaiting user confirmation
     pending_overwrite = _UNSET,  # Proposed recipe overwrite awaiting user confirmation
+    pending_options = _UNSET,  # List of meal plan options for suggest_options flow
+    draft_rejected_dishes = _UNSET,  # Set[str] of dishes rejected/replaced in this draft session
     merge: bool = True,
 ) -> Dict[str, Any]:
     """
@@ -181,6 +191,20 @@ def update_plan_state(
             current.pop("pending_overwrite", None)
         else:
             current["pending_overwrite"] = pending_overwrite
+
+    if pending_options is not _UNSET:
+        if pending_options is None:
+            current.pop("pending_options", None)
+        else:
+            current["pending_options"] = pending_options
+
+    if draft_rejected_dishes is not _UNSET:
+        if draft_rejected_dishes is None:
+            current.pop("draft_rejected_dishes", None)
+        else:
+            # Always union-merge so we accumulate rejections across turns
+            existing_rejected: set = current.get("draft_rejected_dishes", set())
+            current["draft_rejected_dishes"] = existing_rejected | set(draft_rejected_dishes)
 
     current["updated_at"] = datetime.now(timezone.utc)
     _plan_states[owner_id] = current

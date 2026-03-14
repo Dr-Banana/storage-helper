@@ -44,12 +44,53 @@ logger = logging.getLogger(__name__)
 # Structured output schema for PLAN_AHEAD (replaces free-text PLAN_JSON)
 # ---------------------------------------------------------------------------
 
+# Shared dish entry schema — reused by both meal_entries and dish_options.
+_DISH_ENTRY_ITEM_SCHEMA: Dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "date": {"type": "string"},
+        "meal_time": {"type": "string", "enum": ["breakfast", "lunch", "dinner"]},
+        "dishes": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    # slot: role of the dish within the meal (for structured card UI)
+                    "slot": {
+                        "type": "string",
+                        "enum": ["main", "side", "soup", "staple", "other"],
+                        "nullable": True,
+                    },
+                    "ingredients": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "name":     {"type": "string"},
+                                "category": {
+                                    "type": "string",
+                                    "enum": ["vegetable", "protein", "dairy", "grain", "spice", "other"],
+                                },
+                                "quantity": {"type": "string"},
+                            },
+                            "required": ["name", "category"],
+                        },
+                    },
+                },
+                "required": ["name", "ingredients"],
+            },
+        },
+    },
+    "required": ["date", "meal_time", "dishes"],
+}
+
 PLAN_AHEAD_RESPONSE_SCHEMA: Dict[str, Any] = {
     "type": "object",
     "properties": {
         "action": {
             "type": "string",
-            "enum": ["add", "modify", "remove", "update_ingredients", "remove_ingredients", "view", "ask", "recommend", "confirm"],
+            "enum": ["add", "modify", "remove", "update_ingredients", "remove_ingredients", "view", "ask", "recommend", "suggest_options", "confirm"],
         },
         "target_date": {"type": "string"},
         "meal_time": {"type": "string", "enum": ["breakfast", "lunch", "dinner"]},
@@ -57,38 +98,22 @@ PLAN_AHEAD_RESPONSE_SCHEMA: Dict[str, Any] = {
         "user_message": {"type": "string"},
         "meal_entries": {
             "type": "array",
+            "items": _DISH_ENTRY_ITEM_SCHEMA,
+        },
+        "dish_options": {
+            "type": "array",
+            "nullable": True,
             "items": {
                 "type": "object",
                 "properties": {
-                    "date": {"type": "string"},
-                    "meal_time": {"type": "string", "enum": ["breakfast", "lunch", "dinner"]},
-                    "dishes": {
+                    "option_id": {"type": "string"},
+                    "label": {"type": "string"},
+                    "meal_entries": {
                         "type": "array",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "name": {"type": "string"},
-                                "ingredients": {
-                                    "type": "array",
-                                    "items": {
-                                        "type": "object",
-                                        "properties": {
-                                            "name":     {"type": "string"},
-                                            "category": {
-                                                "type": "string",
-                                                "enum": ["vegetable", "protein", "dairy", "grain", "spice", "other"],
-                                            },
-                                            "quantity": {"type": "string"},
-                                        },
-                                        "required": ["name", "category"],
-                                    },
-                                },
-                            },
-                            "required": ["name", "ingredients"],
-                        },
+                        "items": _DISH_ENTRY_ITEM_SCHEMA,
                     },
                 },
-                "required": ["date", "meal_time", "dishes"],
+                "required": ["option_id", "label", "meal_entries"],
             },
         },
     },
@@ -1284,43 +1309,52 @@ class PlanAheadAgent:
             logger.warning("[SCHEDULING AGENT] parse_structured_response: meal_entries missing or not a list")
             return None
 
-        # Build meal_plan_slots: date -> meal_time -> List[str]
-        meal_plan_slots: Dict[str, Dict[str, List[str]]] = {}
-        dish_ingredients: Dict[str, List[Dict[str, str]]] = {}
+        def _parse_entries(entries: list) -> tuple:
+            """Parse a list of meal_entry dicts → (meal_plan_slots, dish_ingredients, dish_slots).
 
-        for entry in meal_entries:
-            date_str = (entry.get("date") or "").strip()
-            meal_time = (entry.get("meal_time") or "dinner").strip()
-            dishes = entry.get("dishes") or []
-            if not date_str:
-                continue
-            if date_str not in meal_plan_slots:
-                meal_plan_slots[date_str] = {}
-            dish_names: List[str] = []
-            for dish in dishes:
-                name = (dish.get("name") or "").strip()
-                if not name:
+            dish_slots maps dish_name → slot label ("main"/"side"/"soup"/"staple"/"other").
+            """
+            slots: Dict[str, Dict[str, List[str]]] = {}
+            di: Dict[str, List[Dict[str, str]]] = {}
+            dish_slot_map: Dict[str, str] = {}
+            for entry in entries:
+                date_str = (entry.get("date") or "").strip()
+                mt = (entry.get("meal_time") or "dinner").strip()
+                dishes = entry.get("dishes") or []
+                if not date_str:
                     continue
-                dish_names.append(name)
-                # Accept new dict format [{"name":..,"category":..,"quantity":..}]
-                # and legacy string format ["pasta"] for backward compatibility.
-                raw_ings = dish.get("ingredients") or []
-                ings: List[Dict[str, str]] = []
-                for i in raw_ings:
-                    if isinstance(i, dict):
-                        ing_name = (i.get("name") or "").strip()
-                        if ing_name:
-                            ings.append({
-                                "name":     ing_name,
-                                "category": i.get("category") or "other",
-                                "quantity": i.get("quantity") or "",
-                            })
-                    elif isinstance(i, str) and i.strip():
-                        ings.append({"name": i.strip(), "category": "other", "quantity": ""})
-                if ings:
-                    dish_ingredients[name] = ings
-            if dish_names:
-                meal_plan_slots[date_str][meal_time] = dish_names
+                if date_str not in slots:
+                    slots[date_str] = {}
+                dish_names: List[str] = []
+                for dish in dishes:
+                    name = (dish.get("name") or "").strip()
+                    if not name:
+                        continue
+                    dish_names.append(name)
+                    slot_val = (dish.get("slot") or "").strip() or None
+                    if slot_val:
+                        dish_slot_map[name] = slot_val
+                    raw_ings = dish.get("ingredients") or []
+                    ings: List[Dict[str, str]] = []
+                    for i in raw_ings:
+                        if isinstance(i, dict):
+                            ing_name = (i.get("name") or "").strip()
+                            if ing_name:
+                                ings.append({
+                                    "name":     ing_name,
+                                    "category": i.get("category") or "other",
+                                    "quantity": i.get("quantity") or "",
+                                })
+                        elif isinstance(i, str) and i.strip():
+                            ings.append({"name": i.strip(), "category": "other", "quantity": ""})
+                    if ings:
+                        di[name] = ings
+                if dish_names:
+                    slots[date_str][mt] = dish_names
+            return slots, di, dish_slot_map
+
+        # Build meal_plan_slots: date -> meal_time -> List[str]
+        meal_plan_slots, dish_ingredients, dish_slots = _parse_entries(meal_entries)
 
         # Flat meal_plan: date -> "Dish A and Dish B" (kept for backward compat with storage layer)
         meal_plan: Dict[str, str] = {}
@@ -1331,10 +1365,35 @@ class PlanAheadAgent:
             if all_dishes:
                 meal_plan[date_str] = " and ".join(all_dishes)
 
+        # Parse dish_options for suggest_options action
+        raw_options = data.get("dish_options") or []
+        parsed_options: List[Dict[str, Any]] = []
+        for opt in raw_options:
+            if not isinstance(opt, dict):
+                continue
+            opt_entries = opt.get("meal_entries") or []
+            opt_slots, opt_di, opt_dish_slots = _parse_entries(opt_entries)
+            opt_meal_plan: Dict[str, str] = {}
+            for d, s in opt_slots.items():
+                all_d: List[str] = []
+                for mt in ("breakfast", "lunch", "dinner", "snack"):
+                    all_d.extend(s.get(mt) or [])
+                if all_d:
+                    opt_meal_plan[d] = " and ".join(all_d)
+            parsed_options.append({
+                "option_id": (opt.get("option_id") or "").strip(),
+                "label": (opt.get("label") or "").strip(),
+                "meal_plan": opt_meal_plan,
+                "meal_plan_slots": opt_slots,
+                "dish_ingredients": opt_di,
+                "dish_slots": opt_dish_slots,
+            })
+
         shopping_list = compute_shopping_list(dish_ingredients)
         logger.info(
             f"[SCHEDULING AGENT] parse_structured_response: {len(meal_plan)} dates, "
-            f"{len(dish_ingredients)} dishes with ingredients"
+            f"{len(dish_ingredients)} dishes with ingredients, "
+            f"{len(parsed_options)} options"
         )
         return {
             "action": (data.get("action") or "view").strip(),
@@ -1344,7 +1403,9 @@ class PlanAheadAgent:
             "meal_plan": meal_plan,
             "meal_plan_slots": meal_plan_slots,
             "dish_ingredients": dish_ingredients,
+            "dish_slots": dish_slots,
             "shopping_list": shopping_list,
+            "dish_options": parsed_options,
         }
 
 

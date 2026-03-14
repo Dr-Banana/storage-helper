@@ -2,7 +2,7 @@
 Pydantic schemas for User
 """
 from datetime import datetime
-from typing import Literal, Optional
+from typing import Any, Dict, List, Literal, Optional
 from pydantic import BaseModel, Field, EmailStr, field_validator
 
 CookingLevel = Literal["beginner", "intermediate", "expert"]
@@ -21,6 +21,9 @@ class UserCreate(BaseModel):
     meat_veg_ratio: str = Field("1:1:1", description="Dish count ratio: meat:veg:staple (e.g. '1:1:1')")
     include_soup: bool = Field(True, description="Whether soup must be included in every meal plan")
     calorie_target: Optional[int] = Field(None, ge=100, le=5000, description="Optional per-meal calorie target in kcal")
+    disliked_ingredients: Optional[List[str]] = Field(default_factory=list, description="Ingredients the user dislikes or avoids")
+    cuisine_weights: Optional[Dict[str, int]] = Field(None, description="Cuisine region weights for variety engine, e.g. {'Chinese': 50, 'Western': 20}")
+    recent_dishes: Optional[List[Dict[str, Any]]] = Field(default_factory=list, description="Recent dishes eaten, used for recency penalty")
 
 
 class UserUpdate(BaseModel):
@@ -33,6 +36,9 @@ class UserUpdate(BaseModel):
     meat_veg_ratio: Optional[str] = Field(None, description="Dish count ratio: meat:veg:staple (e.g. '1:1:1')")
     include_soup: Optional[bool] = Field(None, description="Whether soup must be included in every meal plan")
     calorie_target: Optional[int] = Field(None, ge=100, le=5000, description="Optional per-meal calorie target in kcal")
+    disliked_ingredients: Optional[List[str]] = Field(None, description="Ingredients the user dislikes or avoids")
+    cuisine_weights: Optional[Dict[str, int]] = Field(None, description="Cuisine region weights, e.g. {'Chinese': 50, 'Western': 20}")
+    recent_dishes: Optional[List[Dict[str, Any]]] = Field(None, description="Recent dishes eaten, used for recency penalty")
 
 
 class UserResponse(BaseModel):
@@ -48,6 +54,9 @@ class UserResponse(BaseModel):
     meat_veg_ratio: str = "1:1:1"
     include_soup: bool = True
     calorie_target: Optional[int] = None
+    disliked_ingredients: Optional[List[str]] = Field(default_factory=list)
+    cuisine_weights: Optional[Dict[str, int]] = Field(default_factory=lambda: {"Chinese": 50, "Western": 20, "Japanese": 15, "Korean": 10, "Other": 5})
+    recent_dishes: Optional[List[Dict[str, Any]]] = Field(default_factory=list)
     created_at: datetime
     updated_at: datetime
 

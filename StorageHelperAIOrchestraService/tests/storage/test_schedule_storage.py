@@ -68,21 +68,41 @@ class TestScheduleStorage:
     async def test_create_or_update_meal_plan_schedule(self):
         """Should create or update meal plan schedule correctly"""
         storage = PipelineStorage()
-        
-        # Mock the methods
-        with patch.object(storage, 'update_schedule', new_callable=AsyncMock) as mock_update, \
+
+        # Must use features format so _extract_meal_plan_from_schedule populates
+        # meal_plan_slots; only then does the per-(date, meal_time) lookup match.
+        existing_schedule = {
+            "id": 7,
+            "owner_id": 1,
+            "metadata": {
+                "features": [
+                    {
+                        "type": "meal_plan",
+                        "plans": [
+                            {
+                                "date": "2026-02-10",
+                                "meals": [{"mealTime": "dinner", "dishes": [{"name": "Pasta"}]}],
+                            }
+                        ],
+                    }
+                ]
+            },
+        }
+
+        with patch.object(storage, 'get_user_schedules', new_callable=AsyncMock) as mock_get, \
+             patch.object(storage, 'update_schedule', new_callable=AsyncMock) as mock_update, \
              patch.object(storage, 'create_schedule', new_callable=AsyncMock) as mock_create:
-            
-            # Test update path
-            mock_update.return_value = {"id": 7}
-            
+
+            mock_get.return_value = [existing_schedule]
+            mock_update.return_value = True
+
             result = await storage.create_or_update_meal_plan_schedule(
                 owner_id=1,
                 meal_plan={"2026-02-10": "Pasta"},
                 shopping_list=["tomatoes"],
                 existing_schedule_id=7
             )
-            
+
             assert result == 7
             mock_update.assert_called_once()
             mock_create.assert_not_called()
@@ -91,16 +111,39 @@ class TestScheduleStorage:
     async def test_update_existing_schedule(self):
         """Should update existing schedule when ID provided"""
         storage = PipelineStorage()
-        
-        with patch.object(storage, 'update_schedule', new_callable=AsyncMock) as mock_update:
-            mock_update.return_value = {"id": 7}
-            
+
+        existing_schedule = {
+            "id": 7,
+            "owner_id": 1,
+            "metadata": {
+                "features": [
+                    {
+                        "type": "meal_plan",
+                        "plans": [
+                            {
+                                "date": "2026-02-10",
+                                "meals": [{"mealTime": "dinner", "dishes": [{"name": "Pasta"}]}],
+                            }
+                        ],
+                    }
+                ]
+            },
+        }
+
+        with patch.object(storage, 'get_user_schedules', new_callable=AsyncMock) as mock_get, \
+             patch.object(storage, 'update_schedule', new_callable=AsyncMock) as mock_update, \
+             patch.object(storage, 'create_schedule', new_callable=AsyncMock) as mock_create:
+
+            mock_get.return_value = [existing_schedule]
+            mock_update.return_value = True
+
             result = await storage.create_or_update_meal_plan_schedule(
                 owner_id=1,
                 meal_plan={"2026-02-10": "Pasta"},
                 shopping_list=["tomatoes"],
                 existing_schedule_id=7
             )
-            
+
             assert result == 7
             mock_update.assert_called_once()
+            mock_create.assert_not_called()

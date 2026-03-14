@@ -74,12 +74,17 @@ from tests.ai_quality.snapshot_utils import save_failure_snapshot
 # ─────────────────────────────────────────────────────────────────────────────
 
 def pytest_addoption(parser):  # noqa: D401
-    parser.addoption(
-        "--run-llm",
-        action="store_true",
-        default=False,
-        help="Run tests that require live LLM / embedding API calls.",
-    )
+    # Guard: root conftest.py already registers --run-llm project-wide.
+    # This block is kept for backward compatibility when running this file in isolation.
+    try:
+        parser.addoption(
+            "--run-llm",
+            action="store_true",
+            default=False,
+            help="Run tests that require live LLM / embedding API calls.",
+        )
+    except ValueError:
+        pass
 
 
 # ─────────────────────────────────────────────────────────────────────────────

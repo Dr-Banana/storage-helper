@@ -120,6 +120,12 @@ class UserService:
             # calorie_target can be explicitly set to None to clear it
             if hasattr(user_data, 'calorie_target') and 'calorie_target' in user_data.model_fields_set:
                 user.calorie_target = user_data.calorie_target
+            if user_data.disliked_ingredients is not None:
+                user.disliked_ingredients = user_data.disliked_ingredients
+            if user_data.cuisine_weights is not None:
+                user.cuisine_weights = user_data.cuisine_weights
+            if user_data.recent_dishes is not None:
+                user.recent_dishes = user_data.recent_dishes
 
             db.commit()
             db.refresh(user)

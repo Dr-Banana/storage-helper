@@ -37,6 +37,8 @@ class TestGetPlanState:
             "cooking_context": None,
             "pending_modify_action": None,
             "pending_overwrite": None,
+            "pending_options": None,
+            "draft_rejected_dishes": set(),
         }
 
     def test_get_existing_state(self):

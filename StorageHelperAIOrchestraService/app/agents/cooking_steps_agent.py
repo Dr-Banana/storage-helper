@@ -1499,25 +1499,47 @@ class CookingStepsAgent(BaseAgent):
                     break
 
         # Optionally skip if the dish already has steps in the DB (silent auto-generation mode).
-        if skip_if_exists and schedule_id:
-            existing_steps, _ = await self._get_existing_recipe(
-                schedule_id=schedule_id,
-                owner_id=owner_id,
-                dish_name=dish_name,
-                date=target_date,
-                meal_time=target_meal_time,
-            )
+        # Multi-date plans can be split across separate schedule records, so we check both the
+        # primary schedule_id and any other schedules that cover target_date.
+        if skip_if_exists:
+            existing_steps: List[str] = []
+            found_in_sid: Optional[int] = None
+            if schedule_id:
+                existing_steps, _ = await self._get_existing_recipe(
+                    schedule_id=schedule_id,
+                    owner_id=owner_id,
+                    dish_name=dish_name,
+                    date=target_date,
+                    meal_time=target_meal_time,
+                )
+                if existing_steps:
+                    found_in_sid = schedule_id
+            if not existing_steps and target_date:
+                alt_sids = await self._find_schedule_ids_for_date(owner_id, target_date)
+                for alt_sid in alt_sids:
+                    if alt_sid == schedule_id:
+                        continue
+                    existing_steps, _ = await self._get_existing_recipe(
+                        schedule_id=alt_sid,
+                        owner_id=owner_id,
+                        dish_name=dish_name,
+                        date=target_date,
+                        meal_time=target_meal_time,
+                    )
+                    if existing_steps:
+                        found_in_sid = alt_sid
+                        break
             if existing_steps:
                 self.logger.info(
                     f"[CookingStepsAgent.batch] '{dish_name}' already has steps in schedule "
-                    f"{schedule_id} — skipping auto-generation."
+                    f"{found_in_sid} — skipping auto-generation."
                 )
                 return {
                     "dish_name": dish_name,
                     "cooking_steps": existing_steps,
                     "saved": False,
                     "skipped": True,
-                    "schedule_id": schedule_id,
+                    "schedule_id": found_in_sid,
                 }
 
         recipe = await self._generate_steps(dish_name, ingredients, cooking_level=cooking_level, language=language)
