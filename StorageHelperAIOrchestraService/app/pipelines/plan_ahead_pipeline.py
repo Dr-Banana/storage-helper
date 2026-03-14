@@ -388,7 +388,13 @@ class PlanAheadPipeline:
             "\n     slot values: 'main' (主菜, e.g. meat/fish/tofu dish), 'side' (配菜, e.g. stir-fried vegetables),"
             "\n     'soup' (汤品, any soup/broth/congee), 'staple' (主食, e.g. rice/noodles/bread), 'other'."
         )
-        ctx += "\n   - If user removes a date, omit it from meal_entries entirely."
+        ctx += (
+            "\n   - If user removes an ENTIRE date (e.g. '去掉今天的计划'), omit that date from meal_entries entirely."
+            "\n   - If user removes only a SPECIFIC meal_time (e.g. '去掉今天晚上', 'remove tonight's dinner'):"
+            "\n     set meal_time to the removed slot (breakfast/lunch/dinner), and include the OTHER"
+            "\n     remaining meal slots for that date in meal_entries. Leave meal_entries empty ONLY"
+            "\n     if that meal_time was the only one for that date."
+        )
         ctx += (
             "\n4. Write a brief, friendly message in 'user_message' (match user's language)."
             "\n   CRITICAL: NEVER mention 'JSON', 'data format', 'structured response', or any technical"
@@ -407,7 +413,11 @@ class PlanAheadPipeline:
         )
         ctx += "\n- For 'view', meal_entries should mirror the current plan exactly."
         ctx += "\n- For 'update_ingredients'/'remove_ingredients', keep the same meals but update dish ingredients."
-        ctx += "\n- For 'remove' of a date, that date MUST NOT appear in meal_entries."
+        ctx += (
+            "\n- For 'remove' of an ENTIRE date: that date MUST NOT appear in meal_entries."
+            "\n- For 'remove' of a specific meal_time only: set meal_time= the removed slot,"
+            "\n  include the remaining slots for that date in meal_entries (if any)."
+        )
         if is_draft:
             ctx += (
                 "\n- In DRAFT MODE: prefer acting on the user's intent over asking clarifying questions."
@@ -833,6 +843,96 @@ class PlanAheadPipeline:
         except Exception as e:
             logger.warning("[PLAN_AHEAD_PIPELINE] Failed to remove orphaned date: %s", e)
 
+    async def _delete_meal_time_from_schedules(
+        self,
+        owner_id: int,
+        date_str: str,
+        meal_time: str,
+        exclude_schedule_id: Optional[int],
+        storage_client: Any,
+    ) -> None:
+        """Remove a specific meal_time slot from all schedules on a given date.
+
+        Used for partial-day removal (e.g. user removes only dinner but breakfast
+        remains in the plan-ahead schedule).  For each matching schedule:
+        - If removing the slot empties the entire date, remove the date entry.
+        - If removing the date empties the entire schedule, delete the schedule.
+        - Otherwise update the schedule in-place.
+
+        ``exclude_schedule_id`` is the plan-ahead schedule that will be updated
+        separately via persist_meal_plan; skip it here to avoid double-writes.
+        """
+        try:
+            schedules = await storage_client.get_user_schedules(owner_id)
+            for s in schedules:
+                if s.get("event_type") not in ("meal_plan_draft", "shopping_list"):
+                    continue
+                if exclude_schedule_id and s.get("id") == exclude_schedule_id:
+                    continue
+                mp, _sl, di, slots = storage_client._extract_meal_plan_from_schedule(s)
+                if date_str not in slots:
+                    continue
+                date_slots = slots[date_str]
+                if meal_time not in date_slots:
+                    continue
+
+                # Remove the targeted meal_time from this date's slots.
+                updated_date_slots = {mt: v for mt, v in date_slots.items() if mt != meal_time}
+                if updated_date_slots:
+                    remaining_slots = {**slots, date_str: updated_date_slots}
+                    _all_dishes = [
+                        d for mt_dishes in updated_date_slots.values()
+                        for d in (mt_dishes if isinstance(mt_dishes, list) else [])
+                    ]
+                    remaining_mp = {**mp, date_str: " and ".join(_all_dishes)}
+                else:
+                    remaining_slots = {k: v for k, v in slots.items() if k != date_str}
+                    remaining_mp = {k: v for k, v in mp.items() if k != date_str}
+
+                if not remaining_mp:
+                    await storage_client.delete_schedule(s.get("id"), owner_id)
+                    logger.info(
+                        "[PLAN_AHEAD_PIPELINE] Deleted schedule id=%s "
+                        "(removed %s/%s, no dates left)",
+                        s.get("id"), date_str, meal_time,
+                    )
+                else:
+                    _rem_dishes: set = {
+                        dish
+                        for d_slots in remaining_slots.values()
+                        for mt_dishes in d_slots.values()
+                        for dish in (mt_dishes if isinstance(mt_dishes, list) else [])
+                    }
+                    remaining_di = {k: v for k, v in di.items() if k in _rem_dishes}
+                    existing_dd = storage_client._extract_existing_dish_data(s)
+                    remaining_dd = {k: v for k, v in existing_dd.items() if k in _rem_dishes}
+                    remaining_shopping = compute_shopping_list(remaining_di)
+                    new_metadata = storage_client._convert_to_feature_format(
+                        remaining_mp,
+                        remaining_shopping,
+                        dish_ingredients=remaining_di,
+                        meal_plan_slots=remaining_slots if remaining_slots else None,
+                        existing_dish_data=remaining_dd if remaining_dd else None,
+                    )
+                    ok = await storage_client.update_schedule(
+                        owner_id=owner_id,
+                        schedule_id=s.get("id"),
+                        metadata=new_metadata,
+                    )
+                    if ok:
+                        logger.info(
+                            "[PLAN_AHEAD_PIPELINE] Removed %s/%s from schedule id=%s",
+                            date_str, meal_time, s.get("id"),
+                        )
+                    else:
+                        logger.warning(
+                            "[PLAN_AHEAD_PIPELINE] Failed to update schedule id=%s "
+                            "after removing %s/%s",
+                            s.get("id"), date_str, meal_time,
+                        )
+        except Exception as e:
+            logger.warning("[PLAN_AHEAD_PIPELINE] _delete_meal_time_from_schedules failed: %s", e)
+
     async def _persist(
         self,
         owner_id: int,
@@ -845,16 +945,27 @@ class PlanAheadPipeline:
         shopping_list: List[str],
         storage_client: Any,
         user_timezone: Optional[str],
+        target_meal_time: Optional[str] = None,
     ) -> Optional[int]:
         """Persist changes to DB. Returns schedule_id or None."""
         if action == "remove" and target_date:
             if target_date in new_meal_plan:
-                # Partial removal (e.g. only dinner removed; breakfast/lunch remain).
-                # Fall through to the normal persist path so the updated day is saved.
+                # Partial removal: only a specific meal_time was removed from this date;
+                # remaining slots for the day are still in new_meal_plan.
+                # Fall through to normal persist to update the plan-ahead schedule, and
+                # also clean up any OTHER schedules that held the removed meal_time.
                 logger.info(
-                    f"[PLAN_AHEAD_PIPELINE] action=remove, target_date={target_date} still "
-                    f"present in new plan — persisting updated schedule instead of deleting."
+                    "[PLAN_AHEAD_PIPELINE] action=remove, target_date=%s still "
+                    "present in new plan (partial removal of %s) — persisting updated schedule.",
+                    target_date, target_meal_time or "?",
                 )
+                if target_meal_time:
+                    existing_id = old_state.get("schedule_id")
+                    await self._delete_meal_time_from_schedules(
+                        owner_id, target_date, target_meal_time,
+                        exclude_schedule_id=existing_id,
+                        storage_client=storage_client,
+                    )
             else:
                 # Entire day was removed — delete the schedule for that date.
                 await self._delete_orphaned_schedules(owner_id, [target_date], storage_client)
@@ -1691,18 +1802,41 @@ class PlanAheadPipeline:
 
         # ---- Step 6: Persist (non-draft direct operations) ----
         schedule_id = current_state.get("schedule_id")
+        target_meal_time = parsed.get("meal_time")  # None means remove entire day
         if action != "view":
             # For 'remove': the LLM returns action=remove + target_date but empty
-            # meal_entries.  Rebuild new_meal_plan as the surviving plan (old state
-            # minus the removed date) so (a) _delete_orphaned_schedules only strips
-            # that one date from the schedule instead of deleting the whole record,
-            # and (b) update_plan_state below reflects the remaining meals correctly.
+            # meal_entries.  Rebuild new_meal_plan as the surviving plan:
+            #   - If target_meal_time is set AND the date has other slots → only remove
+            #     that specific meal_time, keeping the rest of the day intact.
+            #   - Otherwise → remove the entire date.
             if action == "remove" and target_date and target_date not in new_meal_plan:
                 _old_mp = current_state.get("meal_plan") or {}
                 _old_slots = current_state.get("meal_plan_slots") or {}
                 _old_di = current_state.get("dish_ingredients") or {}
-                new_meal_plan = {k: v for k, v in _old_mp.items() if k != target_date}
-                new_meal_plan_slots = {k: v for k, v in _old_slots.items() if k != target_date}
+
+                _old_date_slots = _old_slots.get(target_date, {})
+                _remaining_mt = (
+                    {mt: v for mt, v in _old_date_slots.items() if mt != target_meal_time and v}
+                    if target_meal_time else {}
+                )
+
+                if target_meal_time and _remaining_mt:
+                    # Partial removal: keep the date with its remaining meal slots.
+                    new_meal_plan_slots = {**_old_slots, target_date: _remaining_mt}
+                    _remaining_dishes: List[str] = []
+                    for _mt in ("breakfast", "lunch", "dinner", "snack"):
+                        _remaining_dishes.extend(_remaining_mt.get(_mt) or [])
+                    new_meal_plan = {**_old_mp, target_date: " and ".join(_remaining_dishes)}
+                    logger.info(
+                        "[PLAN_AHEAD_PIPELINE] action=remove partial: kept %s with %s "
+                        "(removed meal_time=%s)",
+                        target_date, list(_remaining_mt.keys()), target_meal_time,
+                    )
+                else:
+                    # Remove the entire date.
+                    new_meal_plan = {k: v for k, v in _old_mp.items() if k != target_date}
+                    new_meal_plan_slots = {k: v for k, v in _old_slots.items() if k != target_date}
+
                 _rem_dishes: set = {
                     dish
                     for meals in new_meal_plan_slots.values()
@@ -1723,6 +1857,7 @@ class PlanAheadPipeline:
                 shopping_list=shopping_list,
                 storage_client=storage_client,
                 user_timezone=user_timezone,
+                target_meal_time=target_meal_time,
             )
             if new_sid:
                 schedule_id = new_sid

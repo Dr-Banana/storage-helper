@@ -1398,7 +1398,7 @@ class PlanAheadAgent:
         return {
             "action": (data.get("action") or "view").strip(),
             "target_date": (data.get("target_date") or "").strip() or None,
-            "meal_time": (data.get("meal_time") or "dinner").strip(),
+            "meal_time": (data.get("meal_time") or "").strip() or None,
             "user_message": (data.get("user_message") or "").strip(),
             "meal_plan": meal_plan,
             "meal_plan_slots": meal_plan_slots,

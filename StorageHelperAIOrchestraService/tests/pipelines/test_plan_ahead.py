@@ -7,9 +7,12 @@ Covers:
 - ingredient format compatibility: string vs {"name": ...} dict
 - apply_plan_modification: split-safety for dish names containing " and "
 - inventory sorting: expiring items surface before condiments
+- partial meal_time removal: "remove tonight's dinner" keeps breakfast intact
 """
+import asyncio
 import json
 import pytest
+from unittest.mock import AsyncMock, MagicMock, patch
 from app.agents.scheduling_agent import compute_shopping_list, PlanAheadAgent
 from app.pipelines.plan_ahead_pipeline import PlanAheadPipeline
 
@@ -543,3 +546,253 @@ class TestPlanAheadPipelineStaleStateCleanup:
         assert state.get("schedule_id") is None
         assert state["meal_plan"] == {}
         assert state["is_draft"] is False
+
+
+# ---------------------------------------------------------------------------
+# Regression: partial meal_time removal
+# Bug: "去掉今天晚上的计划" was removing the whole day (including breakfast)
+#      instead of only the dinner slot.
+# ---------------------------------------------------------------------------
+
+def _make_storage_client_mock() -> MagicMock:
+    """Return a minimal storage_client mock suitable for execute() tests."""
+    sc = MagicMock()
+    sc.get_user_schedules = AsyncMock(return_value=[])
+    sc.update_schedule = AsyncMock(return_value=True)
+    sc.delete_schedule = AsyncMock()
+    sc._extract_meal_plan_from_schedule = MagicMock(return_value=({}, [], {}, {}))
+    sc._extract_existing_dish_data = MagicMock(return_value={})
+    sc._convert_to_feature_format = MagicMock(return_value={})
+    return sc
+
+
+def _state_with_breakfast_and_dinner() -> dict:
+    """Plan where 2026-03-14 has BOTH breakfast and dinner slots."""
+    return {
+        "meal_plan": {
+            "2026-03-13": "农家小炒肉",
+            "2026-03-14": "煮鸡蛋 and 粥 and 香煎鳕鱼 and 白米饭",
+            "2026-03-15": "清炒豆苗",
+        },
+        "meal_plan_slots": {
+            "2026-03-13": {"dinner": ["农家小炒肉"]},
+            "2026-03-14": {
+                "breakfast": ["煮鸡蛋", "粥"],   # must survive after remove-dinner
+                "dinner": ["香煎鳕鱼", "白米饭"],  # must be removed
+            },
+            "2026-03-15": {"dinner": ["清炒豆苗"]},
+        },
+        "dish_ingredients": {
+            "煮鸡蛋": [{"name": "鸡蛋", "category": "protein", "quantity": "2"}],
+            "粥": [{"name": "大米", "category": "grain", "quantity": "50g"}],
+            "香煎鳕鱼": [{"name": "鳕鱼", "category": "protein", "quantity": "200g"}],
+            "白米饭": [{"name": "大米", "category": "grain", "quantity": "150g"}],
+        },
+        "shopping_list": [],
+        "schedule_id": 41,
+        "is_draft": False,
+        "last_pipeline_action": None,
+    }
+
+
+def _state_dinner_only() -> dict:
+    """Plan where 2026-03-14 has ONLY a dinner slot."""
+    return {
+        "meal_plan": {
+            "2026-03-13": "农家小炒肉",
+            "2026-03-14": "香煎鳕鱼 and 白米饭",
+            "2026-03-15": "清炒豆苗",
+        },
+        "meal_plan_slots": {
+            "2026-03-13": {"dinner": ["农家小炒肉"]},
+            "2026-03-14": {"dinner": ["香煎鳕鱼", "白米饭"]},
+            "2026-03-15": {"dinner": ["清炒豆苗"]},
+        },
+        "dish_ingredients": {
+            "香煎鳕鱼": [{"name": "鳕鱼", "category": "protein", "quantity": "200g"}],
+            "白米饭": [{"name": "大米", "category": "grain", "quantity": "150g"}],
+        },
+        "shopping_list": [],
+        "schedule_id": 41,
+        "is_draft": False,
+        "last_pipeline_action": None,
+    }
+
+
+class TestParseMealTimeDefault:
+    """parse_structured_response: meal_time must be None when absent (not 'dinner')."""
+
+    def _agent(self):
+        return PlanAheadAgent(gemini_api_url="http://fake")
+
+    def test_meal_time_is_none_when_absent(self):
+        """meal_time defaults to None, NOT 'dinner', when the LLM omits it."""
+        raw = json.dumps({
+            "action": "remove",
+            "user_message": "Done",
+            "meal_entries": [],
+            "target_date": "2026-03-14",
+        })
+        result = self._agent().parse_structured_response(raw)
+        assert result is not None
+        assert result["meal_time"] is None, (
+            "meal_time should be None when absent — defaulting to 'dinner' caused "
+            "partial-day removes to behave like whole-day removes."
+        )
+
+    def test_meal_time_dinner_when_explicitly_set(self):
+        """meal_time='dinner' is returned when the LLM explicitly sets it."""
+        raw = json.dumps({
+            "action": "remove",
+            "user_message": "Done",
+            "meal_entries": [],
+            "target_date": "2026-03-14",
+            "meal_time": "dinner",
+        })
+        result = self._agent().parse_structured_response(raw)
+        assert result is not None
+        assert result["meal_time"] == "dinner"
+
+    def test_meal_time_breakfast_when_explicitly_set(self):
+        raw = json.dumps({
+            "action": "remove",
+            "user_message": "Done",
+            "meal_entries": [],
+            "target_date": "2026-03-14",
+            "meal_time": "breakfast",
+        })
+        result = self._agent().parse_structured_response(raw)
+        assert result is not None
+        assert result["meal_time"] == "breakfast"
+
+
+class TestRemovePartialMealTime:
+    """Regression: 'remove tonight's dinner' must NOT remove today's breakfast.
+
+    Before the fix, the code removed the ENTIRE target_date from the plan whenever
+    meal_entries was empty, regardless of meal_time.  The fix uses meal_time to
+    decide whether to do a partial slot removal or a full-day removal.
+    """
+
+    def setup_method(self):
+        from app.modules.plan_ahead_state import _plan_states
+        _plan_states.clear()
+
+    def _pipeline(self):
+        return PlanAheadPipeline(gemini_api_url="http://fake")
+
+    def _llm_remove_dinner_parsed(self) -> dict:
+        """Parsed LLM result: remove dinner for 2026-03-14, meal_entries is empty."""
+        raw = json.dumps({
+            "action": "remove",
+            "target_date": "2026-03-14",
+            "meal_time": "dinner",
+            "user_message": "好的，已移除今天晚餐。",
+            "meal_entries": [],
+        })
+        return PlanAheadAgent(gemini_api_url="http://fake").parse_structured_response(raw)
+
+    def _run_execute(self, old_state: dict, llm_parsed: dict) -> dict:
+        pipeline = self._pipeline()
+        sc = _make_storage_client_mock()
+
+        async def _run():
+            with patch.object(
+                pipeline.plan_ahead_agent, "sync_meal_plan_from_database",
+                AsyncMock(return_value=old_state),
+            ), patch.object(
+                pipeline, "_call_llm",
+                AsyncMock(return_value=llm_parsed),
+            ), patch.object(
+                pipeline.plan_ahead_agent, "persist_meal_plan",
+                AsyncMock(return_value=old_state.get("schedule_id")),
+            ):
+                return await pipeline.execute(
+                    owner_id=1,
+                    user_input="去掉今天晚上的计划",
+                    history=[],
+                    user_timezone="America/Los_Angeles",
+                    storage_client=sc,
+                )
+
+        return asyncio.run(_run())
+
+    def _ad(self, result: dict) -> dict:
+        """Shortcut to result['action_data']."""
+        return result["action_data"]
+
+    def test_breakfast_survives_when_removing_dinner(self):
+        """The regression case: day has breakfast + dinner; removing dinner keeps breakfast."""
+        result = self._run_execute(
+            old_state=_state_with_breakfast_and_dinner(),
+            llm_parsed=self._llm_remove_dinner_parsed(),
+        )
+        ad = self._ad(result)
+        slots = ad["meal_plan_slots"]
+        mp = ad["meal_plan"]
+
+        assert "2026-03-14" in mp, (
+            "2026-03-14 should remain in plan — breakfast is still there"
+        )
+        assert "breakfast" in slots.get("2026-03-14", {}), (
+            "Breakfast slot for 2026-03-14 should survive"
+        )
+        assert set(slots["2026-03-14"]["breakfast"]) == {"煮鸡蛋", "粥"}
+        assert "dinner" not in slots.get("2026-03-14", {}), (
+            "Dinner slot for 2026-03-14 should have been removed"
+        )
+        assert "煮鸡蛋" in mp["2026-03-14"] or "粥" in mp["2026-03-14"]
+        assert "香煎鳕鱼" not in mp["2026-03-14"]
+
+    def test_dinner_dish_ingredients_removed_from_shopping_list(self):
+        """After removing dinner, dinner-only ingredients are dropped from shopping list."""
+        result = self._run_execute(
+            old_state=_state_with_breakfast_and_dinner(),
+            llm_parsed=self._llm_remove_dinner_parsed(),
+        )
+        di = self._ad(result)["dish_ingredients"]
+        assert "香煎鳕鱼" not in di, "Dinner dish ingredients should be cleaned up"
+        assert "白米饭" not in di, "Shared staple dish from dinner should be cleaned up"
+        assert "煮鸡蛋" in di, "Breakfast dish ingredients must remain"
+        assert "粥" in di, "Breakfast dish ingredients must remain"
+
+    def test_other_dates_unaffected_by_partial_removal(self):
+        """Removing dinner on 2026-03-14 must not touch 2026-03-13 or 2026-03-15."""
+        result = self._run_execute(
+            old_state=_state_with_breakfast_and_dinner(),
+            llm_parsed=self._llm_remove_dinner_parsed(),
+        )
+        mp = self._ad(result)["meal_plan"]
+        assert "2026-03-13" in mp
+        assert "2026-03-15" in mp
+
+    def test_whole_day_removed_when_dinner_is_only_slot(self):
+        """If dinner is the ONLY slot on that day, removing it removes the entire date."""
+        result = self._run_execute(
+            old_state=_state_dinner_only(),
+            llm_parsed=self._llm_remove_dinner_parsed(),
+        )
+        mp = self._ad(result)["meal_plan"]
+        assert "2026-03-14" not in mp, (
+            "2026-03-14 should be fully removed when dinner was the only slot"
+        )
+        assert "2026-03-13" in mp
+        assert "2026-03-15" in mp
+
+    def test_whole_day_removed_when_no_meal_time_specified(self):
+        """If meal_time is absent (None), the entire day should be removed."""
+        agent = PlanAheadAgent(gemini_api_url="http://fake")
+        llm_whole_day_parsed = agent.parse_structured_response(json.dumps({
+            "action": "remove",
+            "target_date": "2026-03-14",
+            "user_message": "好的，已移除今天全部计划。",
+            "meal_entries": [],
+        }))
+        result = self._run_execute(
+            old_state=_state_with_breakfast_and_dinner(),
+            llm_parsed=llm_whole_day_parsed,
+        )
+        mp = self._ad(result)["meal_plan"]
+        assert "2026-03-14" not in mp, (
+            "Entire date should be removed when no specific meal_time is given"
+        )
