@@ -2052,7 +2052,7 @@ export const MealPlanDetailDrawer: React.FC<{
       </div>
 
       {/* ── 内容滚动区 ── */}
-      <div className="flex-1 overflow-y-auto px-5 py-5 space-y-7 custom-scrollbar">
+      <div className="flex-1 overflow-y-auto px-5 pb-5 space-y-7 custom-scrollbar">
         {!dayPlan || sortedMeals.length === 0 ? (
           <div className="text-center py-16 text-stone-400">
             <Utensils size={32} className="mx-auto mb-3 opacity-30" />
@@ -2061,7 +2061,7 @@ export const MealPlanDetailDrawer: React.FC<{
         ) : (
           sortedMeals.map(meal => (
             <div key={meal.id}>
-              <div className="flex items-center gap-2 mb-3 sticky top-0 bg-[#FAF9F6]/95 backdrop-blur-sm py-1.5 z-10 -mx-1 px-1">
+              <div className="flex items-center gap-2 mb-3 sticky top-0 bg-[#FAF9F6] py-2 z-10 -mx-5 px-5">
                 <span className="text-2xl leading-none">{(MEAL_META[meal.mealTime] ?? MEAL_META.dinner).icon}</span>
                 <h3 className="text-base font-bold text-stone-700">{(MEAL_META[meal.mealTime] ?? MEAL_META.dinner).label}</h3>
                 <div className="flex-1 h-px bg-stone-200" />
