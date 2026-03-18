@@ -309,7 +309,7 @@ class TestLiveUserProfileIntake:
         parsed = await p._call_llm(
             system_context=ctx,
             history=[],
-            user_input="帮我推荐下周的晚餐，我喜欢中式家常菜",
+            user_input="帮我推荐明天和后天的晚餐，我喜欢中式家常菜",
         )
         assert parsed is not None, "LLM returned None — API call failed"
 

@@ -38,6 +38,8 @@ class PlanAheadPipeline:
     # Helpers
     # ------------------------------------------------------------------
 
+    # Keywords that indicate the user is confirming the proposed date range.
+
     def _now_in_timezone(self, user_timezone: Optional[str] = None) -> datetime:
         try:
             from zoneinfo import ZoneInfo
@@ -45,6 +47,477 @@ class PlanAheadPipeline:
         except Exception:
             tz = None
         return datetime.now(tz) if tz else datetime.utcnow()
+
+    def _log_pending_dates(
+        self,
+        queue: List[str],
+        existing_slots: Optional[Dict[str, Any]],
+        header: str,
+    ) -> None:
+        """Log the queued slots with per-date meal breakdown.
+
+        Args:
+            queue: List of "YYYY-MM-DD|meal_type" strings.
+            existing_slots: Already-planned meal slots (not used in new format, kept for compat).
+            header: Opening log line (e.g. "Multi-day planning detected" or "Corrected to").
+        """
+        from datetime import date as _dt
+        from collections import defaultdict
+
+        _day_names = {0: "Mon", 1: "Tue", 2: "Wed", 3: "Thu", 4: "Fri", 5: "Sat", 6: "Sun"}
+        _targets = []
+
+        # Group meal_types by date preserving order
+        date_meals: Dict[str, List[str]] = defaultdict(list)
+        for item in queue:
+            if "|" in item:
+                _d_part, _mt_part = item.split("|", 1)
+                date_meals[_d_part].append(_mt_part)
+            else:
+                date_meals[item]  # bare date with no meals listed
+
+        for _d, _meals in date_meals.items():
+            try:
+                _day_name = _day_names.get(_dt.fromisoformat(_d).weekday(), "")
+            except Exception:
+                _day_name = ""
+            _label = f"{_d}({_day_name})" if _day_name else _d
+            _targets.append(f"{_label} [{', '.join(_meals)}]" if _meals else _label)
+
+        logger.info(
+            "[PLAN_AHEAD_PIPELINE] %s: %d slot(s) queued, awaiting user confirmation.\n  %s",
+            header,
+            len(queue),
+            "\n  ".join(_targets),
+        )
+
+    def _build_date_confirm_message(
+        self, slots: List[str], language: Optional[str] = "zh"
+    ) -> str:
+        """Build the user-facing date confirmation question.
+
+        ``slots`` is a list of "YYYY-MM-DD|meal_type" strings (the new unified format).
+        Generates different wording for single-meal, single-day, or multi-day cases.
+        """
+        if not slots:
+            return ""
+
+        from datetime import date as _d
+
+        _day_zh = {0: "周一", 1: "周二", 2: "周三", 3: "周四", 4: "周五", 5: "周六", 6: "周日"}
+        _meal_zh = {"breakfast": "早餐", "lunch": "午餐", "dinner": "晚餐"}
+        is_zh = (language or "zh") == "zh"
+
+        # Extract unique dates and meal_times preserving order
+        unique_dates: List[str] = list(dict.fromkeys(
+            s.split("|")[0] for s in slots
+        ))
+        unique_meals: List[str] = list(dict.fromkeys(
+            s.split("|")[1] for s in slots if "|" in s
+        ))
+
+        start, end = unique_dates[0], unique_dates[-1]
+        is_single_day = (start == end)
+        all_meal_set = {"breakfast", "lunch", "dinner"}
+        is_all_meals = set(unique_meals) >= all_meal_set
+
+        def _fmt(date_str: str):
+            try:
+                _dt = _d.fromisoformat(date_str)
+                return f"{_dt.month}月{_dt.day}日", _day_zh.get(_dt.weekday(), "")
+            except Exception:
+                return date_str, ""
+
+        _s_short, _s_day = _fmt(start)
+        _e_short, _e_day = _fmt(end)
+
+        if is_zh:
+            suffix = "没问题的话，我们马上开始！如果有误，告诉我一声就好。"
+            if is_single_day and not is_all_meals:
+                meals_str = "、".join(_meal_zh.get(m, m) for m in unique_meals)
+                return f"您是说规划 {_s_short}（{_s_day}）的{meals_str}吗？{suffix}"
+            if is_single_day:
+                return f"您是说规划 {_s_short}（{_s_day}）的三餐吗？{suffix}"
+            return (
+                f"您是说规划 {_s_short}（{_s_day}）到 {_e_short}（{_e_day}）的餐食吗？"
+                "日期没问题的话，我们马上开始！如果日期有误，告诉我一声就好。"
+            )
+        # English fallback
+        if is_single_day and not is_all_meals:
+            meals_en = " and ".join(unique_meals)
+            return (
+                f"Planning {meals_en} for {start} ({_s_day}) — is that right? "
+                "Just say 'no, tomorrow' or name a different date to adjust."
+            )
+        if is_single_day:
+            return (
+                f"Planning all meals for {start} ({_s_day}) — is that right? "
+                "Just say 'no, tomorrow' or name a different date to adjust."
+            )
+        return (
+            f"Planning meals for {start} ({_s_day}) through {end} ({_e_day}) — is that right? "
+            "Just say 'no, next week' or 'no, this week' if you'd like to adjust."
+        )
+
+    @staticmethod
+    def _dates_to_slots(dates: List[str], meal_times: Optional[List[str]] = None) -> List[str]:
+        """Convert a list of YYYY-MM-DD strings to date|meal_type slot strings."""
+        _valid = {"breakfast", "lunch", "dinner"}
+        _mt = [m for m in (meal_times or []) if m in _valid] or ["breakfast", "lunch", "dinner"]
+        return [f"{d}|{m}" for d in dates for m in _mt]
+
+    async def _init_planning_queue(
+        self, user_input: str, user_timezone: Optional[str]
+    ) -> List[str]:
+        """Parse meal-planning intent and return a list of date|meal_type slot strings.
+
+        Primary: lightweight LLM call that extracts:
+          - whether the user is requesting meal planning (has_planning_intent)
+          - what date range (single day or multi-day; same date for single day)
+          - which meal times specifically (or null for all three)
+
+        Returns a list of "YYYY-MM-DD|meal_type" strings, or [] if no planning intent.
+        """
+        import json as _json
+
+        now = self._now_in_timezone(user_timezone)
+        today = now.date()
+        today_str = now.strftime("%Y-%m-%d (%A)")
+
+        # ---- LLM-based detection (primary) ----
+        system_prompt = (
+            f"Today is {today_str}. You are a date-range parser for a meal-planning app.\n"
+            "Decide if the user wants to PLAN meals (not view/delete/modify existing plans).\n"
+            "If yes, extract the date range and specific meal times (if mentioned).\n\n"
+            "Respond with JSON only — no markdown, no explanation.\n"
+            "Format:\n"
+            '  {"has_planning_intent": false}  — not a planning request\n'
+            '  {"has_planning_intent": true, "start": "YYYY-MM-DD", "end": "YYYY-MM-DD", "meal_times": null}  — plan all meals\n'
+            '  {"has_planning_intent": true, "start": "YYYY-MM-DD", "end": "YYYY-MM-DD", "meal_times": ["lunch"]}  — specific meals\n\n'
+            "meal_times values: breakfast, lunch, dinner\n\n"
+            "Rules:\n"
+            "- view/delete/modify requests → has_planning_intent: false\n"
+            "- vague planning request (no date) → has_planning_intent: true, start=today, end=today, meal_times: null\n"
+            "- '今天的午餐' → start=today, end=today, meal_times: ['lunch']\n"
+            "- '今天的计划' / '今天三餐' → start=today, end=today, meal_times: null\n"
+            "- '明天' → start=tomorrow, end=tomorrow, meal_times: null\n"
+            "- '明后两天' → start=tomorrow, end=day-after-tomorrow, meal_times: null\n"
+            "- '下周' / 'next week' → Mon–Sun of next calendar week, meal_times: null\n"
+            "- '这周' / 'this week' → today through this Sunday, meal_times: null\n"
+            "- '今天往后N天' / 'from today for N days' → start=today, end=today+N-1, meal_times: null\n"
+            "- '一周' / 'a week' / '七天' / '7天' → start=today, end=today+6, meal_times: null\n"
+            "- '两周' / 'two weeks' / '14天' → start=today, end=today+13, meal_times: null\n"
+            "- '半个月' / '15天' → start=today, end=today+14, meal_times: null\n"
+            "- '一个月' / '30天' / 'a month' → start=today, end=today+29, meal_times: null\n"
+            "- end date must be >= start date"
+        )
+        payload = {
+            "contents": [{"role": "user", "parts": [{"text": user_input}]}],
+            "systemInstruction": {"parts": [{"text": system_prompt}]},
+            "generationConfig": {
+                "temperature": 0.0,
+                "maxOutputTokens": 256,
+                "responseMimeType": "application/json",
+                "responseSchema": {
+                    "type": "object",
+                    "properties": {
+                        "has_planning_intent": {"type": "boolean"},
+                        "start": {"type": "string", "nullable": True},
+                        "end": {"type": "string", "nullable": True},
+                        "meal_times": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "nullable": True,
+                        },
+                    },
+                    "required": ["has_planning_intent"],
+                },
+            },
+        }
+        llm_result: Optional[List[str]] = None
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.post(
+                    self.gemini_api_url,
+                    headers={"Content-Type": "application/json"},
+                    json=payload,
+                )
+                resp.raise_for_status()
+                raw = resp.json()
+            candidate = (raw.get("candidates") or [{}])[0]
+            finish_reason = candidate.get("finishReason", "")
+            parts = (candidate.get("content") or {}).get("parts") or []
+            if not parts:
+                raise ValueError(
+                    f"Empty parts in LLM response (finishReason={finish_reason!r})"
+                )
+            text = parts[0].get("text", "")
+            if not text:
+                raise ValueError(
+                    f"Empty text in LLM response (finishReason={finish_reason!r})"
+                )
+            parsed = _json.loads(text)
+            logger.info(
+                "[PLAN_AHEAD_PIPELINE] _init_planning_queue LLM result: %s", parsed
+            )
+            if parsed.get("has_planning_intent") and parsed.get("start"):
+                from datetime import date as _d
+                _start = _d.fromisoformat(parsed["start"])
+                _end_raw = parsed.get("end") or parsed["start"]
+                _end = _d.fromisoformat(_end_raw)
+                if _end < _start:
+                    _end = _start
+                _dates = [
+                    (_start + timedelta(days=i)).strftime("%Y-%m-%d")
+                    for i in range((_end - _start).days + 1)
+                ]
+                # If LLM didn't return meal_times, supplement with keyword detection.
+                # LLM is good at date ranges but often omits meal_times even when the
+                # user clearly says e.g. "晚饭" / "午餐" — keywords are more reliable.
+                _llm_meal_times = parsed.get("meal_times") or None
+                if not _llm_meal_times:
+                    _q_lower = (user_input or "").lower()
+                    _meal_kw_detect = [
+                        (("早餐", "早饭", "早上吃", "早上的"), "breakfast"),
+                        (("午餐", "午饭", "中餐", "中饭", "中午吃", "中午的"), "lunch"),
+                        (("晚餐", "晚饭", "晚上吃", "晚上的"), "dinner"),
+                    ]
+                    for _kws, _mt in _meal_kw_detect:
+                        if any(kw in _q_lower for kw in _kws):
+                            _llm_meal_times = [_mt]
+                            break
+                llm_result = self._dates_to_slots(_dates, _llm_meal_times)
+        except Exception as exc:
+            logger.warning(
+                "[PLAN_AHEAD_PIPELINE] _init_planning_queue LLM call failed: %s — using keyword fallback",
+                exc,
+            )
+
+        if llm_result is not None:
+            # Sanity check: if LLM returned a single date but the input contains an
+            # explicit "N天" / "N days" pattern with N>1, the LLM likely missed the
+            # duration (e.g. returned today when "往后10天" should give 10 days).
+            # In that case, defer to the keyword fallback which handles this reliably.
+            import re as _check_re
+            _unique_dates_llm = list(dict.fromkeys(s.split("|")[0] for s in llm_result))
+            if len(_unique_dates_llm) == 1:
+                _n_match = _check_re.search(r"(\d+)\s*天", user_input or "")
+                if _n_match and int(_n_match.group(1)) > 1:
+                    logger.debug(
+                        "[PLAN_AHEAD_PIPELINE] _init_planning_queue: LLM returned single date but "
+                        "input has '%s天' pattern — using keyword fallback for duration.",
+                        _n_match.group(1),
+                    )
+                    llm_result = None
+            if llm_result is not None:
+                return llm_result
+
+        # ---- Keyword fallback (used when LLM call fails) ----
+        import re as _re
+
+        q = (user_input or "").lower()
+
+        # Short-circuit: remove/delete/view requests are never a planning intent.
+        # The LLM handles this correctly (has_planning_intent: false), but the keyword
+        # fallback below would otherwise false-positive on words like "今天" or "计划"
+        # that appear in phrases like "去掉今天晚上的计划".
+        _negative_kws = (
+            "去掉", "删除", "取消", "移除", "删去", "清除", "清空",
+            "remove", "delete", "cancel", "clear",
+        )
+        if any(kw in q for kw in _negative_kws):
+            return []
+
+        # Detect specific single-meal keywords for today/tomorrow
+        _meal_kw_map = {
+            ("早餐", "早饭", "早上吃"): "breakfast",
+            ("午餐", "午饭", "中餐", "中饭"): "lunch",
+            ("晚餐", "晚饭", "晚上吃"): "dinner",
+        }
+        _detected_meal: Optional[str] = None
+        for _kws, _mt in _meal_kw_map.items():
+            if any(kw in q for kw in _kws):
+                _detected_meal = _mt
+                break
+
+        def _mk_slots(dates: List[str]) -> List[str]:
+            return self._dates_to_slots(dates, [_detected_meal] if _detected_meal else None)
+
+        tomorrow_str = (today + timedelta(days=1)).strftime("%Y-%m-%d")
+        today_str_plain = today.strftime("%Y-%m-%d")
+
+        # "明天" alone (single day) — must check BEFORE multi-day patterns
+        if ("明天" in q or "tomorrow" in q) and not ("明后" in q or "后天" in q):
+            return _mk_slots([tomorrow_str])
+
+        if any(kw in q for kw in ("下下周", "下下个星期", "下下星期", "week after next")):
+            days_ahead = (7 - today.weekday()) % 7 or 7
+            start = today + timedelta(days=days_ahead + 7)
+            return _mk_slots([(start + timedelta(days=i)).strftime("%Y-%m-%d") for i in range(7)])
+        # "今天到下个星期/下周" — from today through next Sunday
+        _has_today_start = any(kw in q for kw in ("今天到", "从今天到", "today to next"))
+        _has_next_week = any(kw in q for kw in ("下周", "下个星期", "下星期", "next week"))
+        if _has_today_start and _has_next_week:
+            days_to_next_monday = (7 - today.weekday()) % 7 or 7
+            next_sunday = today + timedelta(days=days_to_next_monday + 6)
+            n = (next_sunday - today).days + 1
+            return _mk_slots([(today + timedelta(days=i)).strftime("%Y-%m-%d") for i in range(n)])
+        if _has_next_week:
+            days_ahead = (7 - today.weekday()) % 7 or 7
+            start = today + timedelta(days=days_ahead)
+            return _mk_slots([(start + timedelta(days=i)).strftime("%Y-%m-%d") for i in range(7)])
+        if any(kw in q for kw in ("这周", "本周", "这个星期", "this week")):
+            days_to_sunday = 6 - today.weekday()
+            return _mk_slots([(today + timedelta(days=i)).strftime("%Y-%m-%d") for i in range(days_to_sunday + 1)])
+        # "明后" / "明天后天" — tomorrow + day after = 2 days starting tomorrow
+        if "明后" in q or ("明天" in q and "后天" in q):
+            return _mk_slots([(today + timedelta(days=1 + i)).strftime("%Y-%m-%d") for i in range(2)])
+
+        # Specific N-day durations — must be checked BEFORE the generic "往后/接下来" catch-all
+        if any(kw in q for kw in ("一个月", "整月", "30天", "三十天", "a month")):
+            return _mk_slots([(today + timedelta(days=i)).strftime("%Y-%m-%d") for i in range(30)])
+        if any(kw in q for kw in ("两周", "两个星期", "14天", "十四天", "two weeks")):
+            return _mk_slots([(today + timedelta(days=i)).strftime("%Y-%m-%d") for i in range(14)])
+        if any(kw in q for kw in ("半个月", "半月", "15天", "十五天", "half a month")):
+            return _mk_slots([(today + timedelta(days=i)).strftime("%Y-%m-%d") for i in range(15)])
+
+        # Chinese numeral + 天 patterns (e.g. "两天", "三天", "五天")
+        _cn_day_map = {"两": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9}
+        _start_off = 1 if "明" in q else 0
+        for _cn, _n in _cn_day_map.items():
+            if _cn + "天" in q:
+                return _mk_slots([(today + timedelta(days=_start_off + i)).strftime("%Y-%m-%d") for i in range(_n)])
+
+        # Generic Arabic "N天" pattern (e.g. "往后10天", "接下来5天")
+        _n_match = _re.search(r"(\d+)\s*天", q)
+        if _n_match:
+            n = int(_n_match.group(1))
+            if n >= 1:
+                _start_off_arab = 1 if "明" in q else 0
+                return _mk_slots([(today + timedelta(days=_start_off_arab + i)).strftime("%Y-%m-%d") for i in range(n)])
+
+        # Generic week-length catch-all (no specific duration qualifier)
+        if any(kw in q for kw in ("整周", "一周", "一个星期", "七天", "7天", "接下来", "未来", "往后", "从今")):
+            return _mk_slots([(today + timedelta(days=i)).strftime("%Y-%m-%d") for i in range(7)])
+
+        # Single-day planning keywords (today implied)
+        if any(kw in q for kw in ("今天", "今日", "today", "规划", "计划", "安排", "吃什么")):
+            return _mk_slots([today_str_plain])
+
+        return []
+
+    # ------------------------------------------------------------------
+    # Phase 1b: LLM-based date confirmation classifier
+    # ------------------------------------------------------------------
+
+    async def _classify_date_confirmation(
+        self,
+        user_input: str,
+        pending_queue: List[str],
+        user_timezone: Optional[str],
+    ) -> Dict[str, Any]:
+        """Use a small LLM call to classify the user's response to the date confirmation prompt.
+
+        Returns:
+            {"intent": "confirmed" | "corrected" | "unclear",
+             "new_dates": List[str]}   # populated only when intent == "corrected"
+        """
+        import json as _json
+
+        if not user_input:
+            return {"intent": "unclear", "new_dates": []}
+
+        now = self._now_in_timezone(user_timezone)
+        today = now.date()
+        # pending_queue items are "YYYY-MM-DD|meal_type"; extract date portion for the prompt
+        pending_start = (pending_queue[0].split("|")[0] if pending_queue else "")
+        pending_end = (pending_queue[-1].split("|")[0] if pending_queue else "")
+        _n_slots = len(pending_queue)
+
+        system_prompt = (
+            f"Today is {today.strftime('%Y-%m-%d (%A)')}.\n"
+            "You are a classifier for a meal-planning chatbot.\n"
+            "The chatbot proposed a date range for meal planning and asked the user to confirm.\n"
+            "Classify the user's reply as one of:\n"
+            '  "confirmed" — user accepts the proposed dates\n'
+            '  "corrected" — user wants different dates (extract new start/end from their message)\n'
+            '  "unclear"   — cannot determine intent\n'
+            "Rules:\n"
+            "- Any affirmative reply (ok, sure, yes, 没问题, 好, 行, 可以, 当然, 开始吧, etc.) → confirmed\n"
+            "- Any reply that specifies new or different dates → corrected\n"
+            "- Ambiguous or off-topic replies → unclear\n"
+            "Return JSON only — no markdown, no explanation."
+        )
+        user_msg = (
+            f"Proposed: {pending_start} to {pending_end} ({_n_slots} meal slot(s)).\n"
+            f'User reply: "{user_input}"'
+        )
+        payload = {
+            "contents": [{"role": "user", "parts": [{"text": user_msg}]}],
+            "systemInstruction": {"parts": [{"text": system_prompt}]},
+            "generationConfig": {
+                "temperature": 0.0,
+                "maxOutputTokens": 128,
+                "responseMimeType": "application/json",
+                "responseSchema": {
+                    "type": "object",
+                    "properties": {
+                        "intent": {"type": "string"},
+                        "new_start": {"type": "string", "nullable": True},
+                        "new_end": {"type": "string", "nullable": True},
+                    },
+                    "required": ["intent"],
+                },
+            },
+        }
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.post(
+                    self.gemini_api_url,
+                    headers={"Content-Type": "application/json"},
+                    json=payload,
+                )
+                resp.raise_for_status()
+                raw = resp.json()
+            candidate = (raw.get("candidates") or [{}])[0]
+            finish_reason = candidate.get("finishReason", "")
+            parts = (candidate.get("content") or {}).get("parts") or []
+            if not parts:
+                raise ValueError(f"Empty parts (finishReason={finish_reason!r})")
+            text = parts[0].get("text", "")
+            if not text:
+                raise ValueError(f"Empty text (finishReason={finish_reason!r})")
+            parsed = _json.loads(text)
+            intent = str(parsed.get("intent", "unclear")).lower().strip()
+            if intent not in ("confirmed", "corrected", "unclear"):
+                intent = "unclear"
+
+            if intent == "corrected":
+                new_start = parsed.get("new_start") or ""
+                new_end = parsed.get("new_end") or ""
+                new_dates: List[str] = []
+                if new_start and new_end:
+                    from datetime import date as _d
+                    s = _d.fromisoformat(new_start)
+                    e = _d.fromisoformat(new_end)
+                    if e >= s:
+                        new_dates = [
+                            (s + timedelta(days=i)).strftime("%Y-%m-%d")
+                            for i in range((e - s).days + 1)
+                        ]
+                return {"intent": "corrected", "new_dates": new_dates}
+
+            logger.info(
+                "[PLAN_AHEAD_PIPELINE] _classify_date_confirmation: intent=%r for %r",
+                intent, user_input,
+            )
+            return {"intent": intent, "new_dates": []}
+        except Exception as exc:
+            logger.warning(
+                "[PLAN_AHEAD_PIPELINE] _classify_date_confirmation failed: %s — treating as unclear",
+                exc,
+            )
+            return {"intent": "unclear", "new_dates": []}
 
     # ------------------------------------------------------------------
     # Inventory helper
@@ -103,6 +576,7 @@ class PlanAheadPipeline:
         language: Optional[str] = "zh",
         scheduling_context: Optional[str] = None,
         user_profile: Optional[Dict[str, Any]] = None,
+        queue_target_date: Optional[str] = None,
     ) -> str:
         """Build system context string for the single-shot structured LLM call."""
         now = self._now_in_timezone(user_timezone)
@@ -366,6 +840,41 @@ class PlanAheadPipeline:
                 "\nNEXT STEP REQUIRED: Use action='recommend' with the selected option's meal_entries as the draft."
             )
 
+        if queue_target_date:
+            _day_labels = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+            from datetime import date as _qdate_cls
+            _meal_zh_map = {"breakfast": "早餐", "lunch": "午餐", "dinner": "晚餐"}
+            _meal_en_map = {"breakfast": "breakfast", "lunch": "lunch", "dinner": "dinner"}
+
+            if "|" in queue_target_date:
+                # Per-meal-slot format: "YYYY-MM-DD|meal_type"
+                _slot_date_str, _slot_meal = queue_target_date.split("|", 1)
+                _qd = _qdate_cls.fromisoformat(_slot_date_str)
+                _qday_name = _day_labels[_qd.weekday()]
+                _meal_zh = _meal_zh_map.get(_slot_meal, _slot_meal)
+                ctx += (
+                    f"\n\n=== QUEUE PLANNING MODE — SINGLE MEAL ==="
+                    f"\nYou are planning one meal at a time to keep each response short."
+                    f"\nCURRENT TASK: Plan {_slot_meal} ({_meal_zh}) for {_slot_date_str} ({_qday_name}) ONLY."
+                    f"\n• Use action='suggest_options' with EXACTLY 2 compact options for {_slot_meal}."
+                    f"\n• Each option: 2-3 dishes suitable for {_slot_meal} (no more)."
+                    f"\n• meal_entries MUST only contain date={_slot_date_str}, meal_time={_slot_meal}."
+                    f"\n• Do NOT plan any other meal_time or date."
+                    f"\n• Do NOT use action='confirm' or action='recommend' directly."
+                    f"\n• Be concise in user_message — one short line per option."
+                )
+            else:
+                # Legacy per-day format
+                _qd = _qdate_cls.fromisoformat(queue_target_date)
+                _qday_name = _day_labels[_qd.weekday()]
+                ctx += (
+                    f"\n\n=== QUEUE PLANNING MODE — ACTIVE ==="
+                    f"\nCURRENT TASK: Generate a meal plan for {queue_target_date} ({_qday_name}) ONLY."
+                    f"\n• Use action='suggest_options' with 2 alternatives for {queue_target_date}."
+                    f"\n• Do NOT include meal entries for any other date."
+                    f"\n• Do NOT use action='confirm' — the queue is still in progress."
+                )
+
         ctx += "\n\n=== INSTRUCTIONS ==="
         ctx += (
             "\n1. Understand the user's intent and set 'action' to one of:"
@@ -531,7 +1040,9 @@ class PlanAheadPipeline:
         ctx += (
             "\n\nWhen the user selects an option (e.g. '选方案2', 'option 1', '我要第三个'):"
             "\n  - Use 'recommend' action."
-            "\n  - Copy the selected option's meal_entries EXACTLY into the main meal_entries field."
+            "\n  - Copy the selected option's dishes into meal_entries with ALL fields filled:"
+            "\n    each dish MUST include 'name', 'slot', and a complete 'ingredients' array"
+            "\n    (the original options may not have ingredients — you MUST generate them now)."
             "\n  - If the user also requests a modification, apply it to the selected option's plan."
             "\n  - Clear pending options (they are resolved once the user selects)."
         )
@@ -839,7 +1350,8 @@ class PlanAheadPipeline:
                                 "after removing date %s",
                                 s.get("id"), date_str,
                             )
-                    break
+                    # Do NOT break — per-meal queue mode can create multiple schedules
+                    # for the same date (one per meal), so we must iterate all of them.
         except Exception as e:
             logger.warning("[PLAN_AHEAD_PIPELINE] Failed to remove orphaned date: %s", e)
 
@@ -1068,16 +1580,21 @@ class PlanAheadPipeline:
 
         server_state = get_plan_state(owner_id)
 
-        if server_state.get("is_draft", False):
-            # Active draft in memory — never overwrite with stale DB data.
-            # The draft contains uncommitted changes; DB sync would destroy them.
-            # Only backfill schedule_id from DB if the draft doesn't have one yet.
+        _in_queue_mode = bool(server_state.get("meal_planning_queue"))
+        if server_state.get("is_draft", False) or _in_queue_mode:
+            # Skip DB sync when:
+            #   • is_draft=True: active draft in memory with uncommitted changes
+            #   • _in_queue_mode: queue session in progress — the session started with a
+            #     clean state (cleared in Phase 1b). Re-loading DB data every turn would
+            #     contaminate the queue's draft with meals from prior sessions.
+            # In both cases only backfill schedule_id if not already set.
             if old_state.get("schedule_id") and not server_state.get("schedule_id"):
                 update_plan_state(owner_id=owner_id, schedule_id=old_state.get("schedule_id"))
             current_state = get_plan_state(owner_id)
+            _skip_reason = "active draft" if server_state.get("is_draft") else "queue mode"
             logger.info(
-                f"[PLAN_AHEAD_PIPELINE] Active draft preserved "
-                f"({len(current_state.get('meal_plan', {}))} meals) — DB sync skipped."
+                f"[PLAN_AHEAD_PIPELINE] DB sync skipped ({_skip_reason}): "
+                f"{len(current_state.get('meal_plan', {}))} meals in state."
             )
         elif old_state.get("schedule_id"):
             # No active draft — sync from DB as normal.
@@ -1148,6 +1665,176 @@ class PlanAheadPipeline:
         inventory_items = await self._fetch_inventory(owner_id)
         is_currently_draft = current_state.get("is_draft", False)
 
+        # ---- Date confirmation flow ----
+        # When user requests a whole-week plan, first ask them to confirm (or correct) the
+        # detected date range. Only after confirmation does normal planning proceed.
+
+        # Phase 1b: LLM-based classification of the user's response to the date confirmation
+        _pending_queue: List[str] = list(current_state.get("pending_planning_queue") or [])
+        if _pending_queue and current_state.get("last_pipeline_action") == "ask_confirm_dates":
+            _clf = await self._classify_date_confirmation(user_input, _pending_queue, user_timezone)
+            _clf_intent = _clf["intent"]
+            logger.info(
+                "[PLAN_AHEAD_PIPELINE] Phase 1b classifier: intent=%r for %r",
+                _clf_intent, user_input,
+            )
+
+            if _clf_intent == "confirmed":
+                # User accepted the dates → enter per-meal queue mode.
+                # pending_planning_queue is already "YYYY-MM-DD|meal_type" strings
+                # (built by _init_planning_queue), so use directly without expansion.
+                _planning_slots = list(_pending_queue)
+                _pending_dates = list(dict.fromkeys(s.split("|")[0] for s in _planning_slots))
+                # Reset draft data so the queue session builds a clean draft from scratch.
+                # DB-loaded meals (from prior sessions) stay accessible to the LLM via the
+                # scheduling agent context but must NOT bleed into the new draft state.
+                update_plan_state(
+                    owner_id=owner_id,
+                    pending_planning_queue=None,
+                    last_pipeline_action=None,
+                    meal_planning_queue=_planning_slots,
+                    meal_planning_total=len(_planning_slots),
+                    meal_plan={},
+                    meal_plan_slots={},
+                    dish_ingredients={},
+                    shopping_list=[],
+                    is_draft=False,
+                    merge=False,
+                )
+                current_state = get_plan_state(owner_id)
+                logger.info(
+                    "[PLAN_AHEAD_PIPELINE] Date range confirmed: %s → %s (%d days, %d meal slots). "
+                    "Entering per-meal queue mode.",
+                    _pending_dates[0], _pending_dates[-1], len(_pending_dates), len(_planning_slots),
+                )
+                # Fall through to queue-aware LLM planning
+
+            elif _clf_intent == "corrected":
+                _corrected_dates = _clf.get("new_dates", [])
+                if _corrected_dates:
+                    # Preserve the original meal_times pattern from the pending queue so that
+                    # e.g. "今天的午餐" corrected to "明天的午餐" keeps lunch-only.
+                    _orig_meals = list(dict.fromkeys(
+                        s.split("|")[1] for s in _pending_queue if "|" in s
+                    )) or ["breakfast", "lunch", "dinner"]
+                    _corrected_slots = self._dates_to_slots(_corrected_dates, _orig_meals)
+                else:
+                    _corrected_slots = []
+
+                if _corrected_slots and _corrected_slots != _pending_queue:
+                    # New dates extracted → update proposal and ask again
+                    update_plan_state(
+                        owner_id=owner_id,
+                        pending_planning_queue=_corrected_slots,
+                        last_pipeline_action="ask_confirm_dates",
+                    )
+                    _confirm_msg = self._build_date_confirm_message(_corrected_slots, language)
+                    self._log_pending_dates(
+                        _corrected_slots,
+                        current_state.get("meal_plan_slots"),
+                        "Date corrected by user",
+                    )
+                else:
+                    # Correction intent but no new dates extracted → re-ask original
+                    _confirm_msg = self._build_date_confirm_message(_pending_queue, language)
+                    logger.info(
+                        "[PLAN_AHEAD_PIPELINE] Phase 1b: correction intent but no new dates, re-asking."
+                    )
+                return self._build_result(
+                    response_text=_confirm_msg,
+                    meal_plan=current_state.get("meal_plan", {}),
+                    meal_plan_slots=current_state.get("meal_plan_slots", {}),
+                    dish_ingredients=current_state.get("dish_ingredients", {}),
+                    shopping_list=current_state.get("shopping_list", []),
+                    schedule_id=current_state.get("schedule_id"),
+                    intent_result=intent_result,
+                )
+
+            else:  # "unclear"
+                _confirm_msg = self._build_date_confirm_message(_pending_queue, language)
+                logger.info("[PLAN_AHEAD_PIPELINE] Phase 1b: unclear reply, re-asking.")
+                return self._build_result(
+                    response_text=_confirm_msg,
+                    meal_plan=current_state.get("meal_plan", {}),
+                    meal_plan_slots=current_state.get("meal_plan_slots", {}),
+                    dish_ingredients=current_state.get("dish_ingredients", {}),
+                    shopping_list=current_state.get("shopping_list", []),
+                    schedule_id=current_state.get("schedule_id"),
+                    intent_result=intent_result,
+                )
+
+        # Phase 1a: detect fresh week-planning intent and ask user to confirm dates
+        if not _pending_queue and not is_currently_draft and not current_state.get("last_pipeline_action"):
+            _new_queue = await self._init_planning_queue(user_input, user_timezone)
+            if _new_queue:
+                update_plan_state(
+                    owner_id=owner_id,
+                    pending_planning_queue=_new_queue,
+                    last_pipeline_action="ask_confirm_dates",
+                )
+                _confirm_msg = self._build_date_confirm_message(_new_queue, language)
+                self._log_pending_dates(
+                    _new_queue,
+                    current_state.get("meal_plan_slots"),
+                    "Multi-day planning detected",
+                )
+                return self._build_result(
+                    response_text=_confirm_msg,
+                    meal_plan=current_state.get("meal_plan", {}),
+                    meal_plan_slots=current_state.get("meal_plan_slots", {}),
+                    dish_ingredients=current_state.get("dish_ingredients", {}),
+                    shopping_list=current_state.get("shopping_list", []),
+                    schedule_id=current_state.get("schedule_id"),
+                    intent_result=intent_result,
+                )
+
+        # ---- Phase Q: Per-meal queue advance ----
+        # After each meal slot is confirmed (queue_day_complete), decide what to do next:
+        #   • modification intent  → stay on current slot, let LLM handle the change
+        #   • save/confirm intent  → exit queue, let normal pipeline save the draft to DB
+        #   • anything else        → advance to the next queued meal slot
+        _meal_queue: List[str] = list(current_state.get("meal_planning_queue") or [])
+        _meal_total: int = current_state.get("meal_planning_total", 0)
+        if _meal_queue and current_state.get("last_pipeline_action") == "queue_day_complete":
+            _q_adv_lower = (user_input or "").lower().strip()
+            _has_mod_intent = any(
+                kw in _q_adv_lower
+                for kw in ("改", "换", "修改", "不要", "不用", "重新", "换一个", "replace", "change", "modify")
+            )
+            _has_save_intent = not _has_mod_intent and any(
+                kw in _q_adv_lower
+                for kw in ("保存", "存入", "存下", "save", "完成了", "结束", "不用继续", "不需要继续")
+            )
+            if _has_save_intent:
+                # User wants to save the accumulated draft now (mid-queue checkpoint).
+                # Only clear last_pipeline_action in state — the queue stays untouched.
+                # Setting _meal_queue=[] locally means _queue_target_slot will be None
+                # this turn, so the LLM generates a confirm action instead of planning
+                # the next meal. After confirm persists the draft, the queue in state
+                # is still intact; the next "继续" will resume from queue[0].
+                update_plan_state(owner_id=owner_id, last_pipeline_action=None)
+                current_state = get_plan_state(owner_id)
+                _meal_queue = []  # local-only: queue in state is preserved
+                logger.info(
+                    "[PLAN_AHEAD_PIPELINE] Queue: save intent — pausing this turn for confirm "
+                    "(queue stays in state, %d slot(s) remain).",
+                    len(current_state.get("meal_planning_queue") or []),
+                )
+            elif not _has_mod_intent:
+                # Default: advance to next slot
+                update_plan_state(owner_id=owner_id, last_pipeline_action=None)
+                current_state = get_plan_state(owner_id)
+                _meal_queue = list(current_state.get("meal_planning_queue") or [])
+                logger.info(
+                    "[PLAN_AHEAD_PIPELINE] Queue: advancing to next meal slot. Remaining: %d/%d.",
+                    len(_meal_queue), _meal_total,
+                )
+
+        # Target slot for this turn (format: "YYYY-MM-DD|meal_type", or None when not in queue mode)
+        _queue_target_slot: Optional[str] = _meal_queue[0] if _meal_queue else None
+        # Alias for backward-compat references further down
+        _queue_target_date = _queue_target_slot
+
         # ---- Step 2: Build context ----
         _scheduling_ctx = (context or {}).get("scheduling_context") if context else None
         system_context = self._build_context(
@@ -1158,6 +1845,7 @@ class PlanAheadPipeline:
             language=language,
             scheduling_context=_scheduling_ctx,
             user_profile=user_profile,
+            queue_target_date=_queue_target_slot,
         )
         # Inject pending options so the LLM can reference them when user selects
         system_context = self._inject_pending_options(system_context, current_state)
@@ -1279,7 +1967,8 @@ class PlanAheadPipeline:
         # "ask": user answered a clarification question, let the next step through.
         _DRAFT_SESSION_ACTIONS = {"suggest_options", "recommend", "modify", "ask"}
         # Only intercept "recommend" — suggest_options is ALWAYS valid and must never be blocked.
-        if action == "recommend" and last_action not in _DRAFT_SESSION_ACTIONS:
+        # Also bypass in queue mode: the queue context already scopes the LLM to one day.
+        if action == "recommend" and last_action not in _DRAFT_SESSION_ACTIONS and not _queue_target_date:
             _new_dates = set(new_meal_plan_slots.keys()) if new_meal_plan_slots else set()
             _old_dates = set((old_state.get("meal_plan_slots") or {}).keys())
             # Only bother classifying if there are new meal entries and genuinely new dates
@@ -1531,6 +2220,49 @@ class PlanAheadPipeline:
             )
             logger.info(f"[PLAN_AHEAD_PIPELINE] confirm: draft persisted, schedule_id={schedule_id}")
 
+            # If the meal_planning_queue still has remaining slots (mid-queue checkpoint
+            # save), set last_pipeline_action so Phase Q resumes on the next turn, and
+            # append a hint so the user knows to reply 继续.
+            _remaining_queue: List[str] = list(current_state.get("meal_planning_queue") or [])
+            if _remaining_queue:
+                # Reset draft so the next queue slot starts accumulating from scratch.
+                # Without this, previously-confirmed meals stay in state and get merged
+                # into the next slot's draft, causing already-saved meals to be re-sent
+                # on every subsequent confirm.
+                update_plan_state(
+                    owner_id=owner_id,
+                    meal_plan={},
+                    meal_plan_slots={},
+                    dish_ingredients={},
+                    shopping_list=[],
+                    is_draft=False,
+                    last_pipeline_action="queue_day_complete",
+                    merge=False,
+                )
+                _next_slot = _remaining_queue[0]
+                if "|" in _next_slot:
+                    _ns_date, _ns_meal = _next_slot.split("|", 1)
+                    _ns_meal_zh = {"breakfast": "早餐", "lunch": "午餐", "dinner": "晚餐"}.get(_ns_meal, _ns_meal)
+                    _day_abbrev_map = {0: "Mon", 1: "Tue", 2: "Wed", 3: "Thu", 4: "Fri", 5: "Sat", 6: "Sun"}
+                    from datetime import date as _ns_date_cls
+                    _ns_abbr = _day_abbrev_map.get(_ns_date_cls.fromisoformat(_ns_date).weekday(), "")
+                    _resume_hint = (
+                        f"\n\n还有 {len(_remaining_queue)} 餐待规划。"
+                        f"下一餐：{_ns_date}（{_ns_abbr}）{_ns_meal_zh}，回复「继续」→"
+                    )
+                else:
+                    _resume_hint = f"\n\n还有 {len(_remaining_queue)} 餐待规划，回复「继续」→"
+                # Strip any LLM-generated queue-hint line to prevent duplication.
+                # The LLM can see the queue context and sometimes adds its own
+                # "还有 N 餐待规划" line, which would duplicate the one we append.
+                import re as _re
+                user_message = _re.sub(r'\n*还有\s*\d+\s*餐待规划[^\n]*', '', user_message).rstrip()
+                user_message = user_message + _resume_hint
+                logger.info(
+                    "[PLAN_AHEAD_PIPELINE] confirm: %d queue slot(s) remain — draft reset, queue resumes next turn.",
+                    len(_remaining_queue),
+                )
+
             # Phase 2: update recent_dishes after confirmed commit
             if user_profile is not None and new_sid:
                 try:
@@ -1753,9 +2485,15 @@ class PlanAheadPipeline:
 
             # Compute which dishes were replaced/removed in this operation so we can track
             # them as "rejected" and avoid re-suggesting them in subsequent turns.
-            _prev_draft_slots = current_state.get("meal_plan_slots") or {}
+            # In queue mode, rejected-dish tracking is scoped to the target slot's date only
+            # (the state already holds previously-planned days whose dishes must not be flagged).
+            if _queue_target_slot:
+                _slot_date_only = _queue_target_slot.split("|")[0] if "|" in _queue_target_slot else _queue_target_slot
+                _prev_for_tracking = {_slot_date_only: (current_state.get("meal_plan_slots") or {}).get(_slot_date_only, {})}
+            else:
+                _prev_for_tracking = current_state.get("meal_plan_slots") or {}
             _prev_dishes: set = set()
-            for _pdate, _pmeals in _prev_draft_slots.items():
+            for _pdate, _pmeals in _prev_for_tracking.items():
                 for _pmt, _pdishes in _pmeals.items():
                     _prev_dishes.update(_pdishes)
             _new_dishes: set = set()
@@ -1765,6 +2503,10 @@ class PlanAheadPipeline:
             _newly_rejected = _prev_dishes - _new_dishes
             # Preserve existing rejected dishes across turns (union-merge in update_plan_state)
             _existing_rejected: set = current_state.get("draft_rejected_dishes") or set()
+
+            # Queue mode: use merge=True so previously-planned days accumulate in state.
+            # Normal mode: use merge=False to replace stale draft data cleanly.
+            _draft_merge = bool(_queue_target_date)
 
             update_plan_state(
                 owner_id=owner_id,
@@ -1776,7 +2518,7 @@ class PlanAheadPipeline:
                 is_draft=True,
                 last_pipeline_action=action,
                 draft_rejected_dishes=_existing_rejected | _newly_rejected,
-                merge=False,
+                merge=_draft_merge,
                 **base_db_dates_kwarg,
             )
             if _newly_rejected:
@@ -1784,16 +2526,83 @@ class PlanAheadPipeline:
                     "[PLAN_AHEAD_PIPELINE] Tracking %d newly rejected dish(es): %s",
                     len(_newly_rejected), sorted(_newly_rejected),
                 )
+
+            # ---- Queue mode: pop the planned meal slot and append progress info ----
+            _day_abbrev = {0: "Mon", 1: "Tue", 2: "Wed", 3: "Thu", 4: "Fri", 5: "Sat", 6: "Sun"}
+            _meal_zh_label = {"breakfast": "早餐", "lunch": "午餐", "dinner": "晚餐"}
+            if _queue_target_slot and action == "recommend":
+                _remaining_queue = _meal_queue[1:]
+                _slot_num_done = _meal_total - len(_meal_queue) + 1
+                # Parse current slot for display
+                if "|" in _queue_target_slot:
+                    _cur_date_str, _cur_meal = _queue_target_slot.split("|", 1)
+                    _cur_meal_zh = _meal_zh_label.get(_cur_meal, _cur_meal)
+                else:
+                    _cur_date_str, _cur_meal_zh = _queue_target_slot, ""
+
+                # Replace LLM's user_message with a single-slot summary so other
+                # already-planned meals for the same date don't bleed into the response.
+                _slot_dishes = (new_meal_plan_slots or {}).get(_cur_date_str, {}).get(_cur_meal, [])
+                if _slot_dishes:
+                    _dish_list = "、".join(_slot_dishes)
+                    user_message = f"好的，已为您规划 {_cur_date_str} {_cur_meal_zh}：{_dish_list}。"
+                if _remaining_queue:
+                    update_plan_state(
+                        owner_id=owner_id,
+                        meal_planning_queue=_remaining_queue,
+                        last_pipeline_action="queue_day_complete",
+                    )
+                    from datetime import date as _qdcls
+                    _next_slot = _remaining_queue[0]
+                    if "|" in _next_slot:
+                        _next_date_str, _next_meal = _next_slot.split("|", 1)
+                        _next_meal_zh = _meal_zh_label.get(_next_meal, _next_meal)
+                        _next_abbr = _day_abbrev.get(_qdcls.fromisoformat(_next_date_str).weekday(), "")
+                        _next_label = f"{_next_date_str}（{_next_abbr}）{_next_meal_zh}"
+                    else:
+                        _next_label = _next_slot
+                    user_message = (
+                        user_message
+                        + f"\n\n---\n✅ 第 {_slot_num_done}/{_meal_total} 餐 — {_cur_date_str} {_cur_meal_zh}已确认。"
+                        f"\n下一餐：{_next_label}，回复「继续」→"
+                    )
+                    logger.info(
+                        "[PLAN_AHEAD_PIPELINE] Queue: slot %d/%d planned (%s), %d slot(s) remaining.",
+                        _slot_num_done, _meal_total, _queue_target_slot, len(_remaining_queue),
+                    )
+                else:
+                    update_plan_state(
+                        owner_id=owner_id,
+                        meal_planning_queue=[],
+                        meal_planning_total=0,
+                        last_pipeline_action=None,
+                    )
+                    user_message = (
+                        user_message
+                        + f"\n\n🎉 全部 {_meal_total} 餐规划已完成！回复「确认」将计划保存到日历。"
+                    )
+                    logger.info(
+                        "[PLAN_AHEAD_PIPELINE] Queue: all %d meal slots planned. Queue complete.",
+                        _meal_total,
+                    )
+
+            # Re-read state to get the full accumulated meal plan for the response
+            _final_state = get_plan_state(owner_id) if _queue_target_date else None
+            _resp_meal_plan = (_final_state or {}).get("meal_plan", new_meal_plan) if _queue_target_date else new_meal_plan
+            _resp_slots = (_final_state or {}).get("meal_plan_slots", new_meal_plan_slots) if _queue_target_date else new_meal_plan_slots
+            _resp_di = (_final_state or {}).get("dish_ingredients", new_dish_ingredients) if _queue_target_date else new_dish_ingredients
+            _resp_sl = compute_shopping_list(_resp_di) if _queue_target_date else shopping_list
+
             logger.info(
                 f"[PLAN_AHEAD_PIPELINE] action={action} (draft): memory updated, DB persist deferred. "
-                f"dates={list(new_meal_plan.keys())}"
+                f"dates={list(_resp_meal_plan.keys())}"
             )
             return self._build_result(
                 response_text=user_message,
-                meal_plan=new_meal_plan,
-                meal_plan_slots=new_meal_plan_slots,
-                dish_ingredients=new_dish_ingredients,
-                shopping_list=shopping_list,
+                meal_plan=_resp_meal_plan,
+                meal_plan_slots=_resp_slots,
+                dish_ingredients=_resp_di,
+                shopping_list=_resp_sl,
                 schedule_id=current_state.get("schedule_id"),
                 is_draft=True,
                 intent_result=intent_result,

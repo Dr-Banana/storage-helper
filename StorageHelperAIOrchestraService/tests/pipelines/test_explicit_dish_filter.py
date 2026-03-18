@@ -277,7 +277,8 @@ async def test_single_dish_request_strips_hallucinated_extra():
             resp.json.return_value = bad_classifier_resp.json.return_value
         return resp
 
-    with patch("httpx.AsyncClient.post", new_callable=AsyncMock, side_effect=_mock_post):
+    with patch.object(p, "_init_planning_queue", AsyncMock(return_value=[])), \
+         patch("httpx.AsyncClient.post", new_callable=AsyncMock, side_effect=_mock_post):
         result = await p.execute(
             owner_id=_OWNER,
             user_input="今天早上吃个小笼包",

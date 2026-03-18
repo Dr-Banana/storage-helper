@@ -39,6 +39,9 @@ class TestGetPlanState:
             "pending_overwrite": None,
             "pending_options": None,
             "draft_rejected_dishes": set(),
+            "pending_planning_queue": [],
+            "meal_planning_queue": [],
+            "meal_planning_total": 0,
         }
 
     def test_get_existing_state(self):

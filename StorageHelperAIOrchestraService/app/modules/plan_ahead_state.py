@@ -58,6 +58,15 @@ def get_plan_state(owner_id: int) -> Dict[str, Any]:
             # Dishes explicitly replaced/rejected by the user in the current draft session.
             # Used to avoid re-suggesting the same dishes and to guide the seed library fallback.
             "draft_rejected_dishes": state.get("draft_rejected_dishes", set()),
+            # Proposed date range waiting for user confirmation before planning starts.
+            # Set when a week-planning intent is detected; cleared on confirm or correction.
+            "pending_planning_queue": state.get("pending_planning_queue", []),
+            # Active per-meal planning queue: slots remaining after date confirmation.
+            # Populated when user confirms a multi-day range; each slot is popped (popleft)
+            # only after the user accepts that meal's recommend draft.
+            "meal_planning_queue": state.get("meal_planning_queue", []),
+            # Total number of slots originally in meal_planning_queue (for progress display).
+            "meal_planning_total": state.get("meal_planning_total", 0),
             "updated_at": state.get("updated_at"),
         }
     return {
@@ -65,6 +74,9 @@ def get_plan_state(owner_id: int) -> Dict[str, Any]:
         "is_draft": False, "draft_base_db_dates": set(), "last_pipeline_action": None,
         "cooking_context": None, "pending_modify_action": None, "pending_overwrite": None,
         "pending_options": None, "draft_rejected_dishes": set(),
+        "pending_planning_queue": [],
+        "meal_planning_queue": [],
+        "meal_planning_total": 0,
     }
 
 
@@ -83,6 +95,9 @@ def update_plan_state(
     pending_overwrite = _UNSET,  # Proposed recipe overwrite awaiting user confirmation
     pending_options = _UNSET,  # List of meal plan options for suggest_options flow
     draft_rejected_dishes = _UNSET,  # Set[str] of dishes rejected/replaced in this draft session
+    pending_planning_queue = _UNSET,  # List[str] proposed date range awaiting user confirmation
+    meal_planning_queue = _UNSET,  # List[str] remaining dates to plan in sequential queue mode
+    meal_planning_total = _UNSET,  # int total dates in the original queue (for progress display)
     merge: bool = True,
 ) -> Dict[str, Any]:
     """
@@ -102,8 +117,13 @@ def update_plan_state(
 
         if shopping_list is not None:
             current_shopping_list = current.get("shopping_list", [])
-            combined = list(set(current_shopping_list + shopping_list))
-            current["shopping_list"] = combined
+            # shopping_list items are dicts (not hashable), deduplicate by 'name' key.
+            seen: Dict[str, Any] = {}
+            for item in current_shopping_list + shopping_list:
+                key = item.get("name") if isinstance(item, dict) else str(item)
+                if key:
+                    seen[key] = item
+            current["shopping_list"] = list(seen.values())
         elif "shopping_list" not in current:
             current["shopping_list"] = []
 
@@ -205,6 +225,24 @@ def update_plan_state(
             # Always union-merge so we accumulate rejections across turns
             existing_rejected: set = current.get("draft_rejected_dishes", set())
             current["draft_rejected_dishes"] = existing_rejected | set(draft_rejected_dishes)
+
+    if pending_planning_queue is not _UNSET:
+        if pending_planning_queue is None:
+            current.pop("pending_planning_queue", None)
+        else:
+            current["pending_planning_queue"] = list(pending_planning_queue)
+
+    if meal_planning_queue is not _UNSET:
+        if meal_planning_queue is None:
+            current.pop("meal_planning_queue", None)
+        else:
+            current["meal_planning_queue"] = list(meal_planning_queue)
+
+    if meal_planning_total is not _UNSET:
+        if meal_planning_total is None:
+            current.pop("meal_planning_total", None)
+        else:
+            current["meal_planning_total"] = int(meal_planning_total)
 
     current["updated_at"] = datetime.now(timezone.utc)
     _plan_states[owner_id] = current
