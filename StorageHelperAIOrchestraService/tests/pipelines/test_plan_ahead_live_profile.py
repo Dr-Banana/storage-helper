@@ -212,6 +212,7 @@ class TestLiveUserProfileIntake:
         """
         Profile: disliked_ingredients=["香菜", "花椒"].
         Expected: neither 香菜 nor 花椒 appear in any ingredient.
+        Scope is kept to two dinners to avoid MAX_TOKENS truncation.
         """
         profile = {
             "default_servings": 1,
@@ -231,7 +232,7 @@ class TestLiveUserProfileIntake:
         parsed = await p._call_llm(
             system_context=ctx,
             history=[],
-            user_input="推荐一周的晚餐计划",
+            user_input="推荐今晚和明晚的晚餐，各一道菜",
         )
         assert parsed is not None, "LLM returned None — API call failed"
 

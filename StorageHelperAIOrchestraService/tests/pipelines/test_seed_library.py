@@ -59,7 +59,9 @@ def test_disliked_ingredient_filtered_out():
 
 def test_hard_banned_dish_excluded():
     # "宫保鸡丁" eaten 1 day ago — should be excluded from candidates
-    recent = [{"dish": "宫保鸡丁", "date": "2026-03-10"}]
+    from datetime import date, timedelta
+    yesterday = (date.today() - timedelta(days=1)).strftime("%Y-%m-%d")
+    recent = [{"dish": "宫保鸡丁", "date": yesterday}]
     candidates = select_candidates(recent_dishes=recent)
     names = [d["name_zh"] for d in candidates]
     assert "宫保鸡丁" not in names
@@ -67,7 +69,9 @@ def test_hard_banned_dish_excluded():
 
 def test_soft_avoided_dish_deprioritised_but_not_excluded():
     # "宫保鸡丁" eaten 5 days ago — soft avoid only, may still appear in small pools
-    recent = [{"dish": "宫保鸡丁", "date": "2026-03-06"}]
+    from datetime import date, timedelta
+    five_days_ago = (date.today() - timedelta(days=5)).strftime("%Y-%m-%d")
+    recent = [{"dish": "宫保鸡丁", "date": five_days_ago}]
     candidates = select_candidates(recent_dishes=recent, n=DEFAULT_CANDIDATE_COUNT)
     # We can't guarantee exclusion, but if it appears it should rank lower.
     # Just assert the function doesn't crash and returns a valid list.

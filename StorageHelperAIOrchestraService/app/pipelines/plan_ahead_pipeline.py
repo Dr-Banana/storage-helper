@@ -425,6 +425,15 @@ class PlanAheadPipeline:
                 elif len(set(_check_re.findall(r"周([一二三四五六日天])", user_input or ""))) >= 2:
                     _llm_fallback_reason = "multiple weekday mentions"
 
+                # Case F: Chinese/Arabic numeral + 周 / 个星期 spans (e.g. "两周", "接下来两周",
+                # "三个星期") — LLM often returns only start date without the end.
+                elif _check_re.search(
+                    r"[两三四五六七八九\d]+\s*(?:周|个星期|个礼拜)|two\s+weeks|three\s+weeks",
+                    user_input or "",
+                    _check_re.IGNORECASE,
+                ):
+                    _llm_fallback_reason = "multi-week span"
+
                 if _llm_fallback_reason:
                     logger.debug(
                         "[PLAN_AHEAD_PIPELINE] _init_planning_queue: LLM returned single date but "

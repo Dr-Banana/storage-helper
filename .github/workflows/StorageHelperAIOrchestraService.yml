@@ -51,7 +51,7 @@ jobs:
         GEMINI_EMBEDDING_API_KEY: placeholder
       run: |
         cd StorageHelperAIOrchestraService
-        python -m pytest tests/ -m "not llm_judge and not embedding" -v
+        python -m pytest tests/ -m "not llm_judge and not embedding and not llm_live" -v
 
     # ── Check whether the LLM testing secret is available ─────────────────────
     # secrets.* cannot be used directly in `if:` conditions; use a step output.
@@ -66,9 +66,32 @@ jobs:
       env:
         LLM_TESTING_KEY: ${{ secrets.GEMINI_LLM_TESTING_KEY }}
 
-    # ── Layer 3: LLM-as-Judge tests (live Gemini calls) ───────────────────────
+    # ── Layer 3 (llm_live): Live generation / date-detection / e2e tests ──────
+    # All tests marked @pytest.mark.llm_live across the entire suite.
     # Skipped automatically when GEMINI_LLM_TESTING_KEY secret is not configured.
-    - name: Run LLM Judge Tests
+    - name: Run Live LLM Tests (llm_live)
+      if: steps.check_llm_key.outputs.available == 'true'
+      env:
+        APP_ENV: prod
+        GEMINI_LLM_MODEL: gemini-2.5-flash
+        GEMINI_EMBEDDING_MODEL: gemini-embedding-001
+        GEMINI_METADATA_MODEL: gemini-2.5-flash
+        VISION_MODEL: gemini-2.5-flash
+        STORAGE_SERVICE_URL: http://localhost:8000/api/v1
+        # GEMINI_LLM_TESTING_KEY → picked up by _load_testing_key() (auto-enables tests)
+        # GEMINI_LLM_API_KEY     → used by settings.GEMINI_LLM_API_KEY for real API calls
+        GEMINI_LLM_TESTING_KEY: ${{ secrets.GEMINI_LLM_TESTING_KEY }}
+        GEMINI_LLM_API_KEY: ${{ secrets.GEMINI_LLM_TESTING_KEY }}
+        GEMINI_EMBEDDING_API_KEY: placeholder
+      run: |
+        cd StorageHelperAIOrchestraService
+        python -m pytest tests/ -m llm_live --run-llm -v
+      # LLM output is non-deterministic; don't fail the entire build on flakiness.
+      continue-on-error: true
+
+    # ── Layer 3 (llm_judge): LLM-as-Judge semantic quality tests ─────────────
+    # Skipped automatically when GEMINI_LLM_TESTING_KEY secret is not configured.
+    - name: Run LLM Judge Tests (llm_judge)
       if: steps.check_llm_key.outputs.available == 'true'
       env:
         APP_ENV: prod
@@ -76,14 +99,11 @@ jobs:
         GEMINI_METADATA_MODEL: gemini-2.5-flash
         VISION_MODEL: gemini-2.5-flash
         STORAGE_SERVICE_URL: http://localhost:8000/api/v1
-        # Both names needed:
-        #   GEMINI_LLM_TESTING_KEY → picked up by _load_testing_key() (auto-enables tests)
-        #   GEMINI_LLM_API_KEY     → fallback used by settings.GEMINI_LLM_API_KEY
         GEMINI_LLM_TESTING_KEY: ${{ secrets.GEMINI_LLM_TESTING_KEY }}
         GEMINI_LLM_API_KEY: ${{ secrets.GEMINI_LLM_TESTING_KEY }}
         GEMINI_EMBEDDING_API_KEY: placeholder
       run: |
         cd StorageHelperAIOrchestraService
-        python -m pytest tests/ai_quality/test_semantic.py -m llm_judge -v
+        python -m pytest tests/ai_quality/test_semantic.py -m llm_judge --run-llm -v
       # LLM output is non-deterministic; don't fail the entire build on flakiness.
       continue-on-error: true

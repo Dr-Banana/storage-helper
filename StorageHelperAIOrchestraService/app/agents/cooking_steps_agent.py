@@ -983,6 +983,45 @@ class CookingStepsAgent(BaseAgent):
         if ingredients:
             ing_text = f"\nKnown ingredients: {', '.join(i for i in ingredients if i)}"
 
+        # Phase header labels, example steps, and tip labels for each language.
+        # These are injected into the beginner FORMAT RULES so that the LLM's
+        # in-context examples match the requested output language and never leak
+        # Chinese into English (or other language) responses.
+        _lang = language or "zh"
+        _phase_prep, _phase_cook, _phase_serve = {
+            "zh": ("🥗 准备阶段", "🍳 开始烹饪", "🥢 享用"),
+            "en": ("🥗 Prep",     "🍳 Cook",       "🥢 Serve"),
+            "ja": ("🥗 準備",     "🍳 調理",        "🥢 盛り付け"),
+            "ko": ("🥗 준비",     "🍳 조리",         "🥢 서빙"),
+        }.get(_lang, ("🥗 准备阶段", "🍳 开始烹饪", "🥢 享用"))
+
+        _example_step, _tip_label, _example_tip = {
+            "zh": (
+                "**打散**鸡蛋: 取 **3个鸡蛋** 加入 **1克盐**，充分搅打均匀。",
+                "💡 小贴士: ",
+                "**调水淀粉**: 碗中混合 **15g淀粉** + **30ml水**。', '💡 小贴士: 淀粉容易沉淀，下锅前记得再搅一下！",
+            ),
+            "en": (
+                "**Beat** eggs: crack **3 eggs** into a bowl, add **1 g salt**, whisk thoroughly.",
+                "💡 Tip: ",
+                "**Mix cornstarch**: combine **15 g cornstarch** + **30 ml water** in a bowl.', '💡 Tip: Starch settles fast — stir again right before adding to the pan!",
+            ),
+            "ja": (
+                "卵を**溶く**: **卵3個**をボウルに割り、**塩1g**を加えてよく混ぜる。",
+                "💡 ヒント: ",
+                "**片栗粉を溶く**: ボウルに **片栗粉15g** と **水30ml** を混ぜる。', '💡 ヒント: でんぷんは沈殿しやすいので、鍋に入れる直前にもう一度かき混ぜましょう！",
+            ),
+            "ko": (
+                "달걀을 **풀기**: 그릇에 **달걀 3개**를 깨뜨리고 **소금 1g**을 넣어 잘 섞는다.",
+                "💡 팁: ",
+                "**전분물 만들기**: 그릇에 **전분 15g** + **물 30ml**를 섞는다.', '💡 팁: 전분은 가라앉기 쉬우니 팬에 넣기 직전에 한 번 더 저어주세요!",
+            ),
+        }.get(_lang, (
+            "**打散**鸡蛋: 取 **3个鸡蛋** 加入 **1克盐**，充分搅打均匀。",
+            "💡 小贴士: ",
+            "**调水淀粉**: 碗中混合 **15g淀粉** + **30ml水**。', '💡 小贴士: 淀粉容易沉淀，下锅前记得再搅一下！",
+        ))
+
         _level_instructions = {
             # Entry (入门级): 消除不确定性，追求成功率与速度
             "beginner": (
@@ -990,21 +1029,21 @@ class CookingStepsAgent(BaseAgent):
                 "FORMAT RULES (the frontend parses these markers — follow them exactly):\n"
                 "\n"
                 "1. PHASE HEADERS: Divide the recipe into phases. Output each phase header as a standalone string in the steps array:\n"
-                "   - '🥗 准备阶段' for all cutting, measuring, and sauce-mixing BEFORE the stove is on\n"
-                "   - '🍳 开始烹饪' for all active heat steps\n"
-                "   - '🥢 享用' for plating and serving\n"
+                f"   - '{_phase_prep}' for all cutting, measuring, and sauce-mixing BEFORE the stove is on\n"
+                f"   - '{_phase_cook}' for all active heat steps\n"
+                f"   - '{_phase_serve}' for plating and serving\n"
                 "   Only include phases that actually apply. Each header string must start with the emoji.\n"
                 "\n"
                 "2. BOLD FORMATTING: In every cooking step, wrap with **double asterisks**:\n"
-                "   - The main action verb (e.g. **打散**, **热锅**, **加入**)\n"
-                "   - The primary ingredient (e.g. **鸡蛋**, **猪肉**)\n"
-                "   - Every measurement (e.g. **3个**, **1克盐**, **15ml油**)\n"
-                "   Example step: '**打散**鸡蛋: 取 **3个鸡蛋** 加入 **1克盐**，充分搅打均匀。'\n"
+                "   - The main action verb\n"
+                "   - The primary ingredient\n"
+                "   - Every measurement\n"
+                f"   Example step: '{_example_step}'\n"
                 "\n"
-                "3. TIPS: When a step needs a safety or success clarification, add a SEPARATE string IMMEDIATELY AFTER that step, starting with '💡 小贴士: '.\n"
-                "   Example: ['**调水淀粉**: 碗中混合 **15g淀粉** + **30ml水**。', '💡 小贴士: 淀粉容易沉淀，下锅前记得再搅一下！']\n"
+                f"3. TIPS: When a step needs a safety or success clarification, add a SEPARATE string IMMEDIATELY AFTER that step, starting with '{_tip_label}'.\n"
+                f"   Example: ['{_example_tip}']\n"
                 "\n"
-                "4. MEASUREMENTS: NEVER use '适量', 'to taste', or 'a pinch of' — always specify exact quantities.\n"
+                "4. MEASUREMENTS: NEVER use vague amounts — always specify exact quantities.\n"
                 "5. AVOID high-skill techniques: no deep-frying, caramelising, flambéing, or anything requiring precise heat mastery.\n"
                 "6. Total 6–8 actual cooking steps (phase header strings and tip strings do NOT count toward this total).\n"
             ),
