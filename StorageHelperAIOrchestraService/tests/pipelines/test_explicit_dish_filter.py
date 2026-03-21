@@ -269,11 +269,12 @@ async def test_single_dish_request_strips_hallucinated_extra():
         call_count["n"] += 1
         resp = MagicMock()
         resp.raise_for_status = MagicMock()
-        if call_count["n"] == 1:
-            # First call = main LLM structured response
+        if call_count["n"] == 2:
+            # Second call = main LLM structured response
+            # (Call 1 is now the Layer-0 dish-intent classifier added before Phase 1a)
             resp.json.return_value = main_llm_resp
         else:
-            # Subsequent calls = dish-intent classifier (returns bad JSON → fallback)
+            # All other calls = dish-intent classifier (bad JSON → keyword fallback)
             resp.json.return_value = bad_classifier_resp.json.return_value
         return resp
 

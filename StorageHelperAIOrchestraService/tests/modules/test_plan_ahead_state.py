@@ -40,8 +40,10 @@ class TestGetPlanState:
             "pending_options": None,
             "draft_rejected_dishes": set(),
             "pending_planning_queue": [],
+            "pending_ask_dates": [],
             "meal_planning_queue": [],
             "meal_planning_total": 0,
+            "confirmation_retry_count": 0,
         }
 
     def test_get_existing_state(self):
@@ -681,3 +683,52 @@ class TestPendingOverwrite:
         state = get_plan_state(owner_id=3)
         assert state["pending_modify_action"] is None
         assert state["pending_overwrite"] == overwrite
+
+
+# ---------------------------------------------------------------------------
+# TestPendingAskDates — pending_ask_dates state field
+# ---------------------------------------------------------------------------
+
+class TestPendingAskDates:
+    """
+    Tests for the pending_ask_dates state field, which stores the dates captured by
+    the Fresh-plan guard when it forces action=ask so the next turn can resolve the
+    user's meal-type reply without losing date context.
+    """
+
+    def test_default_is_empty_list(self):
+        """pending_ask_dates defaults to [] for a new user."""
+        assert get_plan_state(owner_id=1)["pending_ask_dates"] == []
+
+    def test_set_pending_ask_dates(self):
+        """Setting pending_ask_dates stores the list correctly."""
+        dates = ["2026-03-27", "2026-03-28"]
+        update_plan_state(owner_id=1, pending_ask_dates=dates)
+        assert get_plan_state(owner_id=1)["pending_ask_dates"] == dates
+
+    def test_clear_pending_ask_dates(self):
+        """Setting pending_ask_dates=None removes the field (reads as [])."""
+        update_plan_state(owner_id=1, pending_ask_dates=["2026-03-27"])
+        update_plan_state(owner_id=1, pending_ask_dates=None)
+        assert get_plan_state(owner_id=1)["pending_ask_dates"] == []
+
+    def test_overwrite_pending_ask_dates(self):
+        """A second update replaces the previous value entirely."""
+        update_plan_state(owner_id=1, pending_ask_dates=["2026-03-27"])
+        update_plan_state(owner_id=1, pending_ask_dates=["2026-04-01", "2026-04-02"])
+        assert get_plan_state(owner_id=1)["pending_ask_dates"] == ["2026-04-01", "2026-04-02"]
+
+    def test_independent_of_other_fields(self):
+        """Updating pending_ask_dates must not disturb other state fields."""
+        update_plan_state(owner_id=1, last_pipeline_action="ask", meal_plan={"2026-03-18": "烤鸡"})
+        update_plan_state(owner_id=1, pending_ask_dates=["2026-03-27", "2026-03-28"])
+        state = get_plan_state(owner_id=1)
+        assert state["last_pipeline_action"] == "ask"
+        assert state["meal_plan"] == {"2026-03-18": "烤鸡"}
+        assert state["pending_ask_dates"] == ["2026-03-27", "2026-03-28"]
+
+    def test_clear_plan_state_removes_pending_ask_dates(self):
+        """clear_plan_state removes pending_ask_dates along with everything else."""
+        update_plan_state(owner_id=1, pending_ask_dates=["2026-03-27"])
+        clear_plan_state(owner_id=1)
+        assert get_plan_state(owner_id=1)["pending_ask_dates"] == []

@@ -61,12 +61,21 @@ def get_plan_state(owner_id: int) -> Dict[str, Any]:
             # Proposed date range waiting for user confirmation before planning starts.
             # Set when a week-planning intent is detected; cleared on confirm or correction.
             "pending_planning_queue": state.get("pending_planning_queue", []),
+            # Dates captured by the Fresh-plan guard when it forced action=ask (e.g. ["2026-03-27","2026-03-28"]).
+            # Used on the next turn to combine the user's meal-type choice with the known dates,
+            # bypassing a second _init_planning_queue call that would lose the date context.
+            # Cleared after being consumed or when a new planning cycle begins.
+            "pending_ask_dates": state.get("pending_ask_dates", []),
             # Active per-meal planning queue: slots remaining after date confirmation.
             # Populated when user confirms a multi-day range; each slot is popped (popleft)
             # only after the user accepts that meal's recommend draft.
             "meal_planning_queue": state.get("meal_planning_queue", []),
             # Total number of slots originally in meal_planning_queue (for progress display).
             "meal_planning_total": state.get("meal_planning_total", 0),
+            # How many times the user corrected the pending_planning_queue without changing it.
+            # Resets to 0 when the queue content changes or is confirmed.
+            # Used to detect dead-loop and trigger guided recovery.
+            "confirmation_retry_count": state.get("confirmation_retry_count", 0),
             "updated_at": state.get("updated_at"),
         }
     return {
@@ -77,6 +86,8 @@ def get_plan_state(owner_id: int) -> Dict[str, Any]:
         "pending_planning_queue": [],
         "meal_planning_queue": [],
         "meal_planning_total": 0,
+        "confirmation_retry_count": 0,
+        "pending_ask_dates": [],
     }
 
 
@@ -96,8 +107,10 @@ def update_plan_state(
     pending_options = _UNSET,  # List of meal plan options for suggest_options flow
     draft_rejected_dishes = _UNSET,  # Set[str] of dishes rejected/replaced in this draft session
     pending_planning_queue = _UNSET,  # List[str] proposed date range awaiting user confirmation
+    pending_ask_dates = _UNSET,  # List[str] dates saved by Fresh-plan guard for next-turn resolution
     meal_planning_queue = _UNSET,  # List[str] remaining dates to plan in sequential queue mode
     meal_planning_total = _UNSET,  # int total dates in the original queue (for progress display)
+    confirmation_retry_count = _UNSET,  # int: consecutive no-op corrections, for dead-loop guard
     merge: bool = True,
 ) -> Dict[str, Any]:
     """
@@ -232,6 +245,12 @@ def update_plan_state(
         else:
             current["pending_planning_queue"] = list(pending_planning_queue)
 
+    if pending_ask_dates is not _UNSET:
+        if pending_ask_dates is None:
+            current.pop("pending_ask_dates", None)
+        else:
+            current["pending_ask_dates"] = list(pending_ask_dates)
+
     if meal_planning_queue is not _UNSET:
         if meal_planning_queue is None:
             current.pop("meal_planning_queue", None)
@@ -243,6 +262,12 @@ def update_plan_state(
             current.pop("meal_planning_total", None)
         else:
             current["meal_planning_total"] = int(meal_planning_total)
+
+    if confirmation_retry_count is not _UNSET:
+        if confirmation_retry_count is None:
+            current.pop("confirmation_retry_count", None)
+        else:
+            current["confirmation_retry_count"] = int(confirmation_retry_count)
 
     current["updated_at"] = datetime.now(timezone.utc)
     _plan_states[owner_id] = current

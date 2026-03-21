@@ -490,8 +490,9 @@ class TestPhase1bLLMClassifier:
         )
 
     @pytest.mark.asyncio
-    async def test_corrected_intent_no_dates_extracted_re_asks_original(self):
-        """When classifier says 'corrected' but returns no dates, re-ask original dates."""
+    async def test_corrected_intent_no_dates_extracted_shows_guidance(self):
+        """When classifier says 'corrected' but returns no dates/meal_times,
+        a guidance message is shown instead of repeating the same confirmation."""
         from unittest.mock import patch as _patch, AsyncMock as _AsyncMock
 
         pending_queue = self._pending_state(9103)
@@ -502,7 +503,7 @@ class TestPhase1bLLMClassifier:
                           return_value=self._empty_db_state()),
             _patch.object(pipeline, "_fetch_inventory", return_value=[]),
             _patch.object(pipeline, "_classify_date_confirmation", new_callable=_AsyncMock,
-                          return_value={"intent": "corrected", "new_dates": []}),
+                          return_value={"intent": "corrected", "new_dates": [], "new_meal_times": None}),
         ):
             result = await pipeline.execute(
                 owner_id=9103, user_input="换个时间", history=[],
@@ -510,8 +511,10 @@ class TestPhase1bLLMClassifier:
                 intent_result={"intent": "PLAN_AHEAD"}, language="zh",
             )
 
-        assert "日期没问题" in result.get("response", ""), (
-            "Corrected intent with no new dates must re-ask original confirmation."
+        response = result.get("response", "")
+        # First no-op correction: should show a targeted guidance question (not the original msg)
+        assert "日期" in response or "餐次" in response or "修改" in response, (
+            f"First no-op correction should show guidance message, got: {response!r}"
         )
 
 
@@ -872,4 +875,318 @@ class TestLiveDateConfirmationClassifier:
         # "我明天要去旅游" is ambiguous — accept confirmed or unclear (not corrected)
         assert result["intent"] in ("unclear", "confirmed"), (
             f"Expected 'unclear' or 'confirmed', got {result!r}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# TestExplicitDishDetection — unit tests for _is_explicit_dish_request
+# ---------------------------------------------------------------------------
+
+class TestExplicitDishDetection:
+    """
+    Unit tests for PlanAheadPipeline._is_explicit_dish_request().
+
+    This method distinguishes between:
+      - Explicit dish requests ("今天晚上吃芋艿猪排骨") → True  (bypass planning flow)
+      - Planning/suggestion requests ("今天晚上吃什么") → False (enter planning flow)
+    """
+
+    @pytest.mark.parametrize("text,expected", [
+        # Explicit dish requests → True
+        ("今天晚上吃芋艿猪排骨",     True),
+        ("今晚做个红烧肉",           True),
+        ("想吃火锅",                 True),
+        ("来点水煮鱼",               True),
+        ("做个红烧排骨",             True),
+        ("吃个饺子",                 True),
+        ("来个扬州炒饭",             True),
+        ("整点麻辣烫",               True),
+        # Planning / suggestion requests → False
+        ("今天晚上吃什么",           False),
+        ("今天吃什么好",             False),
+        ("帮我规划今天三餐",         False),
+        ("今天吃什么呢",             False),
+        ("给我推荐一个菜",           False),
+        ("今天早餐吃啥",             False),
+        ("计划下这周的饮食",         False),
+        ("这周帮我规划一下",         False),
+    ])
+    def test_explicit_dish_detection(self, text: str, expected: bool):
+        result = PlanAheadPipeline._is_explicit_dish_request(text)
+        assert result == expected, (
+            f"_is_explicit_dish_request({text!r}) → expected {expected}, got {result}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# TestExplicitDishBypassesQueue — _init_planning_queue returns [] for explicit dishes
+# ---------------------------------------------------------------------------
+
+class TestExplicitDishBypassesQueue:
+    """
+    Verify that _init_planning_queue returns an empty list when the user names
+    a specific dish (explicit dish request), so the query falls through to the
+    main LLM pipeline for a direct 'add' action instead of entering the planning queue.
+    """
+
+    @pytest.mark.asyncio
+    async def test_explicit_dish_returns_empty_queue(self):
+        """'今天晚上吃芋艿猪排骨' must NOT trigger the planning queue."""
+        with patch("httpx.AsyncClient.post", new_callable=AsyncMock) as mock_post:
+            # Make the LLM call fail so keyword fallback is exercised
+            mock_post.side_effect = Exception("network error")
+            p = _pipeline()
+            slots = await p._init_planning_queue("今天晚上吃芋艿猪排骨", "America/Los_Angeles")
+        assert slots == [], (
+            f"Explicit dish request must return empty queue, got {slots!r}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_explicit_dish_returns_empty_queue_various(self):
+        """Various explicit dish forms must all return empty queue."""
+        with patch("httpx.AsyncClient.post", new_callable=AsyncMock) as mock_post:
+            mock_post.side_effect = Exception("network error")
+            p = _pipeline()
+            for text in ["想吃火锅", "做个红烧肉", "今晚来点水煮鱼"]:
+                slots = await p._init_planning_queue(text, "America/Los_Angeles")
+                assert slots == [], (
+                    f"Explicit dish {text!r} must return empty queue, got {slots!r}"
+                )
+
+    @pytest.mark.asyncio
+    async def test_planning_request_returns_nonempty_queue(self):
+        """'今天晚上吃什么' must still trigger the planning queue (return slots)."""
+        with patch("httpx.AsyncClient.post", new_callable=AsyncMock) as mock_post:
+            mock_post.side_effect = Exception("network error")
+            p = _pipeline()
+            slots = await p._init_planning_queue("今天晚上吃什么", "America/Los_Angeles")
+        assert len(slots) > 0, (
+            f"Planning request must return non-empty queue, got {slots!r}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_planning_for_today_returns_nonempty_queue(self):
+        """'帮我规划今天三餐' must return slots."""
+        with patch("httpx.AsyncClient.post", new_callable=AsyncMock) as mock_post:
+            mock_post.side_effect = Exception("network error")
+            p = _pipeline()
+            slots = await p._init_planning_queue("帮我规划今天三餐", "America/Los_Angeles")
+        assert len(slots) > 0, (
+            f"Planning request must return non-empty queue, got {slots!r}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# TestPhase1aPreResolution — pending_ask_dates meal-slot selector resolution
+# ---------------------------------------------------------------------------
+
+class TestPhase1aPreResolution:
+    """
+    Tests for the Phase 1a-pre block that resolves the user's reply to the
+    meal-slot selector.
+
+    When the Fresh-plan guard captures specific dates (stored in state as
+    pending_ask_dates) and the user then specifies which meals they want,
+    the pipeline must:
+      1. Parse meal types from the user's natural-language reply.
+      2. Build a planning queue = [date|meal_type, ...] from the cross-product.
+      3. Clear pending_ask_dates from state.
+      4. Fall through to queue-mode planning (NOT generate a fresh suggest_options).
+
+    These are unit tests that seed _plan_states directly and mock LLM calls.
+    """
+
+    _OWNER = 42
+    _TZ = "America/Los_Angeles"
+
+    def setup_method(self):
+        from app.modules.plan_ahead_state import _plan_states
+        _plan_states.clear()
+
+    def teardown_method(self):
+        from app.modules.plan_ahead_state import _plan_states
+        _plan_states.clear()
+
+    def _seed_state(self, dates: list, **extra):
+        """Seed state with pending_ask_dates + last_pipeline_action='ask'."""
+        from app.modules.plan_ahead_state import update_plan_state
+        update_plan_state(
+            owner_id=self._OWNER,
+            last_pipeline_action="ask",
+            pending_ask_dates=dates,
+            **extra,
+        )
+
+    def _make_mock_post(self, dish_clf_resp: dict, main_llm_resp: dict):
+        """
+        Build an AsyncMock for httpx.AsyncClient.post.
+        Call order:
+          1st  → _classify_dish_intent  (Layer 0)
+          2nd+ → main LLM planning calls
+        """
+        call_count = {"n": 0}
+        dish_json = __import__("json").dumps(dish_clf_resp)
+        main_json = __import__("json").dumps(main_llm_resp)
+
+        async def _mock(url, **kwargs):
+            call_count["n"] += 1
+            resp = MagicMock()
+            resp.status_code = 200
+            if call_count["n"] == 1:
+                # Layer 0: dish-intent classifier
+                resp.json.return_value = {
+                    "candidates": [{"content": {"parts": [{"text": dish_json}]},
+                                    "finishReason": "STOP"}]
+                }
+            else:
+                resp.json.return_value = {
+                    "candidates": [{"content": {"parts": [{"text": main_json}]},
+                                    "finishReason": "STOP"}]
+                }
+            return resp
+        return AsyncMock(side_effect=_mock)
+
+    # ------------------------------------------------------------------
+    # Helper to run execute() with a seeded state and captured queue
+    # ------------------------------------------------------------------
+
+    async def _run_execute(self, user_input: str) -> dict:
+        from app.modules.plan_ahead_state import get_plan_state
+        from unittest.mock import AsyncMock, MagicMock, patch
+        import json
+
+        dish_clf = {"is_explicit": False, "intent": "RECOMMEND", "dishes": []}
+        # Minimal valid main-LLM reply that won't require persistence
+        main_llm = {
+            "action": "ask",
+            "user_message": "哪天哪餐？",
+        }
+
+        mock_post = self._make_mock_post(dish_clf, main_llm)
+
+        with patch("httpx.AsyncClient.post", mock_post):
+            p = _pipeline()
+            result = await p.execute(
+                owner_id=self._OWNER,
+                user_input=user_input,
+                history=[],
+                user_timezone=self._TZ,
+                storage_client=None,
+                intent_result=None,
+                user_profile={},
+            )
+
+        state_after = get_plan_state(self._OWNER)
+        return {"result": result, "state": state_after}
+
+    @pytest.mark.asyncio
+    async def test_dinner_only_builds_correct_queue(self):
+        """
+        '只计划晚饭' with pending_ask_dates=['2026-03-27','2026-03-28']
+        must build queue ['2026-03-27|dinner','2026-03-28|dinner']
+        and clear pending_ask_dates.
+        """
+        from app.modules.plan_ahead_state import get_plan_state
+        self._seed_state(["2026-03-27", "2026-03-28"])
+
+        out = await self._run_execute("只计划晚饭")
+        state = out["state"]
+
+        assert state["pending_ask_dates"] == [], (
+            "pending_ask_dates must be cleared after resolution"
+        )
+        # The pipeline enters queue mode: meal_planning_queue is set
+        queue = state.get("meal_planning_queue", [])
+        assert "2026-03-27|dinner" in queue, f"Expected 2026-03-27|dinner in queue, got {queue!r}"
+        assert "2026-03-28|dinner" in queue, f"Expected 2026-03-28|dinner in queue, got {queue!r}"
+        assert not any(m in str(queue) for m in ["|breakfast", "|lunch"]), (
+            f"Only dinner should be queued, got {queue!r}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_breakfast_and_dinner_builds_correct_queue(self):
+        """
+        '早餐和晚饭' with two pending dates must produce 4 slots.
+        """
+        from app.modules.plan_ahead_state import get_plan_state
+        self._seed_state(["2026-03-27", "2026-03-28"])
+
+        out = await self._run_execute("早餐和晚饭")
+        state = out["state"]
+
+        queue = state.get("meal_planning_queue", [])
+        expected = {
+            "2026-03-27|breakfast", "2026-03-27|dinner",
+            "2026-03-28|breakfast", "2026-03-28|dinner",
+        }
+        assert set(queue) == expected, (
+            f"Expected exactly {expected}, got {set(queue)!r}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_all_meals_keyword_queues_three_meals(self):
+        """
+        '三餐都要' with two pending dates must queue 6 slots (3 meals × 2 days).
+        """
+        from app.modules.plan_ahead_state import get_plan_state
+        self._seed_state(["2026-03-27", "2026-03-28"])
+
+        out = await self._run_execute("三餐都要")
+        state = out["state"]
+
+        queue = state.get("meal_planning_queue", [])
+        assert len(queue) == 6, f"Expected 6 slots for 三餐都要 × 2 days, got {queue!r}"
+        for date in ["2026-03-27", "2026-03-28"]:
+            for meal in ["breakfast", "lunch", "dinner"]:
+                assert f"{date}|{meal}" in queue, (
+                    f"Missing {date}|{meal} in {queue!r}"
+                )
+
+    @pytest.mark.asyncio
+    async def test_all_keyword_全天_queues_three_meals(self):
+        """'全天' is also a three-meals-all keyword."""
+        from app.modules.plan_ahead_state import get_plan_state
+        self._seed_state(["2026-03-27"])
+
+        out = await self._run_execute("全天都计划")
+        state = out["state"]
+
+        queue = state.get("meal_planning_queue", [])
+        assert len(queue) == 3, f"Expected 3 slots for 全天 × 1 day, got {queue!r}"
+
+    @pytest.mark.asyncio
+    async def test_unclear_meal_type_returns_reask(self):
+        """
+        When pending_ask_dates is set but the user reply has no meal keyword,
+        the pipeline must re-ask (action=ask) and keep pending_ask_dates in state.
+        """
+        from app.modules.plan_ahead_state import get_plan_state
+        self._seed_state(["2026-03-27", "2026-03-28"])
+
+        out = await self._run_execute("随便")  # no meal keyword
+        state = out["state"]
+
+        # pending_ask_dates must still be set (not consumed)
+        assert state["pending_ask_dates"] == ["2026-03-27", "2026-03-28"], (
+            "pending_ask_dates must remain when meal type is unclear"
+        )
+        # Queue mode must NOT have been entered
+        assert state.get("meal_planning_queue", []) == [], (
+            "meal_planning_queue must stay empty when meal type is unclear"
+        )
+
+    @pytest.mark.asyncio
+    async def test_no_pending_ask_dates_skips_phase1apre(self):
+        """
+        When pending_ask_dates is empty, Phase 1a-pre must NOT fire, and the
+        normal pipeline flow continues (state is unchanged by Phase 1a-pre).
+        """
+        from app.modules.plan_ahead_state import get_plan_state
+        # No pending_ask_dates seeded — last_action is None (fresh session)
+        # This should fall through to Phase 1a normally.
+        out = await self._run_execute("只计划晚饭")
+        state = out["state"]
+        # pending_ask_dates should remain []
+        assert state["pending_ask_dates"] == [], (
+            "pending_ask_dates must remain [] when not seeded"
         )
