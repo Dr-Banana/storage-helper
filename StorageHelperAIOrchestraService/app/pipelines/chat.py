@@ -100,6 +100,8 @@ LANGUAGE REQUIREMENT: {language_instruction} This applies to ALL text you genera
             in_plan_ahead_flow = (
                 (context and context.get("type") == "plan_ahead")
                 or bool(plan_state.get("meal_plan") or plan_state.get("shopping_list"))
+                # Active suggest_options flow: user is selecting/refining presented options
+                or bool(plan_state.get("pending_options"))
                 or (
                     history
                     and any(
@@ -109,6 +111,8 @@ LANGUAGE REQUIREMENT: {language_instruction} This applies to ALL text you genera
                             "cook at home", "don't know what to cook", "decide what to cook", "what to cook",
                             "不知道做什么", "在家做饭", "做什么菜",
                             "同一天", "same day", "那天", "that day", "再加一个", "add another", "也加",
+                            # suggest_options flow keywords
+                            "方案一", "方案二", "方案", "选方案", "选择方案",
                         )
                     )
                 )
@@ -235,6 +239,50 @@ LANGUAGE REQUIREMENT: {language_instruction} This applies to ALL text you genera
                         f"[chat] Meal-declaration override: {old_intent} -> PLAN_AHEAD "
                         f"for: {user_input[:60]}"
                     )
+
+            # 1d. Meal-option modification safety net.
+            #     The Android client wraps follow-up refinements as:
+            #       "[针对菜品：X] 用户要求：Y"
+            #     This is always a PLAN_AHEAD modification of a proposed option,
+            #     never GENERAL regardless of the content of Y.
+            if intent_result.intent == Intent.GENERAL and user_input.startswith("[针对菜品："):
+                old_intent = intent_result.intent
+                intent_result = type(
+                    "IntentResult",
+                    (),
+                    {
+                        "intent": Intent.PLAN_AHEAD,
+                        "reasoning": "Dish-targeting prefix '[针对菜品：]' detected → meal option modification",
+                        "confidence": 0.95,
+                    },
+                )()
+                logger.info(
+                    "[chat] Dish-targeting override: %s -> PLAN_AHEAD for: %s",
+                    old_intent, user_input[:60],
+                )
+
+            # 1e. Pending-options modification safety net.
+            #     If the system is currently showing suggest_options (pending_options set)
+            #     and the user sends any message that isn't a clear topic change,
+            #     it must be a selection or refinement → PLAN_AHEAD.
+            if (
+                intent_result.intent == Intent.GENERAL
+                and plan_state.get("pending_options")
+            ):
+                old_intent = intent_result.intent
+                intent_result = type(
+                    "IntentResult",
+                    (),
+                    {
+                        "intent": Intent.PLAN_AHEAD,
+                        "reasoning": "Active pending_options: user is selecting or refining meal options",
+                        "confidence": 0.9,
+                    },
+                )()
+                logger.info(
+                    "[chat] Pending-options override: %s -> PLAN_AHEAD for: %s",
+                    old_intent, user_input[:60],
+                )
 
             # 2a. COOKING_STEPS: short-circuit before route_by_intent to pass history.
             #

@@ -282,17 +282,42 @@ class ScheduleRangeDecider:
     async def _parse_range_llm(
         self, query: str, timezone: Optional[str], api_url: str
     ) -> Optional[TimeRange]:
-        """Parse user time phrase to start/end via LLM. Input: query + current time."""
+        """Ask the LLM what date range is needed to fully answer the query.
+
+        The prompt frames the question as a data-retrieval problem:
+        "what is the *minimum* range of schedule data I need to load to answer
+        this query correctly?"  This handles any phrasing — move, reschedule,
+        compare, review — without any hardcoded keyword lists.
+
+        For simple queries ("today", "next week") the LLM returns just that span.
+        For multi-date queries ("move today's plan to tomorrow", "compare Monday
+        with Wednesday") the LLM automatically spans all referenced dates because
+        it reasons about what data is needed.
+        """
         now = self._now_tz(timezone)
         now_str = now.strftime("%Y-%m-%d %H:%M %Z") if now.tzinfo else now.strftime("%Y-%m-%d %H:%M UTC")
         tz_label = timezone or "UTC"
-        prompt = f"""You are a time-range parser. Given the user's time phrase and current time, output the requested period.
+        today_str = now.strftime("%Y-%m-%d")
+        prompt = f"""You are a schedule assistant's data-fetching planner.
 
 Current time (user timezone): {now_str} (timezone: {tz_label})
-User's time phrase: "{query}"
+Today: {today_str}
+User query: "{query}"
 
-Rules: Return start and end. "This week" = Mon–Sun of current week. "Next week" = Mon–Sun of next week. "First week of March" = week containing March 1. "Today" = that day (start 00:00, end next day 00:00). Output ONLY valid JSON: {{"start": "YYYY-MM-DD", "end": "YYYY-MM-DD"}} (start inclusive, end exclusive).
-Example for "next week" when today 2026-02-11: {{"start": "2026-02-16", "end": "2026-02-23"}}
+Task: Determine the MINIMUM date range of schedule data that must be loaded to fully answer this query.
+
+Think step by step:
+1. Identify every date or period the user references (source dates, destination dates, comparison dates, etc.).
+2. The range must cover ALL of them — not just the final destination.
+3. Examples:
+   - "What's my plan today?" → only today needs data → start=today, end=tomorrow
+   - "Move today's breakfast to tomorrow" → need today's data (source) AND tomorrow's data (destination) → start=today, end=day-after-tomorrow
+   - "Reschedule Monday's dinner to Wednesday" → need Monday AND Wednesday → start=that Monday, end=day-after-that-Wednesday
+   - "Show next week" → start=next Monday, end=next Sunday+1
+4. "This week" = Mon–Sun of current week. "Next week" = Mon–Sun of next week.
+5. start is inclusive, end is exclusive (the day AFTER the last needed date).
+
+Output ONLY valid JSON with no explanation: {{"start": "YYYY-MM-DD", "end": "YYYY-MM-DD"}}
 
 JSON:"""
         try:
@@ -1440,15 +1465,17 @@ class PlanAheadAgent:
         event_type: str = "meal_plan_draft",
         dish_ingredients: Optional[Dict[str, List[str]]] = None,
         meal_plan_slots: Optional[Dict[str, Dict[str, str]]] = None,
+        is_append: bool = False,
     ) -> Optional[int]:
         """
         Persist meal plan to schedule. Returns schedule_id if successful, None otherwise.
         If meal plan is empty and there's an existing schedule, deletes it.
         dish_ingredients: optional map dish_name -> list of ingredient names for per-dish display.
         meal_plan_slots: optional date -> { breakfast?, lunch?, dinner? } so lunch/breakfast are stored correctly.
+        is_append: when True, new dishes are merged into (not replacing) existing dishes for the same meal_time.
         """
         try:
-            logger.info(f"[BACKEND] persist_meal_plan entry: existing_schedule_id={existing_schedule_id}, meal_plan_keys={list(meal_plan.keys()) if meal_plan else []}, has_meal_plan_slots={bool(meal_plan_slots)}")
+            logger.info(f"[BACKEND] persist_meal_plan entry: existing_schedule_id={existing_schedule_id}, meal_plan_keys={list(meal_plan.keys()) if meal_plan else []}, has_meal_plan_slots={bool(meal_plan_slots)}, is_append={is_append}")
             # If meal plan is empty and there's an existing schedule, delete it
             if not meal_plan and not shopping_list and existing_schedule_id:
                 logger.info(f"[SCHEDULING AGENT] PlanAheadAgent: Meal plan is empty, deleting schedule id={existing_schedule_id}")
@@ -1466,6 +1493,7 @@ class PlanAheadAgent:
                     user_timezone=user_timezone,
                     dish_ingredients=dish_ingredients,
                     meal_plan_slots=meal_plan_slots,
+                    is_append=is_append,
                 )
                 if schedule_id:
                     logger.info(f"[SCHEDULING AGENT] PlanAheadAgent: Meal plan persisted to schedule id={schedule_id}")

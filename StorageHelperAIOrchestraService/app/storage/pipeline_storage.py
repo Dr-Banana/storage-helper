@@ -1511,6 +1511,7 @@ class PipelineStorage:
         user_timezone: Optional[str] = None,
         dish_ingredients: Optional[Dict[str, List[str]]] = None,
         meal_plan_slots: Optional[Dict[str, Dict[str, str]]] = None,
+        is_append: bool = False,
     ) -> Optional[int]:
         """
         Create or update a meal plan draft in schedule. Used during PLAN_AHEAD conversation
@@ -1593,6 +1594,27 @@ class PipelineStorage:
 
                     # Preserve any cooking steps / ingredient quantities already saved for this date.
                     existing_dd = self._extract_existing_dish_data(existing_schedule) if existing_schedule else {}
+
+                    if is_append and existing_schedule:
+                        _, _, _, _ex_slots = self._extract_meal_plan_from_schedule(existing_schedule)
+                        _ex_mt = _ex_slots.get(date_str) or {}
+                        _nw_mt = single_date_slots.get(date_str) or {}
+                        _mg_mt: Dict[str, List[str]] = dict(_ex_mt)
+                        for _mt, _nw_d in _nw_mt.items():
+                            _nw_list = _nw_d if isinstance(_nw_d, list) else [_nw_d]
+                            if _mt in _mg_mt:
+                                _ex_list = _mg_mt[_mt] if isinstance(_mg_mt[_mt], list) else [_mg_mt[_mt]]
+                                _seen2: set = set()
+                                _combined2: List[str] = []
+                                for _d in _ex_list + _nw_list:
+                                    if _d and _d not in _seen2:
+                                        _seen2.add(_d)
+                                        _combined2.append(_d)
+                                _mg_mt[_mt] = _combined2
+                            else:
+                                _mg_mt[_mt] = _nw_list
+                        single_date_slots = {date_str: _mg_mt}
+
                     metadata = self._convert_to_feature_format(
                         single_date_meal_plan, date_shopping_list,
                         dish_ingredients=sub_dish_ingredients,
@@ -1727,6 +1749,30 @@ class PipelineStorage:
                             break
 
                 existing_dd = self._extract_existing_dish_data(existing_for_date) if existing_for_date else {}
+
+                # When appending (action="add"), merge the new dishes into the
+                # existing slot instead of overwriting it.  Example: existing
+                # lunch=[照烧鸡排], new slot={lunch:[冻豆腐]} → merged lunch=[照烧鸡排,冻豆腐].
+                if is_append and existing_for_date:
+                    _, _, _, _existing_slots = self._extract_meal_plan_from_schedule(existing_for_date)
+                    _existing_mt = _existing_slots.get(date_str) or {}
+                    _new_mt = single_date_slots.get(date_str) or {}
+                    _merged_mt: Dict[str, List[str]] = dict(_existing_mt)
+                    for _mt, _new_dishes in _new_mt.items():
+                        _new_list = _new_dishes if isinstance(_new_dishes, list) else [_new_dishes]
+                        if _mt in _merged_mt:
+                            _existing_list = _merged_mt[_mt] if isinstance(_merged_mt[_mt], list) else [_merged_mt[_mt]]
+                            _seen: set = set()
+                            _combined: List[str] = []
+                            for _d in _existing_list + _new_list:
+                                if _d and _d not in _seen:
+                                    _seen.add(_d)
+                                    _combined.append(_d)
+                            _merged_mt[_mt] = _combined
+                        else:
+                            _merged_mt[_mt] = _new_list
+                    single_date_slots = {date_str: _merged_mt}
+
                 metadata = self._convert_to_feature_format(
                     {date_str: meal_text},
                     date_shopping_list,

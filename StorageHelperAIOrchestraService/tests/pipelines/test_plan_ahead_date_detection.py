@@ -867,14 +867,39 @@ class TestLiveDateConfirmationClassifier:
 
     @pytest.mark.asyncio
     async def test_unclear_phrase_classified(self):
-        """An off-topic or ambiguous reply must be classified as 'unclear'."""
+        """Off-topic reply that merely mentions a date must NOT become 'corrected'."""
         pending = self._pending_2days()
         result = await _live_pipeline()._classify_date_confirmation(
             "我明天要去旅游", pending, None
         )
-        # "我明天要去旅游" is ambiguous — accept confirmed or unclear (not corrected)
+        # "我明天要去旅游" only mentions a date but does NOT actively correct the plan.
+        # It should be 'unclear' (off-topic). 'confirmed' is also acceptable as a
+        # very lenient interpretation.  'corrected' is NEVER acceptable here.
         assert result["intent"] in ("unclear", "confirmed"), (
-            f"Expected 'unclear' or 'confirmed', got {result!r}"
+            f"Expected 'unclear' or 'confirmed' for off-topic travel reply, got {result!r}\n"
+            "Fix: the classifier must distinguish 'mentioning a date' from 'correcting the plan dates'."
+        )
+
+    @pytest.mark.asyncio
+    async def test_absent_days_reply_is_unclear(self):
+        """'这几天不在家' mentions no specific correction — must be unclear."""
+        pending = self._pending_2days()
+        result = await _live_pipeline()._classify_date_confirmation(
+            "这几天不在家", pending, None
+        )
+        assert result["intent"] in ("unclear", "confirmed"), (
+            f"'这几天不在家' should be unclear/confirmed, got {result!r}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_explicit_date_correction_is_corrected(self):
+        """'不对，改成明天' is an explicit correction — must be 'corrected'."""
+        pending = self._pending_2days()
+        result = await _live_pipeline()._classify_date_confirmation(
+            "不对，改成明天", pending, None
+        )
+        assert result["intent"] == "corrected", (
+            f"Explicit correction phrase must be 'corrected', got {result!r}"
         )
 
 
@@ -1189,4 +1214,176 @@ class TestPhase1aPreResolution:
         # pending_ask_dates should remain []
         assert state["pending_ask_dates"] == [], (
             "pending_ask_dates must remain [] when not seeded"
+        )
+
+
+# ---------------------------------------------------------------------------
+# TestDishIntentClassifierPrompt — unit tests for _classify_dish_intent prompt
+# Verifies the prompt text contains the food-category guidance that prevents
+# 海鲜/辣的/清淡 from being mistaken for explicit dish names.
+# ---------------------------------------------------------------------------
+
+class TestDishIntentClassifierPrompt:
+    """_classify_dish_intent must embed food-category anti-confusion rules."""
+
+    def _get_system_prompt(self) -> str:
+        """Extract the system prompt string by inspecting the source."""
+        import inspect
+        src = inspect.getsource(PlanAheadPipeline._classify_dish_intent)
+        # The system prompt is assigned to _system inside the method
+        # We parse the string literals from the source
+        return src
+
+    def test_food_category_critical_rule_present(self):
+        """Prompt must warn the LLM that food categories are NOT specific dishes."""
+        src = self._get_system_prompt()
+        assert "Food categories" in src or "food category" in src.lower() or "CRITICAL" in src, (
+            "Prompt must include a CRITICAL note that food categories are not specific dishes"
+        )
+
+    def test_seafood_example_present(self):
+        """Prompt must include 海鲜 as a RECOMMEND example."""
+        src = self._get_system_prompt()
+        assert "海鲜" in src, (
+            "Prompt must include 海鲜 as an example of RECOMMEND (not EXPLICIT)"
+        )
+
+    def test_spicy_preference_example_present(self):
+        """Prompt must include a spicy/light-food preference example."""
+        src = self._get_system_prompt()
+        assert "辣" in src or "清淡" in src, (
+            "Prompt must include a preference-style example (辣/清淡) returning RECOMMEND"
+        )
+
+
+# ---------------------------------------------------------------------------
+# TestSuggestOptionsPromptRules — unit tests for _build_context() prompt rules
+# Verifies that the updated suggest_options / recommend instructions are correct.
+# ---------------------------------------------------------------------------
+
+class TestSuggestOptionsPromptRules:
+    """_build_context() must contain the correct action-selection guidance."""
+
+    def _ctx(self, **state_overrides) -> str:
+        state = {
+            "meal_plan": {}, "meal_plan_slots": {}, "dish_ingredients": {},
+            "shopping_list": [], "is_draft": False,
+            "last_pipeline_action": None,
+            "pending_options": None,
+            **state_overrides,
+        }
+        return _pipeline()._build_context(state, user_timezone=None, inventory_items=None)
+
+    # ── suggest_options must cover first-turn preference scenarios ───────────
+
+    def test_suggest_options_covers_food_category(self):
+        """Prompt must list food category/ingredient type as a suggest_options trigger."""
+        ctx = self._ctx()
+        assert "食物" in ctx or "ingredient" in ctx.lower() or "category" in ctx.lower() or "类" in ctx, (
+            "suggest_options rule must mention food category/ingredient type as a trigger"
+        )
+
+    def test_suggest_options_covers_cuisine_style(self):
+        """Prompt must mention cuisine style as a suggest_options trigger."""
+        ctx = self._ctx()
+        assert "cuisine" in ctx.lower() or "日式" in ctx or "川菜" in ctx, (
+            "suggest_options rule must mention cuisine style as a trigger"
+        )
+
+    def test_suggest_options_covers_dietary_preference(self):
+        """Prompt must mention dietary preference as a suggest_options trigger."""
+        ctx = self._ctx()
+        assert "清淡" in ctx or "辛辣" in ctx or "dietary" in ctx.lower() or "减脂" in ctx, (
+            "suggest_options rule must mention dietary preference as a trigger"
+        )
+
+    # ── recommend must NOT include the 'direct full plan' loophole ──────────
+
+    def test_recommend_rule_does_not_allow_skipping_options(self):
+        """recommend must state that suggest_options comes first (no skip rule)."""
+        ctx = self._ctx()
+        # The new rule explicitly says NEVER use recommend to skip suggest_options
+        assert "NEVER" in ctx or "never" in ctx.lower() or "skip" in ctx.lower(), (
+            "recommend rule must explicitly forbid skipping the suggest_options step"
+        )
+
+    def test_recommend_does_not_contain_full_plan_loophole(self):
+        """recommend rule (c) '..without naming specific dishes' must be removed."""
+        ctx = self._ctx()
+        # This is the old loophole text that was removed
+        assert "without naming specific dishes" not in ctx, (
+            "The old recommend rule (c) loophole must be removed from the prompt"
+        )
+
+    # ── SESSION FLOW STATE injection for ask → suggest_options ──────────────
+
+    def test_session_flow_injected_after_ask_action(self):
+        """When last_pipeline_action=ask, prompt must force suggest_options next."""
+        ctx = self._ctx(last_pipeline_action="ask")
+        assert "suggest_options" in ctx, (
+            "After ask, SESSION FLOW STATE must inject the suggest_options instruction"
+        )
+        assert "recommend" not in ctx.split("SESSION FLOW")[1].split("NEXT STEP")[0] if "SESSION FLOW" in ctx else True, (
+            "SESSION FLOW STATE must NOT suggest recommend after ask"
+        )
+
+    def test_session_flow_injected_after_suggest_options_action(self):
+        """When last_pipeline_action=suggest_options, prompt must direct to recommend."""
+        ctx = self._ctx(last_pipeline_action="suggest_options")
+        assert "recommend" in ctx, (
+            "After suggest_options, SESSION FLOW STATE must inject the recommend instruction"
+        )
+
+
+# ---------------------------------------------------------------------------
+# TestLiveDishIntentCategoryClassifier — live LLM tests for food categories
+# ---------------------------------------------------------------------------
+
+@pytest.mark.llm_live
+class TestLiveDishIntentCategoryClassifier:
+    """
+    Live tests verifying that _classify_dish_intent returns RECOMMEND (not EXPLICIT)
+    for food categories and preference phrases.
+
+    Run with: pytest -m llm_live --run-llm
+    """
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("query,description", [
+        ("我想吃个海鲜", "seafood category"),
+        ("想吃辣的东西", "spicy preference"),
+        ("来点清淡的", "light food preference"),
+        ("帮我计划今天吃什么，我想吃日式", "cuisine-type preference"),
+        ("今晚来点肉类的菜", "meat category"),
+        ("想吃蔬菜为主的", "vegetable-focus preference"),
+    ])
+    async def test_food_category_returns_recommend(self, query, description):
+        """Food categories and preference phrases must return RECOMMEND, not EXPLICIT."""
+        result = await _live_pipeline()._classify_dish_intent(query, [])
+        assert result["intent"] == "RECOMMEND", (
+            f"[{description}] '{query}' is a food category/preference — "
+            f"expected RECOMMEND but got {result!r}\n"
+            "Fix: update the _classify_dish_intent system prompt to clarify that "
+            "food categories are not specific dishes."
+        )
+        assert result["is_explicit"] is False, (
+            f"[{description}] is_explicit must be False for preference phrases, got {result!r}"
+        )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("query,description", [
+        ("加个红烧肉", "specific dish add"),
+        ("想吃蒜蓉蒸虾", "specific dish name"),
+        ("来个番茄炒蛋", "specific dish name"),
+        ("今晚做麻婆豆腐", "specific dish make"),
+    ])
+    async def test_specific_dish_returns_explicit(self, query, description):
+        """Specific named dishes must still return EXPLICIT."""
+        result = await _live_pipeline()._classify_dish_intent(query, [])
+        assert result["intent"] == "EXPLICIT", (
+            f"[{description}] '{query}' is a specific dish — "
+            f"expected EXPLICIT but got {result!r}"
+        )
+        assert result["is_explicit"] is True, (
+            f"[{description}] is_explicit must be True for specific dishes, got {result!r}"
         )

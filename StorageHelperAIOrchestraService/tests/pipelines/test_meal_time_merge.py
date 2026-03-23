@@ -332,3 +332,243 @@ class TestCrossDateIsolation:
         # date_b schedule must not contain breakfast from date_a
         mt_b = storage.meal_times_for_date(date_b)
         assert "breakfast" not in mt_b, f"date_b has breakfast from date_a: {mt_b}"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 4. is_append=True: new dishes must MERGE with existing dishes in the same
+#    meal_time rather than overwriting them.
+#
+# This fixes the regression where:
+#   1. User adds 照烧鸡排 to lunch  → schedule 78, lunch=[照烧鸡排]
+#   2. User asks to "再加个冻豆腐"  → AI clarifies which meal
+#   3. User answers "今天午饭"       → action="add", slot={lunch:[冻豆腐]}
+#   Bug: storage wrote lunch=[冻豆腐], LOSING 照烧鸡排
+#   Fix: storage must write lunch=[照烧鸡排, 冻豆腐]
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestAppendMergesDishesInSameMealTime:
+
+    @pytest.mark.asyncio
+    async def test_append_adds_dish_to_existing_lunch(self):
+        """
+        Exact reproduction of the bug:
+          Round 1 (add): 照烧鸡排 → lunch
+          Round 2 (add, is_append=True): 冻豆腐 → lunch
+          Expected: lunch = [照烧鸡排, 冻豆腐]  (NOT just [冻豆腐])
+        """
+        storage = FakePipelineStorage()
+        date = "2026-03-22"
+
+        # Round 1: add 照烧鸡排
+        await storage.create_or_update_meal_plan_schedule(
+            owner_id=OWNER,
+            meal_plan={date: "照烧鸡排"},
+            shopping_list=[],
+            event_type="meal_plan_draft",
+            meal_plan_slots={date: {"lunch": ["照烧鸡排"]}},
+            is_append=True,
+        )
+        assert storage.meal_times_for_date(date)["lunch"] == ["照烧鸡排"]
+
+        # Round 2: add 冻豆腐 to the same lunch
+        await storage.create_or_update_meal_plan_schedule(
+            owner_id=OWNER,
+            meal_plan={date: "冻豆腐"},
+            shopping_list=[],
+            event_type="meal_plan_draft",
+            meal_plan_slots={date: {"lunch": ["冻豆腐"]}},
+            is_append=True,
+        )
+
+        mt = storage.meal_times_for_date(date)
+        assert "lunch" in mt, f"lunch slot missing: {mt}"
+        assert "照烧鸡排" in mt["lunch"], (
+            f"照烧鸡排 was LOST after appending 冻豆腐 — overwrite bug regression! "
+            f"lunch={mt['lunch']}"
+        )
+        assert "冻豆腐" in mt["lunch"], (
+            f"冻豆腐 was not added to lunch: {mt['lunch']}"
+        )
+        assert storage.schedule_count() == 1, (
+            "Should reuse the same schedule, not create a new one"
+        )
+
+    @pytest.mark.asyncio
+    async def test_append_deduplicates_same_dish(self):
+        """Appending a dish that already exists must not create a duplicate."""
+        storage = FakePipelineStorage()
+        date = "2026-03-22"
+
+        await storage.create_or_update_meal_plan_schedule(
+            owner_id=OWNER,
+            meal_plan={date: "照烧鸡排"},
+            shopping_list=[],
+            event_type="meal_plan_draft",
+            meal_plan_slots={date: {"lunch": ["照烧鸡排"]}},
+            is_append=True,
+        )
+        # Append the same dish again
+        await storage.create_or_update_meal_plan_schedule(
+            owner_id=OWNER,
+            meal_plan={date: "照烧鸡排"},
+            shopping_list=[],
+            event_type="meal_plan_draft",
+            meal_plan_slots={date: {"lunch": ["照烧鸡排"]}},
+            is_append=True,
+        )
+
+        mt = storage.meal_times_for_date(date)
+        assert mt["lunch"].count("照烧鸡排") == 1, (
+            f"Duplicate dish found after append: {mt['lunch']}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_append_multi_dish_slot_merges_all(self):
+        """
+        Existing lunch=[A].  Append slot has [B, C].
+        Result must be [A, B, C] with no duplicates.
+        """
+        storage = FakePipelineStorage()
+        date = "2026-03-22"
+
+        await storage.create_or_update_meal_plan_schedule(
+            owner_id=OWNER,
+            meal_plan={date: "宫保鸡丁"},
+            shopping_list=[],
+            event_type="meal_plan_draft",
+            meal_plan_slots={date: {"lunch": ["宫保鸡丁"]}},
+            is_append=True,
+        )
+        await storage.create_or_update_meal_plan_schedule(
+            owner_id=OWNER,
+            meal_plan={date: "米饭 and 汤"},
+            shopping_list=[],
+            event_type="meal_plan_draft",
+            meal_plan_slots={date: {"lunch": ["米饭", "汤"]}},
+            is_append=True,
+        )
+
+        mt = storage.meal_times_for_date(date)
+        lunch = mt["lunch"]
+        for dish in ("宫保鸡丁", "米饭", "汤"):
+            assert dish in lunch, f"{dish} missing after multi-dish append: {lunch}"
+        assert len(lunch) == 3, f"Expected 3 dishes, got: {lunch}"
+
+    @pytest.mark.asyncio
+    async def test_modify_without_append_replaces_dishes(self):
+        """
+        When is_append=False (default, used for modify), the new dishes
+        REPLACE the existing ones — merge must NOT happen.
+        """
+        storage = FakePipelineStorage()
+        date = "2026-03-22"
+
+        await storage.create_or_update_meal_plan_schedule(
+            owner_id=OWNER,
+            meal_plan={date: "照烧鸡排"},
+            shopping_list=[],
+            event_type="meal_plan_draft",
+            meal_plan_slots={date: {"lunch": ["照烧鸡排"]}},
+            is_append=False,
+        )
+        # Modify (replace) — user wants ONLY 麻婆豆腐 for lunch
+        await storage.create_or_update_meal_plan_schedule(
+            owner_id=OWNER,
+            meal_plan={date: "麻婆豆腐"},
+            shopping_list=[],
+            event_type="meal_plan_draft",
+            meal_plan_slots={date: {"lunch": ["麻婆豆腐"]}},
+            is_append=False,
+        )
+
+        mt = storage.meal_times_for_date(date)
+        assert mt["lunch"] == ["麻婆豆腐"], (
+            f"modify should replace dishes, not merge. Got: {mt['lunch']}"
+        )
+        assert "照烧鸡排" not in mt["lunch"], (
+            f"旧菜 照烧鸡排 should have been replaced, not preserved: {mt['lunch']}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_append_to_different_meal_time_no_interference(self):
+        """
+        Lunch=[照烧鸡排]. Append 冻豆腐 to DINNER (not lunch).
+        Lunch must be unchanged.
+        """
+        storage = FakePipelineStorage()
+        date = "2026-03-22"
+
+        await storage.create_or_update_meal_plan_schedule(
+            owner_id=OWNER,
+            meal_plan={date: "照烧鸡排"},
+            shopping_list=[],
+            event_type="meal_plan_draft",
+            meal_plan_slots={date: {"lunch": ["照烧鸡排"]}},
+            is_append=True,
+        )
+        # Append 冻豆腐 to DINNER
+        await storage.create_or_update_meal_plan_schedule(
+            owner_id=OWNER,
+            meal_plan={date: "冻豆腐"},
+            shopping_list=[],
+            event_type="meal_plan_draft",
+            meal_plan_slots={date: {"dinner": ["冻豆腐"]}},
+            is_append=True,
+        )
+
+        mt = storage.meal_times_for_date(date)
+        assert mt.get("lunch") == ["照烧鸡排"], (
+            f"Lunch was modified when appending to dinner: {mt}"
+        )
+        assert "冻豆腐" in mt.get("dinner", []), (
+            f"冻豆腐 not added to dinner: {mt}"
+        )
+        # Different meal_times → 2 separate schedules
+        assert storage.schedule_count() == 2
+
+    @pytest.mark.asyncio
+    async def test_append_to_new_date_creates_schedule(self):
+        """Appending to a date with no existing schedule creates one."""
+        storage = FakePipelineStorage()
+        date = "2026-03-25"
+
+        assert storage.schedule_count() == 0
+        await storage.create_or_update_meal_plan_schedule(
+            owner_id=OWNER,
+            meal_plan={date: "糖醋排骨"},
+            shopping_list=[],
+            event_type="meal_plan_draft",
+            meal_plan_slots={date: {"dinner": ["糖醋排骨"]}},
+            is_append=True,
+        )
+
+        assert storage.schedule_count() == 1
+        mt = storage.meal_times_for_date(date)
+        assert mt.get("dinner") == ["糖醋排骨"]
+
+    @pytest.mark.asyncio
+    async def test_append_three_dishes_one_by_one_all_present(self):
+        """
+        Add 3 dishes to lunch one at a time via separate append calls.
+        All 3 must be present in lunch at the end.
+        """
+        storage = FakePipelineStorage()
+        date = "2026-03-22"
+
+        for dish in ("照烧鸡排", "冻豆腐", "味噌汤"):
+            await storage.create_or_update_meal_plan_schedule(
+                owner_id=OWNER,
+                meal_plan={date: dish},
+                shopping_list=[],
+                event_type="meal_plan_draft",
+                meal_plan_slots={date: {"lunch": [dish]}},
+                is_append=True,
+            )
+
+        mt = storage.meal_times_for_date(date)
+        lunch = mt.get("lunch", [])
+        for dish in ("照烧鸡排", "冻豆腐", "味噌汤"):
+            assert dish in lunch, f"{dish} missing after sequential appends: {lunch}"
+        assert len(lunch) == 3, f"Expected exactly 3 dishes: {lunch}"
+        # All three live in the same schedule (same date+meal_time)
+        assert storage.schedule_count() == 1

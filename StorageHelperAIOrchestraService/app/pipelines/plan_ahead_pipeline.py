@@ -21,7 +21,15 @@ from app.agents.scheduling_agent import (
     PlanAheadAgent,
     compute_shopping_list,
 )
-from app.modules.plan_ahead_state import _UNSET, get_plan_state, update_plan_state
+from app.modules.active_context import get_active_context, update_active_context
+from app.modules.plan_ahead_state import _UNSET, get_phase, get_plan_state, update_plan_state
+from app.skills.plan_ahead import (
+    ClassifyDateConfirmationSkill,
+    ClassifyDishIntentSkill,
+    ClassifyMealActionSkill,
+    ExtractIngredientsSkill,
+    InitPlanningQueueSkill,
+)
 from app.storage.pipeline_storage import _get_storage_base_url
 
 logger = logging.getLogger(__name__)
@@ -743,18 +751,24 @@ class PlanAheadPipeline:
             "                  null means 'all three meals', set when user changes meal scope\n\n"
             "Rules:\n"
             "- Affirmative (好/行/是/对/没问题/可以/当然/开始/嗯/ok/yes/sure/right) → confirmed\n"
-            "- User says different dates (明天/下周/etc.) → corrected, fill new_start+new_end\n"
+            "- User EXPLICITLY corrects the dates (不对是明天/改成下周/换成周六/etc.) → corrected,\n"
+            "  fill new_start+new_end\n"
             "- User changes meal scope (一整天/三餐/一日三餐/全天/只要午餐/etc.) → corrected,\n"
             "  fill new_meal_times (null = all meals; ['dinner'] = dinner only; etc.)\n"
             "- Both date AND meal change → corrected, fill all applicable fields\n"
-            "- Ambiguous/off-topic → unclear\n\n"
+            "- IMPORTANT: A reply that merely MENTIONS a date (e.g. 'I'm traveling tomorrow',\n"
+            "  '我明天要出差', '这几天不在') is NOT a date correction — classify as unclear.\n"
+            "  'corrected' requires the user to be ACTIVELY changing the proposed plan dates.\n"
+            "- Ambiguous/off-topic/irrelevant context → unclear\n\n"
             "Examples:\n"
             '  Proposed dinner only → user says "一整天"  → {"intent":"corrected","new_meal_times":null}\n'
             '  Proposed dinner only → user says "三餐都要"  → {"intent":"corrected","new_meal_times":null}\n'
             '  Proposed dinner only → user says "我是说今天一整天" → {"intent":"corrected","new_meal_times":null}\n'
             '  Proposed today → user says "不对，是明天" → {"intent":"corrected","new_start":"YYYY-MM-DD","new_end":"YYYY-MM-DD"}\n'
             '  Proposed 7 days → user says "没问题" → {"intent":"confirmed"}\n'
-            '  Proposed 7 days → user says "开始吧" → {"intent":"confirmed"}\n\n'
+            '  Proposed 7 days → user says "开始吧" → {"intent":"confirmed"}\n'
+            '  Proposed Mon-Tue → user says "我明天要去旅游" → {"intent":"unclear"}\n'
+            '  Proposed Mon-Tue → user says "这几天我不在家" → {"intent":"unclear"}\n\n'
             "Return JSON only — no markdown, no extra text."
         )
         user_msg = (
@@ -1019,6 +1033,8 @@ class PlanAheadPipeline:
         scheduling_context: Optional[str] = None,
         user_profile: Optional[Dict[str, Any]] = None,
         queue_target_date: Optional[str] = None,
+        precomputed_action: Optional[str] = None,
+        active_context: Optional[Dict[str, Any]] = None,
     ) -> str:
         """Build system context string for the single-shot structured LLM call."""
         now = self._now_in_timezone(user_timezone)
@@ -1089,6 +1105,32 @@ class PlanAheadPipeline:
                 ctx += f"  (... and {len(inventory_items) - _LIMIT} more items)\n"
         else:
             ctx += "\n(No food items found — recommend based on common ingredients)\n"
+
+        # --- Active Conversation Context (Memory Layer) ---
+        _active_ingredients: List[str] = (active_context or {}).get("active_ingredients", [])
+        _active_target_date: Optional[str] = (active_context or {}).get("target_date")
+        _active_meal_type: Optional[str] = (active_context or {}).get("target_meal_type")
+        if _active_ingredients:
+            ctx += "\n\n=== ACTIVE CONVERSATION CONTEXT (remembered from this session) ==="
+            ctx += (
+                "\nThe user mentioned having these ingredients on hand during this conversation."
+                "\nIncorporate them into your suggestions where appropriate:"
+            )
+            ctx += f"\n  Ingredients available: {', '.join(_active_ingredients)}"
+            if _active_target_date or _active_meal_type:
+                _slot_hint = " | ".join(
+                    filter(None, [_active_target_date, _active_meal_type])
+                )
+                ctx += f"\n  Planning context: {_slot_hint}"
+            ctx += (
+                "\nCRITICAL: When the user says things like '葱花的话能做啥' or 'what else can I make',"
+                "\n  assume they are ADDING to the previously mentioned ingredients, not starting fresh."
+                "\n  Combine all on-hand ingredients into a coherent meal suggestion."
+            )
+            logger.info(
+                "[PLAN_AHEAD_PIPELINE] ACTIVE CONTEXT injected: ingredients=%s",
+                _active_ingredients,
+            )
 
         # --- Cooking level section ---
         _level_map = {
@@ -1317,6 +1359,35 @@ class PlanAheadPipeline:
                     f"\n• Do NOT use action='confirm' — the queue is still in progress."
                 )
 
+        # ---- Skill-pre-routed action directive ----
+        # ClassifyMealActionSkill already determined the action — inject as a hard directive
+        # so the main LLM follows it instead of guessing from the giant prompt.
+        if precomputed_action == "suggest_options" and not queue_target_date:
+            ctx += (
+                "\n\n=== ACTION DIRECTIVE (mandatory — do not override) ==="
+                "\nThe system pre-analyzed the user's request and determined:"
+                "\n  The user expressed a FOOD PREFERENCE or CATEGORY (not a specific dish)."
+                "\n  They want to CHOOSE from multiple options — not receive a direct plan."
+                "\nMandatory action: use 'suggest_options' with EXACTLY 2 compact alternative plans."
+                "\n• Each option: 2-3 dish names only, ingredients=[] (filled when user selects)."
+                "\n• Do NOT use action='add', 'recommend', or 'ask'."
+                "\n• Do NOT save anything yet — present options for the user to choose from."
+            )
+        elif precomputed_action == "ask" and not queue_target_date:
+            ctx += (
+                "\n\n=== ACTION DIRECTIVE (mandatory — do not override) ==="
+                "\nThe user provided NO food preference at all."
+                "\nMandatory action: use 'ask' with ONE focused question to gather a preference."
+                "\n• Ask about cuisine style, ingredients, or dietary needs."
+                "\n• Do NOT generate a plan or options yet."
+            )
+        elif precomputed_action == "add" and not queue_target_date:
+            ctx += (
+                "\n\n=== ACTION DIRECTIVE (mandatory — do not override) ==="
+                "\nThe user explicitly named a specific dish to add."
+                "\nMandatory action: use 'add' to add that exact dish."
+            )
+
         ctx += "\n\n=== INSTRUCTIONS ==="
         ctx += (
             "\n1. Understand the user's intent and set 'action' to one of:"
@@ -1385,12 +1456,20 @@ class PlanAheadPipeline:
             "\n  * NEVER jump straight to generating a full meal plan on the first request without context."
         )
         ctx += (
-            "\n- Use 'suggest_options' AFTER the user has provided enough preference context (current or prior turns)."
-            " This presents 2-3 alternative meal plan styles so the user can choose — NO plan is saved yet."
+            "\n- Use 'suggest_options' whenever the user asks for meal suggestions AND has any preference"
+            " context available — either in the CURRENT message or prior turns. Preference context includes:"
+            "\n  * A food category or ingredient type (海鲜, 肉类, 蔬菜, etc.)"
+            "\n  * A cuisine style (日式, 川菜, 西餐, etc.)"
+            "\n  * A dietary constraint or occasion (清淡, 辛辣, 减脂, 家常, etc.)"
+            "\n  * Any answer to a previous 'ask' turn."
+            "\n  This presents 2 alternative meal plan styles so the user can choose — NO plan is saved yet."
             "\n  * Set meal_entries=[] (the primary plan slot is empty for suggest_options)."
-            "\n  * In 'dish_options', provide exactly 2-3 complete alternative plans."
-            "\n    Each option MUST have: option_id ('1','2','3'), label (e.g. '方案一：家常风味'), and full meal_entries."
-            "\n    Each option's meal_entries must be a fully detailed plan (same format as normal meal_entries)."
+            "\n  * In 'dish_options', provide EXACTLY 2 alternative plans (option_id '1' and '2')."
+            "\n    Each option MUST have: option_id, label (e.g. '方案一：家常风味'), and meal_entries."
+            "\n    CRITICAL — keep options COMPACT to avoid token overflow:"
+            "\n      - Each option's meal_entries must list dish names only."
+            "\n      - Set ingredients=[] for every dish in dish_options (ingredients are filled when user selects)."
+            "\n      - Do NOT write out shopping lists or per-dish ingredient details in options."
             "\n  * In user_message, present the options clearly:"
             "\n    - List each option with its label and a one-line summary of the dishes."
             "\n    - Tell the user to reply with '选方案X' or 'I choose option X' to select."
@@ -1408,7 +1487,8 @@ class PlanAheadPipeline:
             "\n  (a) The user has SELECTED one of the suggested options (e.g. '选方案2', 'I choose option 1')."
             "    Use the EXACT meal_entries from that option as the draft."
             "\n  (b) The user has selected AND requested modifications: apply the modifications to the option's plan."
-            "\n  (c) The user explicitly requests a FULL meal plan (not a single dish) without naming specific dishes."
+            "\n  NEVER use 'recommend' to skip the options step. The user must always see 'suggest_options' first"
+            " so they can choose before a plan is drafted — even if they provided preferences in the first message."
             "\n  This generates a DRAFT — it is NOT saved to calendar yet."
             "\n  * Fill requested slots with suitable dishes based on stated preferences."
             "\n  * PRIORITIZE dishes that use ingredients from the FOOD INVENTORY above."
@@ -1537,12 +1617,19 @@ class PlanAheadPipeline:
             '  "intent": "EXPLICIT" if the user names specific dish(es) they want to eat/add/change, '
             'or "RECOMMEND" if they ask the AI to suggest or plan meals without naming a dish.\n'
             '  "dishes": an array of the explicitly named dish names (empty array [] for RECOMMEND).\n'
+            "CRITICAL: Food categories/preferences are NOT specific dishes.\n"
+            "  海鲜, 肉, 蔬菜, 辣的, 清淡, 日式, 川菜, 快手菜 → RECOMMEND (not EXPLICIT).\n"
+            "  Only return EXPLICIT when the user names a SPECIFIC dish (e.g. 红烧肉, 蒜蓉蒸虾).\n\n"
             "Examples:\n"
             '  Input: "加个萝卜炖牛腩"  → {"intent":"EXPLICIT","dishes":["萝卜炖牛腩"]}\n'
             '  Input: "明天晚饭及一个小笼包" → {"intent":"EXPLICIT","dishes":["小笼包"]}\n'
             '  Input: "换成照烧鸡腿"    → {"intent":"EXPLICIT","dishes":["照烧鸡腿"]}\n'
             '  Input: "帮我计划今晚吃什么" → {"intent":"RECOMMEND","dishes":[]}\n'
-            '  Input: "给我推荐几个菜"  → {"intent":"RECOMMEND","dishes":[]}'
+            '  Input: "给我推荐几个菜"  → {"intent":"RECOMMEND","dishes":[]}\n'
+            '  Input: "我想吃个海鲜"    → {"intent":"RECOMMEND","dishes":[]}  // 海鲜 is a category\n'
+            '  Input: "想吃辣的东西"    → {"intent":"RECOMMEND","dishes":[]}  // 辣 is a preference\n'
+            '  Input: "来点清淡的"      → {"intent":"RECOMMEND","dishes":[]}  // 清淡 is a preference\n'
+            '  Input: "想吃日式"        → {"intent":"RECOMMEND","dishes":[]}  // cuisine type is preference'
         )
 
         _history_turns = []
@@ -1599,10 +1686,10 @@ class PlanAheadPipeline:
         # Keyword fallback: can detect EXPLICIT_HINT but cannot extract dish names
         return self._keyword_fallback_classify(query)
 
-    # Kept as a thin wrapper for the Fresh-session guard (uses only the bool result)
+    # Thin wrapper used by the Fresh-session guard (uses only the bool result).
+    # Delegates to ClassifyDishIntentSkill — prompt lives in the skill file.
     async def _classify_explicit_add(self, query: str, history: List[Dict]) -> bool:
-        result = await self._classify_dish_intent(query, history)
-        # Also treat keyword-fallback EXPLICIT_HINT as explicit (LLM failed but keywords matched)
+        result = await ClassifyDishIntentSkill(self.gemini_api_url).execute(query, history)
         if result["intent"] == "EXPLICIT_HINT":
             return True
         return result["is_explicit"]
@@ -1984,62 +2071,42 @@ class PlanAheadPipeline:
             event_type="meal_plan_draft",
             dish_ingredients=persist_ingr,
             meal_plan_slots=persist_slots,
+            is_append=(action == "add"),
         )
         return schedule_id
 
     # ------------------------------------------------------------------
-    # Public entry point
+    # Phase handlers  (each returns a result dict for an early exit, or
+    # None to let execute() continue to the next phase)
     # ------------------------------------------------------------------
 
-    async def execute(
+    async def _sync_state(
         self,
         owner_id: int,
-        user_input: str,
-        history: List[Dict],
-        user_timezone: Optional[str],
         storage_client: Any,
-        context: Optional[Dict] = None,
-        intent_result: Any = None,
-        cooking_level: Optional[str] = "beginner",
-        language: Optional[str] = "zh",
-        user_profile: Optional[Dict[str, Any]] = None,
+        context: Optional[Dict],
     ) -> Dict[str, Any]:
-        """
-        Execute the full PLAN_AHEAD pipeline and return a chat.py-compatible result dict.
+        """Step 1 of execute(): sync in-memory state from DB, then apply any
+        explicit context override.  Returns the fully-merged current_state."""
+        from app.modules.plan_ahead_state import get_plan_state, update_plan_state
 
-        Steps:
-          1. Sync DB state
-          2. Build LLM context
-          3. Single structured LLM call
-          4. Compute shopping_list programmatically
-          5. Persist to DB
-        """
-        # ---- Step 1: Sync DB state ----
         old_state = await self.plan_ahead_agent.sync_meal_plan_from_database(
             owner_id=owner_id,
             storage_client=storage_client,
         )
-
         server_state = get_plan_state(owner_id)
-
         _in_queue_mode = bool(server_state.get("meal_planning_queue"))
+
         if server_state.get("is_draft", False) or _in_queue_mode:
-            # Skip DB sync when:
-            #   • is_draft=True: active draft in memory with uncommitted changes
-            #   • _in_queue_mode: queue session in progress — the session started with a
-            #     clean state (cleared in Phase 1b). Re-loading DB data every turn would
-            #     contaminate the queue's draft with meals from prior sessions.
-            # In both cases only backfill schedule_id if not already set.
             if old_state.get("schedule_id") and not server_state.get("schedule_id"):
                 update_plan_state(owner_id=owner_id, schedule_id=old_state.get("schedule_id"))
             current_state = get_plan_state(owner_id)
             _skip_reason = "active draft" if server_state.get("is_draft") else "queue mode"
             logger.info(
-                f"[PLAN_AHEAD_PIPELINE] DB sync skipped ({_skip_reason}): "
-                f"{len(current_state.get('meal_plan', {}))} meals in state."
+                "[PLAN_AHEAD_PIPELINE] DB sync skipped (%s): %d meals in state.",
+                _skip_reason, len(current_state.get("meal_plan", {})),
             )
         elif old_state.get("schedule_id"):
-            # No active draft — sync from DB as normal.
             db_mp = old_state.get("meal_plan") or {}
             db_slots = old_state.get("meal_plan_slots") or {}
             server_slots = server_state.get("meal_plan_slots") or {}
@@ -2068,32 +2135,23 @@ class PlanAheadPipeline:
             )
             current_state = get_plan_state(owner_id)
         else:
-            # DB returned no meal plan (empty or all schedules deleted).
-            # If in-memory state still carries a stale schedule_id or stale slots
-            # (from a plan the user deleted via the Web UI), clear it immediately.
-            # Without this, the stale state would be fed to the LLM as "CURRENT MEAL PLAN"
-            # and the deleted meals would get resurrected on the next chat turn.
             if server_state.get("schedule_id") or server_state.get("meal_plan_slots"):
                 logger.info(
-                    f"[PLAN_AHEAD_PIPELINE] DB has no plan but in-memory has stale data "
-                    f"(schedule_id={server_state.get('schedule_id')}, "
-                    f"slots={list((server_state.get('meal_plan_slots') or {}).keys())}) — "
-                    f"clearing stale state for user {owner_id}."
+                    "[PLAN_AHEAD_PIPELINE] DB has no plan but in-memory has stale data "
+                    "(schedule_id=%s, slots=%s) — clearing for user %d.",
+                    server_state.get("schedule_id"),
+                    list((server_state.get("meal_plan_slots") or {}).keys()),
+                    owner_id,
                 )
                 update_plan_state(
                     owner_id=owner_id,
-                    meal_plan={},
-                    shopping_list=[],
-                    schedule_id=None,
-                    meal_plan_slots={},
-                    dish_ingredients={},
-                    is_draft=False,
-                    last_pipeline_action=None,
-                    merge=False,
+                    meal_plan={}, shopping_list=[], schedule_id=None,
+                    meal_plan_slots={}, dish_ingredients={},
+                    is_draft=False, last_pipeline_action=None, merge=False,
                 )
             current_state = get_plan_state(owner_id)
 
-        # Override with explicit context if provided
+        # Apply explicit UI context override (e.g. page-refresh context from frontend)
         if context and context.get("type") == "plan_ahead" and isinstance(context.get("data"), dict):
             cd = context["data"]
             if cd.get("meal_plan_slots"):
@@ -2103,33 +2161,32 @@ class PlanAheadPipeline:
             if not current_state.get("schedule_id") and cd.get("schedule_id"):
                 current_state["schedule_id"] = cd["schedule_id"]
 
-        # ---- Fetch inventory (used for recommend action & context) ----
-        inventory_items = await self._fetch_inventory(owner_id)
-        is_currently_draft = current_state.get("is_draft", False)
+        # Return both: old_state is the raw DB snapshot (needed by execute() for
+        # ghost-date filtering, echoed-date stripping, and draft-base snapshotting).
+        return old_state, current_state
 
-        # ---- Layer 0: LLM dish-intent early classification ----
-        # Run BEFORE Phase 1b/1a so an explicit dish can short-circuit both.
-        # This prevents "今天晚上吃个芋艿猪排骨" from entering date-confirmation flow:
-        # _init_planning_queue would mis-read "今天晚上" and expand it to three meals.
-        _dish_clf = await self._classify_dish_intent(user_input, history or [])
-        _is_explicit_dish = _dish_clf.get("is_explicit", False)
-        if _is_explicit_dish:
-            logger.info(
-                "[PLAN_AHEAD_PIPELINE] Layer 0: explicit dish detected (%s) — "
-                "will bypass date confirmation flow if triggered.",
-                _dish_clf.get("dishes"),
-            )
+    async def _handle_date_confirmation(
+        self,
+        owner_id: int,
+        user_input: str,
+        current_state: Dict[str, Any],
+        is_explicit_dish: bool,
+        user_timezone: Optional[str],
+        language: Optional[str],
+        intent_result: Any,
+    ) -> Optional[Dict[str, Any]]:
+        """Phase 1b: handle the user's reply to an outstanding date-range confirmation.
 
-        # ---- Date confirmation flow ----
-        # When user requests a whole-week plan, first ask them to confirm (or correct) the
-        # detected date range. Only after confirmation does normal planning proceed.
+        Returns a result dict if the turn is fully handled (early exit).
+        Returns None when the confirmed queue has been activated and execution
+        should fall through to the main LLM planning turn.
+        """
+        from app.modules.plan_ahead_state import get_plan_state, update_plan_state
 
-        # Phase 1b: LLM-based classification of the user's response to the date confirmation
         _pending_queue: List[str] = list(current_state.get("pending_planning_queue") or [])
 
-        # Layer 0 guard: if the user is now asking about a specific dish, abandon the
-        # pending date-confirmation session and fall through to direct dish handling.
-        if _is_explicit_dish and _pending_queue:
+        # Layer 0 guard: explicit dish clears any pending date-confirmation session.
+        if is_explicit_dish and _pending_queue:
             logger.info(
                 "[PLAN_AHEAD_PIPELINE] Layer 0 short-circuit: clearing pending date "
                 "confirmation queue (%d slot(s)) — user switched to explicit dish request.",
@@ -2141,385 +2198,448 @@ class PlanAheadPipeline:
                 last_pipeline_action=None,
                 confirmation_retry_count=None,
             )
-            current_state = get_plan_state(owner_id)
-            _pending_queue = []
+            return None  # fall through with cleared queue
 
-        if _pending_queue and current_state.get("last_pipeline_action") == "ask_confirm_dates":
-            _clf = await self._classify_date_confirmation(user_input, _pending_queue, user_timezone)
-            _clf_intent = _clf["intent"]
+        if not (_pending_queue and current_state.get("last_pipeline_action") == "ask_confirm_dates"):
+            return None  # not in date-confirmation phase
+
+        # Use skill — prompt lives in ClassifyDateConfirmationSkill.SKILL_PROMPT
+        _now = self._now_in_timezone(user_timezone)
+        _today_str_skill = _now.strftime("%Y-%m-%d")
+        _clf = await ClassifyDateConfirmationSkill(self.gemini_api_url).execute(
+            user_input, _pending_queue, _today_str_skill
+        )
+        _clf_intent = _clf["intent"]
+        logger.info(
+            "[PLAN_AHEAD_PIPELINE] Phase 1b classifier: intent=%r for %r",
+            _clf_intent, user_input,
+        )
+
+        if _clf_intent == "confirmed":
+            _planning_slots = list(_pending_queue)
+            _pending_dates = list(dict.fromkeys(s.split("|")[0] for s in _planning_slots))
+            update_plan_state(
+                owner_id=owner_id,
+                pending_planning_queue=None, last_pipeline_action=None,
+                meal_planning_queue=_planning_slots, meal_planning_total=len(_planning_slots),
+                meal_plan={}, meal_plan_slots={}, dish_ingredients={}, shopping_list=[],
+                is_draft=False, confirmation_retry_count=None, merge=False,
+            )
             logger.info(
-                "[PLAN_AHEAD_PIPELINE] Phase 1b classifier: intent=%r for %r",
-                _clf_intent, user_input,
+                "[PLAN_AHEAD_PIPELINE] Date range confirmed: %s → %s (%d days, %d meal slots). "
+                "Entering per-meal queue mode.",
+                _pending_dates[0], _pending_dates[-1], len(_pending_dates), len(_planning_slots),
+            )
+            return None  # fall through to queue-aware LLM planning
+
+        if _clf_intent == "corrected":
+            _corrected_dates = _clf.get("new_dates", [])
+            _new_meal_times: Optional[List[str]] = _clf.get("new_meal_times") or None
+            if not _corrected_dates:
+                _corrected_dates = list(dict.fromkeys(
+                    s.split("|")[0] for s in _pending_queue if "|" in s
+                ))
+            if _new_meal_times:
+                _eff_meals: Optional[List[str]] = _new_meal_times
+            else:
+                _eff_meals = list(dict.fromkeys(
+                    s.split("|")[1] for s in _pending_queue if "|" in s
+                )) or None
+            _corrected_slots = self._dates_to_slots(_corrected_dates, _eff_meals) if _corrected_dates else []
+
+            if _corrected_slots and _corrected_slots != _pending_queue:
+                update_plan_state(
+                    owner_id=owner_id,
+                    pending_planning_queue=_corrected_slots,
+                    last_pipeline_action="ask_confirm_dates",
+                    confirmation_retry_count=0,
+                )
+                _confirm_msg = self._build_date_confirm_message(_corrected_slots, language)
+                self._log_pending_dates(_corrected_slots, current_state.get("meal_plan_slots"), "Date corrected by user")
+            else:
+                _retry = current_state.get("confirmation_retry_count", 0) + 1
+                logger.info("[PLAN_AHEAD_PIPELINE] Phase 1b: no-op correction (retry=%d) for %r", _retry, user_input)
+                if _retry >= 2:
+                    update_plan_state(owner_id=owner_id, pending_planning_queue=None, last_pipeline_action=None, confirmation_retry_count=None)
+                    _confirm_msg = (
+                        "好像我没能理解您想修改的内容，让我们重新来一次吧！\n"
+                        "您可以告诉我想规划哪几天、哪几餐，我来帮您安排。"
+                    )
+                    logger.info("[PLAN_AHEAD_PIPELINE] Phase 1b: 2 no-op corrections → degrading to fresh start.")
+                else:
+                    _pending_meals_str = "、".join(
+                        {"breakfast": "早餐", "lunch": "午餐", "dinner": "晚餐"}.get(m, m)
+                        for m in list(dict.fromkeys(s.split("|")[1] for s in _pending_queue if "|" in s))
+                    ) or "三餐"
+                    _pending_start_str = _pending_queue[0].split("|")[0] if _pending_queue else ""
+                    _pending_end_str = _pending_queue[-1].split("|")[0] if _pending_queue else ""
+                    _same_day = _pending_start_str == _pending_end_str
+                    _date_hint = (
+                        f"{_pending_start_str}（{_pending_meals_str}）"
+                        if _same_day
+                        else f"{_pending_start_str} 到 {_pending_end_str}（{_pending_meals_str}）"
+                    )
+                    _confirm_msg = (
+                        f"我明白您想修改，但还不太确定您想改什么。\n"
+                        f"当前方案是：{_date_hint}\n\n"
+                        "是想改**日期**（比如：从明天开始 / 改成下周）？\n"
+                        "还是想改**餐次**（比如：加上早餐 / 只要晚饭）？"
+                    )
+                    update_plan_state(owner_id=owner_id, confirmation_retry_count=_retry)
+
+            _cur = get_plan_state(owner_id)
+            return self._build_result(
+                response_text=_confirm_msg,
+                meal_plan=_cur.get("meal_plan", {}), meal_plan_slots=_cur.get("meal_plan_slots", {}),
+                dish_ingredients=_cur.get("dish_ingredients", {}), shopping_list=_cur.get("shopping_list", []),
+                schedule_id=_cur.get("schedule_id"), intent_result=intent_result,
             )
 
-            if _clf_intent == "confirmed":
-                # User accepted the dates → enter per-meal queue mode.
-                # pending_planning_queue is already "YYYY-MM-DD|meal_type" strings
-                # (built by _init_planning_queue), so use directly without expansion.
-                _planning_slots = list(_pending_queue)
-                _pending_dates = list(dict.fromkeys(s.split("|")[0] for s in _planning_slots))
-                # Reset draft data so the queue session builds a clean draft from scratch.
-                # DB-loaded meals (from prior sessions) stay accessible to the LLM via the
-                # scheduling agent context but must NOT bleed into the new draft state.
-                update_plan_state(
-                    owner_id=owner_id,
-                    pending_planning_queue=None,
-                    last_pipeline_action=None,
-                    meal_planning_queue=_planning_slots,
-                    meal_planning_total=len(_planning_slots),
-                    meal_plan={},
-                    meal_plan_slots={},
-                    dish_ingredients={},
-                    shopping_list=[],
-                    is_draft=False,
-                    confirmation_retry_count=None,
-                    merge=False,
-                )
-                current_state = get_plan_state(owner_id)
-                logger.info(
-                    "[PLAN_AHEAD_PIPELINE] Date range confirmed: %s → %s (%d days, %d meal slots). "
-                    "Entering per-meal queue mode.",
-                    _pending_dates[0], _pending_dates[-1], len(_pending_dates), len(_planning_slots),
-                )
-                # Fall through to queue-aware LLM planning
+        # "unclear" — attempt date recovery via InitPlanningQueueSkill
+        _recovery_result = await InitPlanningQueueSkill(self.gemini_api_url).execute(
+            user_input, _now.strftime("%Y-%m-%d (%A)"), today_date=_now.date()
+        )
+        _recovery_queue = _recovery_result.get("slots", [])
+        if _recovery_queue:
+            update_plan_state(
+                owner_id=owner_id,
+                pending_planning_queue=_recovery_queue,
+                last_pipeline_action="ask_confirm_dates",
+                confirmation_retry_count=0,
+            )
+            _confirm_msg = self._build_date_confirm_message(_recovery_queue, language)
+            self._log_pending_dates(_recovery_queue, None, "Phase 1b unclear → date recovery")
+            logger.info(
+                "[PLAN_AHEAD_PIPELINE] Phase 1b: unclear but date recovery succeeded (%d slot(s)).",
+                len(_recovery_queue),
+            )
+        else:
+            _confirm_msg = self._build_date_confirm_message(_pending_queue, language)
+            logger.info("[PLAN_AHEAD_PIPELINE] Phase 1b: unclear reply, re-asking.")
+        _cur = get_plan_state(owner_id)
+        return self._build_result(
+            response_text=_confirm_msg,
+            meal_plan=_cur.get("meal_plan", {}), meal_plan_slots=_cur.get("meal_plan_slots", {}),
+            dish_ingredients=_cur.get("dish_ingredients", {}), shopping_list=_cur.get("shopping_list", []),
+            schedule_id=_cur.get("schedule_id"), intent_result=intent_result,
+        )
 
-            elif _clf_intent == "corrected":
-                _corrected_dates = _clf.get("new_dates", [])
-                _new_meal_times: Optional[List[str]] = _clf.get("new_meal_times") or None
+    async def _handle_ask_dates_resolution(
+        self,
+        owner_id: int,
+        user_input: str,
+        current_state: Dict[str, Any],
+        is_currently_draft: bool,
+        intent_result: Any,
+    ) -> Optional[Dict[str, Any]]:
+        """Phase 1a-pre: when pending_ask_dates are stored from a previous 'ask' turn,
+        parse the meal type(s) from the user's reply and start the queue.
 
-                # Determine effective dates: corrected or original
-                if not _corrected_dates:
-                    _corrected_dates = list(dict.fromkeys(
-                        s.split("|")[0] for s in _pending_queue if "|" in s
-                    ))
+        Returns a result dict only if the meal type is still unclear (re-ask).
+        Returns None on success (queue activated, fall through) or when not applicable.
+        """
+        from app.modules.plan_ahead_state import update_plan_state
 
-                # Determine effective meal types: new > original
-                if _new_meal_times:
-                    _eff_meals: Optional[List[str]] = _new_meal_times
-                else:
-                    _eff_meals = list(dict.fromkeys(
-                        s.split("|")[1] for s in _pending_queue if "|" in s
-                    )) or None
-
-                _corrected_slots = self._dates_to_slots(_corrected_dates, _eff_meals) if _corrected_dates else []
-
-                if _corrected_slots and _corrected_slots != _pending_queue:
-                    # Effective change detected → update proposal, reset retry counter
-                    update_plan_state(
-                        owner_id=owner_id,
-                        pending_planning_queue=_corrected_slots,
-                        last_pipeline_action="ask_confirm_dates",
-                        confirmation_retry_count=0,
-                    )
-                    _confirm_msg = self._build_date_confirm_message(_corrected_slots, language)
-                    self._log_pending_dates(
-                        _corrected_slots,
-                        current_state.get("meal_plan_slots"),
-                        "Date corrected by user",
-                    )
-                else:
-                    # ── State Convergence Guard ──
-                    # Correction intent fired but produced no change in slots.
-                    # Increment retry counter; if it keeps happening, guide user or degrade.
-                    _retry = current_state.get("confirmation_retry_count", 0) + 1
-                    logger.info(
-                        "[PLAN_AHEAD_PIPELINE] Phase 1b: no-op correction (retry=%d) for %r",
-                        _retry, user_input,
-                    )
-
-                    if _retry >= 2:
-                        # Hard degrade: abandon the pending queue, let the user start fresh.
-                        update_plan_state(
-                            owner_id=owner_id,
-                            pending_planning_queue=None,
-                            last_pipeline_action=None,
-                            confirmation_retry_count=None,
-                        )
-                        _confirm_msg = (
-                            "好像我没能理解您想修改的内容，让我们重新来一次吧！\n"
-                            "您可以告诉我想规划哪几天、哪几餐，我来帮您安排。"
-                        )
-                        logger.info(
-                            "[PLAN_AHEAD_PIPELINE] Phase 1b: 2 no-op corrections → degrading to fresh start."
-                        )
-                    else:
-                        # Guided nudge: stay in Phase 1b, bump counter, ask targeted question
-                        _pending_meals_str = "、".join(
-                            {"breakfast": "早餐", "lunch": "午餐", "dinner": "晚餐"}.get(m, m)
-                            for m in list(dict.fromkeys(
-                                s.split("|")[1] for s in _pending_queue if "|" in s
-                            ))
-                        ) or "三餐"
-                        _pending_start_str = _pending_queue[0].split("|")[0] if _pending_queue else ""
-                        _pending_end_str = _pending_queue[-1].split("|")[0] if _pending_queue else ""
-                        _same_day = _pending_start_str == _pending_end_str
-                        _date_hint = (
-                            f"{_pending_start_str}（{_pending_meals_str}）"
-                            if _same_day
-                            else f"{_pending_start_str} 到 {_pending_end_str}（{_pending_meals_str}）"
-                        )
-                        _confirm_msg = (
-                            f"我明白您想修改，但还不太确定您想改什么。\n"
-                            f"当前方案是：{_date_hint}\n\n"
-                            "是想改**日期**（比如：从明天开始 / 改成下周）？\n"
-                            "还是想改**餐次**（比如：加上早餐 / 只要晚饭）？"
-                        )
-                        update_plan_state(
-                            owner_id=owner_id,
-                            confirmation_retry_count=_retry,
-                        )
-
-                return self._build_result(
-                    response_text=_confirm_msg,
-                    meal_plan=current_state.get("meal_plan", {}),
-                    meal_plan_slots=current_state.get("meal_plan_slots", {}),
-                    dish_ingredients=current_state.get("dish_ingredients", {}),
-                    shopping_list=current_state.get("shopping_list", []),
-                    schedule_id=current_state.get("schedule_id"),
-                    intent_result=intent_result,
-                )
-
-            else:  # "unclear"
-                # Recovery attempt: if the user's reply contains date info (e.g. "还有周六"),
-                # re-parse it as a new planning request.  This handles the common case where
-                # the LLM timed out / truncated and the keyword fallback couldn't classify.
-                _recovery_queue = await self._init_planning_queue(user_input, user_timezone)
-                if _recovery_queue:
-                    update_plan_state(
-                        owner_id=owner_id,
-                        pending_planning_queue=_recovery_queue,
-                        last_pipeline_action="ask_confirm_dates",
-                        confirmation_retry_count=0,
-                    )
-                    _confirm_msg = self._build_date_confirm_message(_recovery_queue, language)
-                    self._log_pending_dates(
-                        _recovery_queue, None, "Phase 1b unclear → date recovery"
-                    )
-                    logger.info(
-                        "[PLAN_AHEAD_PIPELINE] Phase 1b: unclear but date recovery succeeded "
-                        "(%d slot(s)) — re-proposing recovered range.",
-                        len(_recovery_queue),
-                    )
-                    return self._build_result(
-                        response_text=_confirm_msg,
-                        meal_plan=current_state.get("meal_plan", {}),
-                        meal_plan_slots=current_state.get("meal_plan_slots", {}),
-                        dish_ingredients=current_state.get("dish_ingredients", {}),
-                        shopping_list=current_state.get("shopping_list", []),
-                        schedule_id=current_state.get("schedule_id"),
-                        intent_result=intent_result,
-                    )
-                _confirm_msg = self._build_date_confirm_message(_pending_queue, language)
-                logger.info("[PLAN_AHEAD_PIPELINE] Phase 1b: unclear reply, re-asking.")
-                return self._build_result(
-                    response_text=_confirm_msg,
-                    meal_plan=current_state.get("meal_plan", {}),
-                    meal_plan_slots=current_state.get("meal_plan_slots", {}),
-                    dish_ingredients=current_state.get("dish_ingredients", {}),
-                    shopping_list=current_state.get("shopping_list", []),
-                    schedule_id=current_state.get("schedule_id"),
-                    intent_result=intent_result,
-                )
-
-        # Phase 1a-pre: resolve a pending meal-slot selector ask.
-        # When the Fresh-plan guard captured specific dates and forced action=ask, those dates
-        # are stored in state["pending_ask_dates"].  On the next turn the user says something
-        # like "只计划晚饭" — we parse the meal type(s) directly from their reply and build
-        # the planning queue without a second _init_planning_queue call that would lose the
-        # date context (because the standalone phrase has no date information).
         _saved_ask_dates: List[str] = list(current_state.get("pending_ask_dates") or [])
-        if (
-            not _pending_queue
-            and not is_currently_draft
-            and _saved_ask_dates
-            and current_state.get("last_pipeline_action") == "ask"
-        ):
-            _meal_kw_map = {
-                "breakfast": ["早餐", "早饭", "早上", "breakfast"],
-                "lunch":     ["午餐", "午饭", "中饭", "中午", "lunch"],
-                "dinner":    ["晚餐", "晚饭", "晚上", "dinner"],
-            }
-            _all_meals_kw = ["三餐", "全天", "全部", "all", "每餐", "都"]
-            _q_phase1apre = (user_input or "").lower()
-            if any(kw in _q_phase1apre for kw in _all_meals_kw):
-                _resolved_meal_types = ["breakfast", "lunch", "dinner"]
-            else:
-                _resolved_meal_types = [
-                    mt for mt, kws in _meal_kw_map.items()
-                    if any(kw in _q_phase1apre for kw in kws)
-                ]
-            if _resolved_meal_types:
-                _resolved_queue = [
-                    f"{date}|{meal_type}"
-                    for date in _saved_ask_dates
-                    for meal_type in _resolved_meal_types
-                ]
-                logger.info(
-                    "[PLAN_AHEAD_PIPELINE] Phase 1a-pre: resolved pending_ask_dates=%s + "
-                    "meal_types=%s → queue=%s",
-                    _saved_ask_dates, _resolved_meal_types, _resolved_queue,
-                )
-                update_plan_state(
-                    owner_id=owner_id,
-                    pending_ask_dates=None,
-                    pending_planning_queue=None,
-                    last_pipeline_action=None,
-                    meal_planning_queue=_resolved_queue,
-                    meal_planning_total=len(_resolved_queue),
-                    meal_plan={},
-                    meal_plan_slots={},
-                    dish_ingredients={},
-                    shopping_list=[],
-                    is_draft=False,
-                    confirmation_retry_count=None,
-                    merge=False,
-                )
-                current_state = get_plan_state(owner_id)
-                # Fall through to Phase Q / normal LLM planning for the first queued slot.
-            else:
-                # Meal type still unclear — re-ask with the saved dates visible.
-                _date_hint = "、".join(_saved_ask_dates)
-                _re_ask_msg = (
-                    f"请告诉我 {_date_hint} 您想安排哪一餐？（早餐 / 午餐 / 晚餐，或\"三餐都要\"）"
-                )
-                logger.info(
-                    "[PLAN_AHEAD_PIPELINE] Phase 1a-pre: meal type unclear for pending_ask_dates=%s, re-asking.",
-                    _saved_ask_dates,
-                )
-                # Keep pending_ask_dates in state so next turn can resolve again.
-                update_plan_state(owner_id=owner_id, last_pipeline_action="ask")
-                _re_ask_result = self._build_result(
-                    response_text=_re_ask_msg,
-                    meal_plan=current_state.get("meal_plan", {}),
-                    meal_plan_slots=current_state.get("meal_plan_slots", {}),
-                    dish_ingredients=current_state.get("dish_ingredients", {}),
-                    shopping_list=current_state.get("shopping_list", []),
-                    schedule_id=current_state.get("schedule_id"),
-                    is_draft=is_currently_draft,
-                    intent_result=intent_result,
-                )
-                _re_ask_result["action_data"]["pending_ask_dates"] = _saved_ask_dates
-                _re_ask_result["action_data"]["ask_type"] = "meal_slot_selector"
-                return _re_ask_result
+        _pending_queue = current_state.get("pending_planning_queue") or []
 
-        # Phase 1a: detect fresh meal-planning intent
-        # For multi-slot requests (e.g. full day = 3 meals, or multi-day), ask user to confirm
-        # the detected date/meal range before proceeding.
-        # For single-slot requests (exactly 1 meal explicitly named), bypass confirmation and
-        # enter queue mode directly — the user's intent is already precise enough.
-        #
-        # Layer 0 result (_is_explicit_dish) was already computed above and is reused here.
-        # If the user named an explicit dish (e.g. "今天晚上吃芋艿猪排骨"),
-        # is_explicit=True → skip Phase 1a entirely and let the main LLM handle it
-        # as a direct "add" action.
-        if (
-            not _pending_queue
-            and not is_currently_draft
-            and not current_state.get("last_pipeline_action")
-            # Skip Phase 1a if Phase 1a-pre already built a planning queue this turn.
-            and not current_state.get("meal_planning_queue")
-        ):
-            if _is_explicit_dish:
-                logger.info(
-                    "[PLAN_AHEAD_PIPELINE] Phase 1a short-circuit: explicit dish detected "
-                    "(%s) — skipping _init_planning_queue, falling through to main LLM.",
-                    _dish_clf.get("dishes"),
-                )
-            _new_queue = [] if _is_explicit_dish else await self._init_planning_queue(user_input, user_timezone)
-            if _new_queue:
-                if len(_new_queue) == 1:
-                    # Single explicit meal slot — skip confirmation, start planning immediately.
-                    _slot = _new_queue[0]
-                    logger.info(
-                        "[PLAN_AHEAD_PIPELINE] Phase 1a: single slot %r — bypassing confirmation, "
-                        "entering queue mode directly.",
-                        _slot,
-                    )
-                    update_plan_state(
-                        owner_id=owner_id,
-                        pending_planning_queue=None,
-                        last_pipeline_action=None,
-                        meal_planning_queue=_new_queue,
-                        meal_planning_total=1,
-                        meal_plan={},
-                        meal_plan_slots={},
-                        dish_ingredients={},
-                        shopping_list=[],
-                        is_draft=False,
-                        confirmation_retry_count=None,
-                        merge=False,
-                    )
-                    current_state = get_plan_state(owner_id)
-                    # Fall through to Phase Q / normal LLM planning
-                else:
-                    # Multi-slot: need confirmation before committing
-                    update_plan_state(
-                        owner_id=owner_id,
-                        pending_planning_queue=_new_queue,
-                        last_pipeline_action="ask_confirm_dates",
-                    )
-                    _confirm_msg = self._build_date_confirm_message(_new_queue, language)
-                    self._log_pending_dates(
-                        _new_queue,
-                        current_state.get("meal_plan_slots"),
-                        "Multi-day planning detected",
-                    )
-                    return self._build_result(
-                        response_text=_confirm_msg,
-                        meal_plan=current_state.get("meal_plan", {}),
-                        meal_plan_slots=current_state.get("meal_plan_slots", {}),
-                        dish_ingredients=current_state.get("dish_ingredients", {}),
-                        shopping_list=current_state.get("shopping_list", []),
-                        schedule_id=current_state.get("schedule_id"),
-                        intent_result=intent_result,
-                    )
+        if not (_saved_ask_dates and not _pending_queue and not is_currently_draft
+                and current_state.get("last_pipeline_action") == "ask"):
+            return None
 
-        # ---- Phase Q: Per-meal queue advance ----
-        # After each meal slot is confirmed (queue_day_complete), decide what to do next:
-        #   • modification intent  → stay on current slot, let LLM handle the change
-        #   • save/confirm intent  → exit queue, let normal pipeline save the draft to DB
-        #   • anything else        → advance to the next queued meal slot
+        _meal_kw_map = {
+            "breakfast": ["早餐", "早饭", "早上", "breakfast"],
+            "lunch":     ["午餐", "午饭", "中饭", "中午", "lunch"],
+            "dinner":    ["晚餐", "晚饭", "晚上", "dinner"],
+        }
+        _all_meals_kw = ["三餐", "全天", "全部", "all", "每餐", "都"]
+        _q = (user_input or "").lower()
+        if any(kw in _q for kw in _all_meals_kw):
+            _resolved_meal_types = ["breakfast", "lunch", "dinner"]
+        else:
+            _resolved_meal_types = [mt for mt, kws in _meal_kw_map.items() if any(kw in _q for kw in kws)]
+
+        if _resolved_meal_types:
+            _resolved_queue = [
+                f"{date}|{meal_type}"
+                for date in _saved_ask_dates
+                for meal_type in _resolved_meal_types
+            ]
+            logger.info(
+                "[PLAN_AHEAD_PIPELINE] Phase 1a-pre: resolved pending_ask_dates=%s + meal_types=%s → queue=%s",
+                _saved_ask_dates, _resolved_meal_types, _resolved_queue,
+            )
+            update_plan_state(
+                owner_id=owner_id,
+                pending_ask_dates=None, pending_planning_queue=None, last_pipeline_action=None,
+                meal_planning_queue=_resolved_queue, meal_planning_total=len(_resolved_queue),
+                meal_plan={}, meal_plan_slots={}, dish_ingredients={}, shopping_list=[],
+                is_draft=False, confirmation_retry_count=None, merge=False,
+            )
+            return None  # fall through — queue is now active
+
+        # Meal type still unclear — re-ask
+        _date_hint = "、".join(_saved_ask_dates)
+        _re_ask_msg = f"请告诉我 {_date_hint} 您想安排哪一餐？（早餐 / 午餐 / 晚餐，或\"三餐都要\"）"
+        logger.info("[PLAN_AHEAD_PIPELINE] Phase 1a-pre: meal type unclear for %s, re-asking.", _saved_ask_dates)
+        update_plan_state(owner_id=owner_id, last_pipeline_action="ask")
+        result = self._build_result(
+            response_text=_re_ask_msg,
+            meal_plan=current_state.get("meal_plan", {}), meal_plan_slots=current_state.get("meal_plan_slots", {}),
+            dish_ingredients=current_state.get("dish_ingredients", {}), shopping_list=current_state.get("shopping_list", []),
+            schedule_id=current_state.get("schedule_id"), is_draft=is_currently_draft, intent_result=intent_result,
+        )
+        result["action_data"]["pending_ask_dates"] = _saved_ask_dates
+        result["action_data"]["ask_type"] = "meal_slot_selector"
+        return result
+
+    async def _handle_phase1a_queue_init(
+        self,
+        owner_id: int,
+        user_input: str,
+        current_state: Dict[str, Any],
+        is_currently_draft: bool,
+        is_explicit_dish: bool,
+        dish_clf: Dict[str, Any],
+        language: Optional[str],
+        user_timezone: Optional[str],
+        intent_result: Any,
+    ) -> Optional[Dict[str, Any]]:
+        """Phase 1a: detect fresh multi-slot planning intent and either enter queue
+        mode directly (single slot) or ask for date-range confirmation (multiple slots).
+
+        Returns a result dict if a confirmation question was emitted.
+        Returns None when no queue was detected (fall through) or when the queue is
+        already active (single-slot fast-path).
+        """
+        from app.modules.plan_ahead_state import update_plan_state
+
+        # Skip if we are already in some active phase
+        if (
+            current_state.get("pending_planning_queue")
+            or is_currently_draft
+            or current_state.get("last_pipeline_action")
+            or current_state.get("meal_planning_queue")
+        ):
+            return None
+
+        if is_explicit_dish:
+            logger.info(
+                "[PLAN_AHEAD_PIPELINE] Phase 1a short-circuit: explicit dish (%s) — "
+                "skipping _init_planning_queue, falling through to main LLM.",
+                dish_clf.get("dishes"),
+            )
+            return None
+
+        # Use skill — prompt lives in InitPlanningQueueSkill.SKILL_PROMPT_TEMPLATE
+        _pq_now = self._now_in_timezone(user_timezone)
+        _pq_result = await InitPlanningQueueSkill(self.gemini_api_url).execute(
+            user_input,
+            _pq_now.strftime("%Y-%m-%d (%A)"),
+            today_date=_pq_now.date(),
+        )
+        _new_queue = _pq_result.get("slots", [])
+        if not _new_queue:
+            return None
+
+        if len(_new_queue) == 1:
+            # Single explicit slot — bypass confirmation, activate queue immediately.
+            logger.info(
+                "[PLAN_AHEAD_PIPELINE] Phase 1a: single slot %r — bypassing confirmation.",
+                _new_queue[0],
+            )
+            update_plan_state(
+                owner_id=owner_id,
+                pending_planning_queue=None, last_pipeline_action=None,
+                meal_planning_queue=_new_queue, meal_planning_total=1,
+                meal_plan={}, meal_plan_slots={}, dish_ingredients={}, shopping_list=[],
+                is_draft=False, confirmation_retry_count=None, merge=False,
+            )
+            return None  # fall through to LLM planning
+
+        # Multiple slots — need confirmation before committing.
+        update_plan_state(
+            owner_id=owner_id,
+            pending_planning_queue=_new_queue,
+            last_pipeline_action="ask_confirm_dates",
+        )
+        _confirm_msg = self._build_date_confirm_message(_new_queue, language)
+        self._log_pending_dates(_new_queue, current_state.get("meal_plan_slots"), "Multi-day planning detected")
+        _cur = current_state  # state not yet changed for these fields
+        return self._build_result(
+            response_text=_confirm_msg,
+            meal_plan=_cur.get("meal_plan", {}), meal_plan_slots=_cur.get("meal_plan_slots", {}),
+            dish_ingredients=_cur.get("dish_ingredients", {}), shopping_list=_cur.get("shopping_list", []),
+            schedule_id=_cur.get("schedule_id"), intent_result=intent_result,
+        )
+
+    def _handle_queue_advance(
+        self,
+        owner_id: int,
+        user_input: str,
+        current_state: Dict[str, Any],
+    ) -> Optional[str]:
+        """Phase Q: after a queue slot was presented (last_action=queue_day_complete),
+        decide whether to advance the queue, pause for a save, or stay on the
+        current slot (modification intent).
+
+        Returns the target slot string ("YYYY-MM-DD|meal_type") for this turn,
+        or None when not in queue mode.
+        """
+        from app.modules.plan_ahead_state import update_plan_state
+
         _meal_queue: List[str] = list(current_state.get("meal_planning_queue") or [])
-        _meal_total: int = current_state.get("meal_planning_total", 0)
-        if _meal_queue and current_state.get("last_pipeline_action") == "queue_day_complete":
-            _q_adv_lower = (user_input or "").lower().strip()
+        if not _meal_queue:
+            return None
+
+        if current_state.get("last_pipeline_action") == "queue_day_complete":
+            _q_lower = (user_input or "").lower().strip()
             _has_mod_intent = any(
-                kw in _q_adv_lower
+                kw in _q_lower
                 for kw in ("改", "换", "修改", "不要", "不用", "重新", "换一个", "replace", "change", "modify")
             )
             _has_save_intent = not _has_mod_intent and any(
-                kw in _q_adv_lower
+                kw in _q_lower
                 for kw in ("保存", "存入", "存下", "save", "完成了", "结束", "不用继续", "不需要继续")
             )
             if _has_save_intent:
-                # User wants to save the accumulated draft now (mid-queue checkpoint).
-                # Only clear last_pipeline_action in state — the queue stays untouched.
-                # Setting _meal_queue=[] locally means _queue_target_slot will be None
-                # this turn, so the LLM generates a confirm action instead of planning
-                # the next meal. After confirm persists the draft, the queue in state
-                # is still intact; the next "继续" will resume from queue[0].
                 update_plan_state(owner_id=owner_id, last_pipeline_action=None)
-                current_state = get_plan_state(owner_id)
-                _meal_queue = []  # local-only: queue in state is preserved
-                logger.info(
-                    "[PLAN_AHEAD_PIPELINE] Queue: save intent — pausing this turn for confirm "
-                    "(queue stays in state, %d slot(s) remain).",
-                    len(current_state.get("meal_planning_queue") or []),
-                )
+                _meal_queue = []  # local only — queue in state preserved
+                logger.info("[PLAN_AHEAD_PIPELINE] Queue: save intent — pausing for confirm.")
             elif not _has_mod_intent:
-                # Default: advance to next slot
                 update_plan_state(owner_id=owner_id, last_pipeline_action=None)
-                current_state = get_plan_state(owner_id)
-                _meal_queue = list(current_state.get("meal_planning_queue") or [])
+                from app.modules.plan_ahead_state import get_plan_state as _gps
+                _meal_queue = list(_gps(owner_id).get("meal_planning_queue") or [])
+                _meal_total = current_state.get("meal_planning_total", 0)
                 logger.info(
-                    "[PLAN_AHEAD_PIPELINE] Queue: advancing to next meal slot. Remaining: %d/%d.",
+                    "[PLAN_AHEAD_PIPELINE] Queue: advancing to next slot. Remaining: %d/%d.",
                     len(_meal_queue), _meal_total,
                 )
 
-        # Target slot for this turn (format: "YYYY-MM-DD|meal_type", or None when not in queue mode)
-        _queue_target_slot: Optional[str] = _meal_queue[0] if _meal_queue else None
+        return _meal_queue[0] if _meal_queue else None
+
+    # ------------------------------------------------------------------
+    # Public entry point
+    # ------------------------------------------------------------------
+
+    async def execute(
+        self,
+        owner_id: int,
+        user_input: str,
+        history: List[Dict],
+        user_timezone: Optional[str],
+        storage_client: Any,
+        context: Optional[Dict] = None,
+        intent_result: Any = None,
+        cooking_level: Optional[str] = "beginner",
+        language: Optional[str] = "zh",
+        user_profile: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """
+        Execute the full PLAN_AHEAD pipeline and return a chat.py-compatible result dict.
+
+        Orchestration (each phase either returns early or falls through):
+          1. _sync_state          — DB → in-memory reconciliation
+          2. Layer 0              — early dish-intent classification
+          3. _handle_date_confirmation   — Phase 1b: confirm/correct/unclear
+          4. _handle_ask_dates_resolution — Phase 1a-pre: resolve saved ask_dates
+          5. _handle_phase1a_queue_init  — Phase 1a: detect fresh multi-slot intent
+          6. _handle_queue_advance       — Phase Q: advance per-meal queue
+          7. _build_context + _call_llm  — single structured LLM call
+          8. Post-process + persist      — guardian, filter, save to DB
+        """
+        # ---- Step 1: Sync DB state ----
+        # old_state = raw DB snapshot; used later for ghost-date filtering,
+        # echoed-date stripping (action=add), and draft-base snapshotting.
+        old_state, current_state = await self._sync_state(owner_id, storage_client, context)
+        inventory_items = await self._fetch_inventory(owner_id)
+        is_currently_draft = current_state.get("is_draft", False)
+
+        # ---- Layer 0: LLM dish-intent early classification ----
+        # Skill-based: prompt lives in ClassifyDishIntentSkill.SKILL_PROMPT (skills/plan_ahead/).
+        _dish_clf = await ClassifyDishIntentSkill(self.gemini_api_url).execute(
+            user_input, history or []
+        )
+        _is_explicit_dish = _dish_clf.get("is_explicit", False)
+        if _is_explicit_dish:
+            logger.info(
+                "[PLAN_AHEAD_PIPELINE] Layer 0: explicit dish detected (%s) — "
+                "will bypass date confirmation flow if triggered.",
+                _dish_clf.get("dishes"),
+            )
+
+        # ---- Layer 0b: Pre-route meal action (ClassifyMealActionSkill) ----
+        # Decides ask / suggest_options / add / recommend BEFORE the main LLM context is built.
+        # Core fix for "海鲜 → direct add" bug: the main LLM is now told the action upfront.
+        _phase_str = get_phase(current_state).value
+        _action_clf = await ClassifyMealActionSkill(self.gemini_api_url).execute(
+            user_input, history or [],
+            is_explicit_dish=_is_explicit_dish,
+            pipeline_phase=_phase_str,
+        )
+        _prerouted_action: Optional[str] = _action_clf.get("action")
+        logger.info(
+            "[PLAN_AHEAD_PIPELINE] Layer 0b (ClassifyMealActionSkill): action=%s reason=%r",
+            _prerouted_action, _action_clf.get("reason", ""),
+        )
+
+        # ---- Layer 0c: Extract & persist ingredients to Memory Layer ----
+        # Runs only when the user may be referring to ingredients they have on hand.
+        # Active context is union-merged so multi-turn conversations accumulate facts.
+        _today_str = self._now_in_timezone(user_timezone).date().isoformat()
+        _extracted = await ExtractIngredientsSkill(self.gemini_api_url).execute(
+            user_input, today_date=_today_str,
+        )
+        _ext_ingredients: List[str] = _extracted.get("ingredients", [])
+        _ext_target_date: Optional[str] = _extracted.get("target_date")
+        _ext_meal_type: Optional[str] = _extracted.get("target_meal_type")
+        if _ext_ingredients or _ext_target_date or _ext_meal_type:
+            update_active_context(
+                owner_id,
+                add_ingredients=_ext_ingredients,
+                target_date=_ext_target_date,
+                target_meal_type=_ext_meal_type,
+            )
+
+        # Read the (now possibly updated) active context for context injection
+        _active_ctx = get_active_context(owner_id)
+
+        # ---- Phase 1b: Date confirmation ----
+        if result := await self._handle_date_confirmation(
+            owner_id, user_input, current_state, _is_explicit_dish,
+            user_timezone, language, intent_result,
+        ):
+            return result
+        current_state = get_plan_state(owner_id)
+        is_currently_draft = current_state.get("is_draft", False)
+
+        # ---- Phase 1a-pre: Resolve pending ask_dates ----
+        if result := await self._handle_ask_dates_resolution(
+            owner_id, user_input, current_state, is_currently_draft, intent_result,
+        ):
+            return result
+        current_state = get_plan_state(owner_id)
+        is_currently_draft = current_state.get("is_draft", False)
+
+        # ---- Phase 1a: Detect fresh queue intent ----
+        if result := await self._handle_phase1a_queue_init(
+            owner_id, user_input, current_state, is_currently_draft,
+            _is_explicit_dish, _dish_clf, language, user_timezone, intent_result,
+        ):
+            return result
+        current_state = get_plan_state(owner_id)
+        is_currently_draft = current_state.get("is_draft", False)
+
+        # ---- Phase Q: Per-meal queue advance ----
+        _queue_target_slot: Optional[str] = self._handle_queue_advance(
+            owner_id, user_input, current_state,
+        )
+        current_state = get_plan_state(owner_id)
         # Alias for backward-compat references further down
         _queue_target_date = _queue_target_slot
+        # Read queue snapshot from state (used later for queue-mode progress tracking)
+        _meal_queue: List[str] = list(current_state.get("meal_planning_queue") or [])
+        _meal_total: int = current_state.get("meal_planning_total", 0)
 
         # ---- Step 2: Build context ----
         _scheduling_ctx = (context or {}).get("scheduling_context") if context else None
@@ -2532,6 +2652,8 @@ class PlanAheadPipeline:
             scheduling_context=_scheduling_ctx,
             user_profile=user_profile,
             queue_target_date=_queue_target_slot,
+            precomputed_action=_prerouted_action,
+            active_context=_active_ctx,
         )
         # Inject pending options so the LLM can reference them when user selects
         system_context = self._inject_pending_options(system_context, current_state)
@@ -3039,8 +3161,8 @@ class PlanAheadPipeline:
         #       check which of the LLM's proposed dishes actually appear in the user's query.
         #       A dish the user never typed is by definition an AI hallucination; strip it.
         if action in ("add", "modify") and new_meal_plan_slots:
-            _dish_intent = await self._classify_dish_intent(
-                query=user_input or "", history=history or []
+            _dish_intent = await ClassifyDishIntentSkill(self.gemini_api_url).execute(
+                user_input or "", history or []
             )
 
             # Tier-2 fallback: LLM classifier returned EXPLICIT_HINT (keyword match,
@@ -3074,63 +3196,86 @@ class PlanAheadPipeline:
 
             if _dish_intent["is_explicit"] and _dish_intent["dishes"]:
                 _requested = _dish_intent["dishes"]
-                _explicit_slots: dict = {}
-                _removed_extras: list = []
-                for _date, _meals in new_meal_plan_slots.items():
-                    _kept_meals_ex = {}
-                    for _mt, _dishes in _meals.items():
-                        # Keep a dish if it fuzzy-matches any requested dish name
-                        _kept: list = []
-                        _removed: list = []
-                        for _d in _dishes:
-                            _d_lower = _d.lower().replace(" ", "")
-                            _match = any(
-                                _req.lower().replace(" ", "") in _d_lower
-                                or _d_lower in _req.lower().replace(" ", "")
-                                for _req in _requested
-                            )
-                            if _match:
-                                _kept.append(_d)
-                            else:
-                                _removed.append(_d)
-                        if _kept:
-                            _kept_meals_ex[_mt] = _kept
-                        _removed_extras.extend(_removed)
-                    if _kept_meals_ex:
-                        _explicit_slots[_date] = _kept_meals_ex
-                if _removed_extras:
-                    logger.info(
-                        "[PLAN_AHEAD_PIPELINE] explicit-dish filter: kept %s, stripped extra: %s",
-                        _requested, _removed_extras,
-                    )
-                    new_meal_plan_slots = _explicit_slots
-                    new_meal_plan = {
-                        d: [dish for mt_dishes in meals.values() for dish in mt_dishes]
-                        for d, meals in new_meal_plan_slots.items()
-                    }
-                    _kept_dishes_ex: set = {
-                        dish for meals in new_meal_plan_slots.values()
-                        for mt_dishes in meals.values() for dish in mt_dishes
-                    }
-                    new_dish_ingredients = {k: v for k, v in new_dish_ingredients.items() if k in _kept_dishes_ex}
-                    new_dish_slots = {k: v for k, v in new_dish_slots.items() if k in _kept_dishes_ex}
-                    shopping_list = compute_shopping_list(new_dish_ingredients)
 
-                    # Rebuild the response message to match what was actually saved.
-                    # The LLM's original message mentioned dishes that were filtered out.
-                    _meal_type_labels = {"breakfast": "早餐", "lunch": "午餐", "dinner": "晚餐", "snack": "加餐"}
-                    _lines: list = []
-                    for _d in sorted(new_meal_plan_slots):
-                        for _mt, _ds in new_meal_plan_slots[_d].items():
-                            _mt_label = _meal_type_labels.get(_mt, _mt)
-                            _dish_str = "、".join(_ds)
-                            _lines.append(f"📅 {_d} {_mt_label}: {_dish_str}")
-                    if _lines:
-                        _verb = "已为您" + ("添加" if action == "add" else "调整为")
-                        user_message = _verb + "\n" + "\n".join(_lines)
+                # Safety net: if NONE of the requested (named) dishes appear in the
+                # new plan output, the user named them as the SOURCE of a replacement
+                # (e.g. "把X换成另一道类似的菜"), not as a dish to ADD.
+                # The main LLM already generated the correct replacement — skip filtering.
+                _all_new_dish_names: set = {
+                    d.lower().replace(" ", "")
+                    for _meals in new_meal_plan_slots.values()
+                    for _mt_dishes in _meals.values()
+                    for d in _mt_dishes
+                }
+                _any_requested_in_output = any(
+                    _req.lower().replace(" ", "") in _d
+                    or _d in _req.lower().replace(" ", "")
+                    for _req in _requested
+                    for _d in _all_new_dish_names
+                )
+                if not _any_requested_in_output:
                     logger.info(
-                        "[PLAN_AHEAD_PIPELINE] explicit-dish filter: rebuilt response message to match filtered plan."
+                        "[PLAN_AHEAD_PIPELINE] explicit-dish filter SKIPPED: "
+                        "named dishes %s absent from new plan — they were the SOURCE of replacement.",
+                        _requested,
                     )
+                else:
+                    _explicit_slots: dict = {}
+                    _removed_extras: list = []
+                    for _date, _meals in new_meal_plan_slots.items():
+                        _kept_meals_ex = {}
+                        for _mt, _dishes in _meals.items():
+                            # Keep a dish if it fuzzy-matches any requested dish name
+                            _kept: list = []
+                            _removed: list = []
+                            for _d in _dishes:
+                                _d_lower = _d.lower().replace(" ", "")
+                                _match = any(
+                                    _req.lower().replace(" ", "") in _d_lower
+                                    or _d_lower in _req.lower().replace(" ", "")
+                                    for _req in _requested
+                                )
+                                if _match:
+                                    _kept.append(_d)
+                                else:
+                                    _removed.append(_d)
+                            if _kept:
+                                _kept_meals_ex[_mt] = _kept
+                            _removed_extras.extend(_removed)
+                        if _kept_meals_ex:
+                            _explicit_slots[_date] = _kept_meals_ex
+                    if _removed_extras:
+                        logger.info(
+                            "[PLAN_AHEAD_PIPELINE] explicit-dish filter: kept %s, stripped extra: %s",
+                            _requested, _removed_extras,
+                        )
+                        new_meal_plan_slots = _explicit_slots
+                        new_meal_plan = {
+                            d: [dish for mt_dishes in meals.values() for dish in mt_dishes]
+                            for d, meals in new_meal_plan_slots.items()
+                        }
+                        _kept_dishes_ex: set = {
+                            dish for meals in new_meal_plan_slots.values()
+                            for mt_dishes in meals.values() for dish in mt_dishes
+                        }
+                        new_dish_ingredients = {k: v for k, v in new_dish_ingredients.items() if k in _kept_dishes_ex}
+                        new_dish_slots = {k: v for k, v in new_dish_slots.items() if k in _kept_dishes_ex}
+                        shopping_list = compute_shopping_list(new_dish_ingredients)
+
+                        # Rebuild the response message to match what was actually saved.
+                        _meal_type_labels = {"breakfast": "早餐", "lunch": "午餐", "dinner": "晚餐", "snack": "加餐"}
+                        _lines: list = []
+                        for _d in sorted(new_meal_plan_slots):
+                            for _mt, _ds in new_meal_plan_slots[_d].items():
+                                _mt_label = _meal_type_labels.get(_mt, _mt)
+                                _dish_str = "、".join(_ds)
+                                _lines.append(f"📅 {_d} {_mt_label}: {_dish_str}")
+                        if _lines:
+                            _verb = "已为您" + ("添加" if action == "add" else "调整为")
+                            user_message = _verb + "\n" + "\n".join(_lines)
+                        logger.info(
+                            "[PLAN_AHEAD_PIPELINE] explicit-dish filter: rebuilt response message to match filtered plan."
+                        )
 
         # ---- Step 4d: For 'add', strip echoed-back confirmed dates ----
         # The LLM may include existing confirmed dates in its output (copied from context).

@@ -250,35 +250,35 @@ async def test_single_dish_request_strips_hallucinated_extra():
     Tier-2 query-substring extraction must keep 小笼包 and strip 蒜蓉油麦菜.
     """
     from datetime import date
+    from app.skills.plan_ahead import (
+        ClassifyDishIntentSkill,
+        ClassifyMealActionSkill,
+        ExtractIngredientsSkill,
+        InitPlanningQueueSkill,
+    )
     today = date.today().strftime("%Y-%m-%d")
     p = _pipeline()
     storage = _mock_storage()
 
     # Mock: LLM main call returns add + two dishes (one hallucinated)
     main_llm_resp = _make_llm_response("add", today, "breakfast", ["小笼包", "蒜蓉油麦菜"])
-    # Mock: dish-intent classifier call fails with bad JSON → triggers keyword fallback
-    bad_classifier_resp = MagicMock()
-    bad_classifier_resp.raise_for_status = MagicMock()
-    bad_classifier_resp.json.return_value = {
-        "candidates": [{"content": {"parts": [{"text": "not json {{{{"}]}}]
-    }
 
-    call_count = {"n": 0}
+    # Patch all Skill.execute methods so only the main LLM httpx call is needed
+    _dish_intent_result = {"is_explicit": False, "dishes": [], "intent": "EXPLICIT_HINT"}
+    _action_result = {"action": "add", "reason": "keyword fallback"}
+    _ingredients_result = {"ingredients": [], "target_date": None, "target_meal_type": None}
+    _queue_result = {"has_planning_intent": False, "slots": []}
 
     async def _mock_post(url, **kwargs):
-        call_count["n"] += 1
         resp = MagicMock()
         resp.raise_for_status = MagicMock()
-        if call_count["n"] == 2:
-            # Second call = main LLM structured response
-            # (Call 1 is now the Layer-0 dish-intent classifier added before Phase 1a)
-            resp.json.return_value = main_llm_resp
-        else:
-            # All other calls = dish-intent classifier (bad JSON → keyword fallback)
-            resp.json.return_value = bad_classifier_resp.json.return_value
+        resp.json.return_value = main_llm_resp
         return resp
 
-    with patch.object(p, "_init_planning_queue", AsyncMock(return_value=[])), \
+    with patch.object(ClassifyDishIntentSkill, "execute", AsyncMock(return_value=_dish_intent_result)), \
+         patch.object(ClassifyMealActionSkill, "execute", AsyncMock(return_value=_action_result)), \
+         patch.object(ExtractIngredientsSkill, "execute", AsyncMock(return_value=_ingredients_result)), \
+         patch.object(InitPlanningQueueSkill, "execute", AsyncMock(return_value=_queue_result)), \
          patch("httpx.AsyncClient.post", new_callable=AsyncMock, side_effect=_mock_post):
         result = await p.execute(
             owner_id=_OWNER,

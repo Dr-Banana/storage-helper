@@ -2,11 +2,72 @@
 Plan Ahead State Manager: Stores and retrieves meal planning state per user.
 Uses in-memory storage keyed by owner_id. For production, consider Redis or DB.
 """
+from enum import Enum
 from typing import Dict, Any, Optional, List, Set, Union
 from datetime import datetime, timezone
 import logging
 
 logger = logging.getLogger(__name__)
+
+
+class PipelinePhase(str, Enum):
+    """
+    Explicit conversational phase of the PLAN_AHEAD pipeline.
+
+    Replaces the scattered boolean/string flags that previously drove
+    branching logic (is_draft, last_pipeline_action, pending_planning_queue,
+    meal_planning_queue, etc.).  Each phase maps to a single handler method
+    in PlanAheadPipeline, making execute() a clean dispatcher.
+
+    Transitions:
+        IDLE ──────────────────────────────────► AWAITING_DATE_CONFIRM
+              (multi-day planning request)
+        AWAITING_DATE_CONFIRM ─(confirmed)────► IN_QUEUE
+                              ─(corrected)───► AWAITING_DATE_CONFIRM
+                              ─(unclear)─────► AWAITING_DATE_CONFIRM
+
+        IDLE / DRAFT_ACTIVE ──(ask guard)─────► AWAITING_CLARIFICATION
+        AWAITING_CLARIFICATION ─(answered)────► IDLE (or IN_QUEUE)
+
+        IN_QUEUE ─(slot planned & accepted)──► IN_QUEUE (next slot)
+                 ─(queue exhausted)──────────► IDLE
+    """
+
+    # No active session; normal add/modify/recommend intent handling.
+    IDLE = "idle"
+
+    # _init_planning_queue detected a multi-day intent and emitted a
+    # date-range confirmation question.  Waiting for user's yes/no/correct.
+    AWAITING_DATE_CONFIRM = "awaiting_date_confirm"
+
+    # User confirmed (or we bypassed confirmation for single-slot requests).
+    # meal_planning_queue is populated; pipeline pops one slot per turn.
+    IN_QUEUE = "in_queue"
+
+    # is_draft=True; a plan has been recommended but not yet confirmed/saved.
+    DRAFT_ACTIVE = "draft_active"
+
+    # Pipeline asked the user a clarifying question (action=ask).
+    # Waiting for their answer before proceeding.
+    AWAITING_CLARIFICATION = "awaiting_clarification"
+
+
+def get_phase(state: Dict[str, Any]) -> PipelinePhase:
+    """
+    Derive the current PipelinePhase from an existing state dict.
+
+    This is the single authoritative place that maps legacy boolean/string
+    flags to the new phase enum, so all call sites read the same logic.
+    """
+    if state.get("meal_planning_queue"):
+        return PipelinePhase.IN_QUEUE
+    if state.get("pending_planning_queue") and state.get("last_pipeline_action") == "ask_confirm_dates":
+        return PipelinePhase.AWAITING_DATE_CONFIRM
+    if state.get("last_pipeline_action") == "ask":
+        return PipelinePhase.AWAITING_CLARIFICATION
+    if state.get("is_draft"):
+        return PipelinePhase.DRAFT_ACTIVE
+    return PipelinePhase.IDLE
 
 # Sentinel value to distinguish "not provided" from "explicitly None (clear)"
 _UNSET = object()
