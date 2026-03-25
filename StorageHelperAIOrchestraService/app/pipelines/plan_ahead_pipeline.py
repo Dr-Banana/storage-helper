@@ -1739,12 +1739,30 @@ class PlanAheadPipeline:
         history: List[Dict],
         user_input: str,
         max_attempts: int = 3,
+        max_history_messages: int = 20,
     ) -> Optional[Dict[str, Any]]:
-        """Single structured LLM call with up to `max_attempts` retries on transient failures."""
+        """Single structured LLM call with up to `max_attempts` retries on transient failures.
+
+        `max_history_messages` caps the number of history messages included in the request
+        (default 20 = 10 user/model turn pairs) to prevent unbounded token growth in long
+        sessions. The slice always starts on a user-role message so the contents array
+        begins with the correct role for the Gemini API.
+        """
         import asyncio
 
+        # Truncate history to the most recent N messages, then ensure we start with a
+        # user message (drop a leading model message if the slice lands mid-turn).
+        _history = (history or [])[-max_history_messages:]
+        if _history and _history[0].get("role") != "user":
+            _history = _history[1:]
+        if len(history or []) > max_history_messages:
+            logger.debug(
+                f"[PLAN_AHEAD_PIPELINE] _call_llm: history truncated "
+                f"{len(history)} → {len(_history)} messages (max={max_history_messages})"
+            )
+
         contents = []
-        for msg in (history or []):
+        for msg in _history:
             role = "user" if msg.get("role") == "user" else "model"
             contents.append({"role": role, "parts": [{"text": msg.get("content", "")}]})
         contents.append({"role": "user", "parts": [{"text": user_input}]})
