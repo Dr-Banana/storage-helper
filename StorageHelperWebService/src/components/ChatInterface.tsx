@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, memo } from 'react'
-import { X, Send, FileText, Sparkles, User, BrainCircuit, Check, Calendar, ShoppingCart, ArrowRight, ChefHat, Shuffle } from 'lucide-react'
+import { X, Send, FileText, Sparkles, User, BrainCircuit, Check, Calendar, ShoppingCart, ArrowRight, ChefHat, Shuffle, Trash2 } from 'lucide-react'
 import { Link, useNavigate } from 'react-router-dom'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -571,6 +571,8 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ isOpen, onClose }) => {
   const [activeContext, setActiveContext] = useState<any>(null)
   // Indices of ASK_OVERWRITE messages whose diff card has been acted on (saved or dismissed).
   const [dismissedOverwrites, setDismissedOverwrites] = useState<Set<number>>(new Set())
+  const [clearConfirming, setClearConfirming] = useState(false)
+  const clearConfirmTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
 
@@ -595,6 +597,20 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ isOpen, onClose }) => {
       setTimeout(() => inputRef.current?.focus(), 150)
     }
   }, [isOpen])
+
+  const handleClearMessages = () => {
+    if (!clearConfirming) {
+      setClearConfirming(true)
+      clearConfirmTimerRef.current = setTimeout(() => setClearConfirming(false), 3000)
+      return
+    }
+    if (clearConfirmTimerRef.current) clearTimeout(clearConfirmTimerRef.current)
+    setClearConfirming(false)
+    setMessages([{ role: 'model', content: 'Hi! I\'m your Home AI. How can I help you today?' }])
+    setActiveContext(null)
+    setDismissedOverwrites(new Set())
+    setInput('')
+  }
 
   const handleSend = async (overrideInput?: string, overrideContext?: any) => {
     let messageToSend = overrideInput || input.trim()
@@ -801,6 +817,20 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ isOpen, onClose }) => {
           </div>
         </div>
         <div className="flex items-center gap-1">
+          <button
+            onClick={handleClearMessages}
+            title={clearConfirming ? '再次点击确认清除' : '清除对话记录'}
+            className={`flex items-center gap-1 rounded-lg px-2 py-2 transition-all active:scale-95 ${
+              clearConfirming
+                ? 'bg-red-500 text-white hover:bg-red-600'
+                : 'text-gray-400 hover:text-red-500 hover:bg-red-50'
+            }`}
+          >
+            <Trash2 size={16} />
+            {clearConfirming && (
+              <span className="text-[11px] font-semibold leading-none">确认?</span>
+            )}
+          </button>
           <button onClick={() => { onClose(); setActiveContext(null); }} className="p-2 text-gray-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-colors">
             <X size={18} />
           </button>
