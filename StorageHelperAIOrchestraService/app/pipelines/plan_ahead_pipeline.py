@@ -1181,18 +1181,24 @@ class PlanAheadPipeline:
             f"\nThis rule overrides everything else, regardless of what language the user writes in."
         )
 
-        # --- User meal blueprint (hard constraints from DB) ---
+        # --- User meal blueprint (soft defaults from DB, overridable by user in conversation) ---
         if user_profile:
-            ctx += "\n\n=== USER MEAL BLUEPRINT (HARD CONSTRAINTS — MUST FOLLOW) ==="
+            ctx += "\n\n=== USER MEAL BLUEPRINT (DEFAULT PREFERENCES — can be overridden by user's explicit requests) ==="
+            ctx += (
+                "\n⚠️  OVERRIDE RULE: If the user explicitly says they DON'T want something"
+                " (e.g. '不要蔬菜', '不要汤', '去掉这道菜', 'no soup today', 'remove the vegetable dish'),"
+                " ALWAYS honor that request immediately — modify or remove the dish and confirm the change."
+                " These defaults are guides for AI-generated plans, NOT mandatory rules that override user intent."
+            )
             _servings = user_profile.get("default_servings", 1)
             ctx += f"\n- Default servings per dish: {_servings} person(s). Scale all ingredient quantities accordingly."
             _ratio = user_profile.get("meat_veg_ratio", "1:1:1")
             _ratio_parts = _ratio.split(":")
             if len(_ratio_parts) == 3:
-                ctx += f"\n- Dish composition per meal: {_ratio_parts[0]} meat dish(es), {_ratio_parts[1]} vegetable dish(es), {_ratio_parts[2]} staple(s)."
+                ctx += f"\n- Preferred dish composition per meal: {_ratio_parts[0]} meat dish(es), {_ratio_parts[1]} vegetable dish(es), {_ratio_parts[2]} staple(s). (User can override this for any specific meal.)"
             _soup = user_profile.get("include_soup", True)
             if _soup:
-                ctx += "\n- MUST include at least one soup dish in every meal plan."
+                ctx += "\n- Prefers at least one soup dish per meal — suggest one when generating plans, but skip if the user says they don't want soup."
             _cal = user_profile.get("calorie_target")
             if _cal:
                 ctx += f"\n- Per-meal calorie target: ~{_cal} kcal. Prefer lighter dishes if near the limit."
@@ -1363,7 +1369,7 @@ class PlanAheadPipeline:
         # ClassifyMealActionSkill already determined the action — inject as a hard directive
         # so the main LLM follows it instead of guessing from the giant prompt.
         if precomputed_action == "suggest_options" and not queue_target_date:
-            ctx += (
+            _suggest_directive = (
                 "\n\n=== ACTION DIRECTIVE (mandatory — do not override) ==="
                 "\nThe system pre-analyzed the user's request and determined:"
                 "\n  The user expressed a FOOD PREFERENCE or CATEGORY (not a specific dish)."
@@ -1372,7 +1378,30 @@ class PlanAheadPipeline:
                 "\n• Each option: 2-3 dish names only, ingredients=[] (filled when user selects)."
                 "\n• Do NOT use action='add', 'recommend', or 'ask'."
                 "\n• Do NOT save anything yet — present options for the user to choose from."
+                "\n• CRITICAL — REJECTED DISHES: Do NOT include ANY dish from the"
+                " 'DISHES ALREADY TRIED / REJECTED THIS SESSION' list above in any option."
+                " If 馒头, 米饭, or any other dish is in the rejected list, do NOT suggest it."
             )
+            # If a draft is currently active, tell the LLM to carry forward confirmed preferences.
+            if is_draft:
+                _draft_slots = state.get("meal_plan_slots") or {}
+                _draft_staples: List[str] = []
+                _draft_mains: List[str] = []
+                for _ds_date, _ds_meals in _draft_slots.items():
+                    for _ds_mt, _ds_dishes in _ds_meals.items():
+                        for _ds_dish in (_ds_dishes or []):
+                            _ds_slot = (state.get("dish_ingredients") or {}).get(_ds_dish)
+                            # Rough staple detection by dish name keywords
+                            if any(kw in _ds_dish for kw in ("饭", "面", "粥", "馒", "包", "饼", "米", "noodle", "rice", "bread")):
+                                _draft_staples.append(_ds_dish)
+                            else:
+                                _draft_mains.append(_ds_dish)
+                if _draft_staples:
+                    _suggest_directive += (
+                        f"\n• CARRY FORWARD: The user's current draft already has staple: {', '.join(_draft_staples)}."
+                        " Keep the same staple in BOTH options unless the user explicitly asks to change it."
+                    )
+            ctx += _suggest_directive
         elif precomputed_action == "ask" and not queue_target_date:
             ctx += (
                 "\n\n=== ACTION DIRECTIVE (mandatory — do not override) ==="
@@ -1445,6 +1474,12 @@ class PlanAheadPipeline:
                 "\n- In DRAFT MODE: prefer acting on the user's intent over asking clarifying questions."
                 " A loose dish reference (wrong name, wrong date) is NOT a reason to use 'ask' —"
                 " make a sensible substitution and tell the user what you changed."
+                "\n- REMOVE DISH IN DRAFT: If the user says they don't want a dish"
+                " (e.g. '不要蔬菜', '去掉这道菜', '我不想要汤了', '删掉青菜', 'remove the soup', 'I don't want the vegetable dish'):"
+                "\n  * Use action='modify' and remove that dish from the plan (keep all other dishes as-is)."
+                "\n  * Do NOT replace it with another dish unless the user asks for a replacement."
+                "\n  * Do NOT refuse because of meal blueprint defaults — user's explicit removal always wins."
+                "\n  * Confirm in user_message what was removed."
             )
         ctx += "\n\n--- MULTI-TURN RECOMMENDATION FLOW (read carefully) ---"
         ctx += (
@@ -2404,6 +2439,7 @@ class PlanAheadPipeline:
         language: Optional[str],
         user_timezone: Optional[str],
         intent_result: Any,
+        prerouted_action: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
         """Phase 1a: detect fresh multi-slot planning intent and either enter queue
         mode directly (single slot) or ask for date-range confirmation (multiple slots).
@@ -2428,6 +2464,17 @@ class PlanAheadPipeline:
                 "[PLAN_AHEAD_PIPELINE] Phase 1a short-circuit: explicit dish (%s) — "
                 "skipping _init_planning_queue, falling through to main LLM.",
                 dish_clf.get("dishes"),
+            )
+            return None
+
+        # If the action has already been pre-classified as add/modify/remove,
+        # the user is operating on a specific dish/slot — NOT starting a fresh
+        # multi-meal planning session. Skip queue init to avoid misrouting.
+        if prerouted_action in ("add", "modify", "remove"):
+            logger.info(
+                "[PLAN_AHEAD_PIPELINE] Phase 1a short-circuit: prerouted action=%s — "
+                "skipping InitPlanningQueueSkill.",
+                prerouted_action,
             )
             return None
 
@@ -2625,6 +2672,7 @@ class PlanAheadPipeline:
         if result := await self._handle_phase1a_queue_init(
             owner_id, user_input, current_state, is_currently_draft,
             _is_explicit_dish, _dish_clf, language, user_timezone, intent_result,
+            prerouted_action=_prerouted_action,
         ):
             return result
         current_state = get_plan_state(owner_id)
@@ -3220,12 +3268,25 @@ class PlanAheadPipeline:
                         _requested,
                     )
                 else:
+                    # Collect dishes that were already in the draft BEFORE this turn.
+                    # In draft mode, the LLM returns the full modified draft (not just the
+                    # newly-added dish), so we must not strip pre-existing draft content.
+                    # Example: draft has [番茄炖排骨, 蚝油生菜]; user says "加个米饭，不要生菜"
+                    # → LLM correctly returns [番茄炖排骨, 米饭]; filter must NOT strip 番茄炖排骨.
+                    _pre_draft_dishes: set = set()
+                    if is_currently_draft:
+                        for _pd_meals in (current_state.get("meal_plan_slots") or {}).values():
+                            for _pd_dishes in _pd_meals.values():
+                                _pre_draft_dishes.update(_pd_dishes)
+
                     _explicit_slots: dict = {}
                     _removed_extras: list = []
                     for _date, _meals in new_meal_plan_slots.items():
                         _kept_meals_ex = {}
                         for _mt, _dishes in _meals.items():
-                            # Keep a dish if it fuzzy-matches any requested dish name
+                            # Keep a dish if it:
+                            #   (a) fuzzy-matches any explicitly requested dish name, OR
+                            #   (b) was already present in the draft before this turn
                             _kept: list = []
                             _removed: list = []
                             for _d in _dishes:
@@ -3234,7 +3295,7 @@ class PlanAheadPipeline:
                                     _req.lower().replace(" ", "") in _d_lower
                                     or _d_lower in _req.lower().replace(" ", "")
                                     for _req in _requested
-                                )
+                                ) or _d in _pre_draft_dishes
                                 if _match:
                                     _kept.append(_d)
                                 else:
@@ -3333,13 +3394,19 @@ class PlanAheadPipeline:
 
             # Compute which dishes were replaced/removed in this operation so we can track
             # them as "rejected" and avoid re-suggesting them in subsequent turns.
-            # In queue mode, rejected-dish tracking is scoped to the target slot's date only
-            # (the state already holds previously-planned days whose dishes must not be flagged).
+            # IMPORTANT: always scope to only the dates that are actually being modified/replaced.
+            # Using all dates in state would wrongly mark dishes from OTHER dates (e.g. existing DB
+            # meals) as rejected just because they're absent from the new single-day plan.
             if _queue_target_slot:
                 _slot_date_only = _queue_target_slot.split("|")[0] if "|" in _queue_target_slot else _queue_target_slot
                 _prev_for_tracking = {_slot_date_only: (current_state.get("meal_plan_slots") or {}).get(_slot_date_only, {})}
             else:
-                _prev_for_tracking = current_state.get("meal_plan_slots") or {}
+                # Scope to dates actually present in the new plan — never bleed in unrelated dates.
+                _new_plan_dates = set(new_meal_plan_slots.keys())
+                _prev_for_tracking = {
+                    d: v for d, v in (current_state.get("meal_plan_slots") or {}).items()
+                    if d in _new_plan_dates
+                }
             _prev_dishes: set = set()
             for _pdate, _pmeals in _prev_for_tracking.items():
                 for _pmt, _pdishes in _pmeals.items():

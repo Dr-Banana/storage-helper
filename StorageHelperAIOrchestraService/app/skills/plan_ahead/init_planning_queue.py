@@ -69,13 +69,21 @@ meal_times values: breakfast, lunch, dinner
 
 Rules:
 - view/delete/modify requests → has_planning_intent: false
+- CRITICAL RULE — 'ADD/MODIFY ACTION = NOT PLANNING': If the user's message
+  contains an explicit add/remove/modify verb targeting a specific meal slot or dish
+  (e.g. 再加个, 加一个, 帮我加, 不要XX了, 把XX换成, 删掉, 去掉), you MUST return
+  has_planning_intent: false. These are single-slot operations, not fresh meal planning.
+  Examples: "晚饭再加个清炒蔬菜" → false; "把米饭换成馒头" → false; "不要蔬菜了" → false.
 - CRITICAL RULE — 'HAS DISH = NOT PLANNING': If the user's message contains a
   SPECIFIC DISH NAME (a concrete food item, e.g. 芋艿猪排骨, 红烧肉, 火锅, 水煮鱼,
-  小笼包, 饺子), you MUST return has_planning_intent: false.
-  Examples: "今天晚上吃芋艿猪排骨" → false; "做个红烧肉" → false; "吃个小笼包" → false.
+  小笼包, 饺子, 清炒蔬菜, 清炒XX, 红烧XX), you MUST return has_planning_intent: false.
+  Examples: "今天晚上吃芋艿猪排骨" → false; "做个红烧肉" → false; "吃个小笼包" → false;
+  "晚饭再加个清炒蔬菜" → false.
   Contrast: "今天晚上吃什么" → true; "帮我规划今天三餐" → true.
 - Food categories (海鲜, 肉, 蔬菜, 辣的, 清淡, 日式, 家常菜) are NOT specific dishes.
   A preference like "我想吃个海鲜" IS a planning request → has_planning_intent: true.
+  However "再加个清炒蔬菜" is a SPECIFIC DISH (even though 蔬菜 is a category, 清炒蔬菜
+  is a concrete dish name) combined with an add verb → has_planning_intent: false.
 - If user asks AI to SUGGEST or PLAN meals without naming a specific dish →
   has_planning_intent: true, meal_times must reflect mentioned meal time
   (晚上/晚餐/dinner → ['dinner']; 早上/早餐 → ['breakfast']; 中午/午餐 → ['lunch']);

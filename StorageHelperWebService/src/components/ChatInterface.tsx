@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, memo } from 'react'
-import { X, Send, FileText, Sparkles, User, BrainCircuit, Check, Calendar, ShoppingCart, ArrowRight, ChefHat, PencilLine, Shuffle } from 'lucide-react'
+import { X, Send, FileText, Sparkles, User, BrainCircuit, Check, Calendar, ShoppingCart, ArrowRight, ChefHat, Shuffle } from 'lucide-react'
 import { Link, useNavigate } from 'react-router-dom'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -157,13 +157,12 @@ interface MealActionCardProps {
   onConfirm: () => void
   confirmLabel: string
   onReplace: (dishName: string) => void
-  onPrepareAdjustment: (dishName: string) => void
 }
 
 const MealActionCard: React.FC<MealActionCardProps> = ({
   title, statusLabel, statusVariant,
   mealPlanSlots, dishSlots, sortedDates,
-  onConfirm, confirmLabel, onReplace, onPrepareAdjustment,
+  onConfirm, confirmLabel, onReplace,
 }) => {
   const dishSlotMap = dishSlots || {}
 
@@ -238,13 +237,6 @@ const MealActionCard: React.FC<MealActionCardProps> = ({
               {/* Action buttons — revealed on row hover */}
               <div className="flex items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100">
                 <button
-                  onClick={() => onPrepareAdjustment(name)}
-                  title="调整细节"
-                  className="flex h-6 items-center gap-1 rounded-lg px-1.5 text-xs font-medium text-gray-500 transition-colors hover:bg-home-primary-50 hover:text-home-primary-600"
-                >
-                  <PencilLine size={12} /> 调整
-                </button>
-                <button
                   onClick={() => onReplace(name)}
                   title="直接换掉"
                   className="flex h-6 items-center gap-1 rounded-lg px-1.5 text-xs font-medium text-gray-500 transition-colors hover:bg-gray-100 hover:text-gray-700"
@@ -276,10 +268,9 @@ interface MealOptionsCardProps {
   options: DishOption[]
   onConfirm: (optionId: string, label: string) => void
   onReplace: (optionId: string, label: string, dishName: string) => void
-  onPrepareAdjustment: (optionId: string, label: string, dishName: string) => void
 }
 
-const MealOptionsCard: React.FC<MealOptionsCardProps> = ({ options, onConfirm, onReplace, onPrepareAdjustment }) => {
+const MealOptionsCard: React.FC<MealOptionsCardProps> = ({ options, onConfirm, onReplace }) => {
   if (!options || options.length === 0) return null
   return (
     <div className="mt-3 w-full space-y-3">
@@ -298,7 +289,6 @@ const MealOptionsCard: React.FC<MealOptionsCardProps> = ({ options, onConfirm, o
             onConfirm={() => onConfirm(opt.option_id, opt.label)}
             confirmLabel="确认此方案"
             onReplace={(dishName) => onReplace(opt.option_id, opt.label, dishName)}
-            onPrepareAdjustment={(dishName) => onPrepareAdjustment(opt.option_id, opt.label, dishName)}
           />
         )
       })}
@@ -311,10 +301,9 @@ interface DraftPlanCardProps {
   actionData: any
   onConfirm: () => void
   onReplace: (dishName: string) => void
-  onPrepareAdjustment: (dishName: string) => void
 }
 
-const DraftPlanCard: React.FC<DraftPlanCardProps> = ({ actionData, onConfirm, onReplace, onPrepareAdjustment }) => {
+const DraftPlanCard: React.FC<DraftPlanCardProps> = ({ actionData, onConfirm, onReplace }) => {
   const mealPlanSlots: Record<string, Record<string, string[]>> = actionData?.meal_plan_slots || {}
   const sortedDates = Object.keys(mealPlanSlots).sort()
   if (!sortedDates.length) return null
@@ -329,7 +318,6 @@ const DraftPlanCard: React.FC<DraftPlanCardProps> = ({ actionData, onConfirm, on
       onConfirm={onConfirm}
       confirmLabel="确认保存计划"
       onReplace={onReplace}
-      onPrepareAdjustment={onPrepareAdjustment}
     />
   )
 }
@@ -345,17 +333,15 @@ interface MessageItemProps {
   onOverwriteDismiss?: () => void;
   onSelectOption?: (optionId: string, label: string) => void;
   onReplaceInOption?: (optionId: string, label: string, dishName: string) => void;
-  onPrepareAdjustmentInOption?: (optionId: string, label: string, dishName: string) => void;
   onConfirmDraft?: () => void;
   onReplaceDraftDish?: (dishName: string) => void;
-  onPrepareAdjustmentDraftDish?: (dishName: string) => void;
 }
 
 const MessageItem = memo(({
   msg, index, setMessages, setIsLoading,
   overwriteDismissed, onOverwriteSaved, onOverwriteDismiss,
-  onSelectOption, onReplaceInOption, onPrepareAdjustmentInOption,
-  onConfirmDraft, onReplaceDraftDish, onPrepareAdjustmentDraftDish,
+  onSelectOption, onReplaceInOption,
+  onConfirmDraft, onReplaceDraftDish,
 }: MessageItemProps) => {
     const navigate = useNavigate();
 
@@ -485,7 +471,6 @@ const MessageItem = memo(({
             options={msg.actionData.dish_options}
             onConfirm={onSelectOption}
             onReplace={onReplaceInOption || (() => {})}
-            onPrepareAdjustment={onPrepareAdjustmentInOption || (() => {})}
           />
         )}
 
@@ -495,7 +480,6 @@ const MessageItem = memo(({
             actionData={msg.actionData}
             onConfirm={onConfirmDraft}
             onReplace={onReplaceDraftDish || (() => {})}
-            onPrepareAdjustment={onPrepareAdjustmentDraftDish || (() => {})}
           />
         )}
 
@@ -585,7 +569,6 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ isOpen, onClose }) => {
   const [isLoading, setIsLoading] = useState(false)
   const [input, setInput] = useState('')
   const [activeContext, setActiveContext] = useState<any>(null)
-  const [pendingAdjustment, setPendingAdjustment] = useState<{ dishName: string } | null>(null)
   // Indices of ASK_OVERWRITE messages whose diff card has been acted on (saved or dismissed).
   const [dismissedOverwrites, setDismissedOverwrites] = useState<Set<number>>(new Set())
   const messagesEndRef = useRef<HTMLDivElement>(null)
@@ -617,12 +600,6 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ isOpen, onClose }) => {
     let messageToSend = overrideInput || input.trim()
     const contextToSend = overrideContext || activeContext
     if (!messageToSend || !userId || isLoading) return
-
-    // Prepend adjustment context if the user is replying to a targeted dish
-    if (pendingAdjustment && !overrideInput) {
-      messageToSend = `[针对菜品：${pendingAdjustment.dishName}] 用户要求：${messageToSend}`
-      setPendingAdjustment(null)
-    }
 
     if (!overrideInput) setInput('')
     setMessages(prev => [...prev, { role: 'user', content: messageToSend }])
@@ -739,11 +716,6 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ isOpen, onClose }) => {
     handleSend(`我想要方案${optionId}，但请把"${dishName}"换成另一道类似的菜，其他菜品保持不变`)
   }
 
-  /** 用户点击 📝 调整 — 进入引用模式，不直接发送 */
-  const handlePrepareAdjustmentInOption = (_optionId: string, _label: string, dishName: string) => {
-    setPendingAdjustment({ dishName })
-  }
-
   /** 草稿方案：用户点击"确认保存计划" */
   const handleConfirmDraft = () => {
     handleSend('确认保存计划')
@@ -752,11 +724,6 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ isOpen, onClose }) => {
   /** 草稿方案：用户点击 换菜 — 直接替换 */
   const handleReplaceDraftDish = (dishName: string) => {
     handleSend(`当前方案中，请把"${dishName}"换成另一道类似的菜，其他菜品保持不变`)
-  }
-
-  /** 草稿方案：用户点击 📝 调整 — 进入引用模式 */
-  const handlePrepareAdjustmentDraftDish = (dishName: string) => {
-    setPendingAdjustment({ dishName })
   }
 
   // Event Listeners (Open Chat, Context Updates)
@@ -859,10 +826,8 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ isOpen, onClose }) => {
             onOverwriteDismiss={() => setDismissedOverwrites(prev => new Set([...prev, index]))}
             onSelectOption={handleSelectOption}
             onReplaceInOption={handleReplaceInOption}
-            onPrepareAdjustmentInOption={handlePrepareAdjustmentInOption}
             onConfirmDraft={handleConfirmDraft}
             onReplaceDraftDish={handleReplaceDraftDish}
-            onPrepareAdjustmentDraftDish={handlePrepareAdjustmentDraftDish}
           />
         ))}
         
@@ -888,22 +853,6 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ isOpen, onClose }) => {
           className="relative"
         >
           <div className="w-full overflow-hidden rounded-xl border border-transparent bg-gray-100 transition-all focus-within:border-home-primary-300 focus-within:bg-white focus-within:ring-4 focus-within:ring-home-primary-50">
-            {/* Targeted-reply reference bar */}
-            {pendingAdjustment && (
-              <div className="flex items-center gap-2 border-b border-home-primary-100 bg-home-primary-50 px-3 py-1.5">
-                <PencilLine size={12} className="shrink-0 text-home-primary-500" />
-                <span className="flex-1 truncate text-xs font-medium text-home-primary-700">
-                  正在调整：{pendingAdjustment.dishName}
-                </span>
-                <button
-                  type="button"
-                  onClick={() => setPendingAdjustment(null)}
-                  className="text-home-primary-400 transition-colors hover:text-home-primary-600"
-                >
-                  <X size={13} />
-                </button>
-              </div>
-            )}
             <div className="flex items-end gap-2">
               <textarea
                 ref={inputRef}
@@ -916,11 +865,9 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ isOpen, onClose }) => {
                   }
                 }}
                 placeholder={
-                  pendingAdjustment
-                    ? `想怎么调整"${pendingAdjustment.dishName}"？`
-                    : activeContext
-                      ? 'Type correction...'
-                      : 'Ask me anything...'
+                  activeContext
+                    ? 'Type correction...'
+                    : 'Ask me anything...'
                 }
                 className="flex-1 resize-none border-none bg-transparent py-3.5 pl-4 text-sm text-gray-800 placeholder-gray-400 outline-none focus:ring-0 custom-scrollbar"
                 disabled={isLoading}
