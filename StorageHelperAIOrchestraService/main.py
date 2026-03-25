@@ -1,11 +1,27 @@
 import logging
+import os
+
+# 在所有 app 模块导入之前完成日志配置，确保启动阶段的日志也受控
+_app_env = os.getenv("APP_ENV", "").lower().strip()
+_is_local = _app_env == "local"
+
+_LOG_FORMAT = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+
+if _is_local:
+    # 本地开发：app 代码输出 DEBUG，第三方库保持 WARNING
+    logging.basicConfig(level=logging.WARNING, format=_LOG_FORMAT)
+    logging.getLogger("app").setLevel(logging.DEBUG)
+    _uvicorn_log_level = "debug"
+else:
+    # preprod / prod：只保留 WARNING 及以上（包含 ERROR / CRITICAL）
+    logging.basicConfig(level=logging.WARNING, format=_LOG_FORMAT)
+    logging.getLogger("app").setLevel(logging.WARNING)
+    _uvicorn_log_level = "warning"
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.api.router import api_router
 import uvicorn
-
-logging.basicConfig(level=logging.WARNING)
-logging.getLogger("app").setLevel(logging.INFO)
 
 app = FastAPI(
     title="家用 AI 文件管家 (Orchestra Service)",
@@ -31,5 +47,4 @@ async def root():
     return {"message": "StorageHelper AI Orchestration Service is running. Access /docs for API documentation."}
 
 if __name__ == "__main__":
-    # 使用 Uvicorn 启动服务器
-    uvicorn.run(app, host="0.0.0.0", port=8888)
+    uvicorn.run(app, host="0.0.0.0", port=8888, log_level=_uvicorn_log_level)
