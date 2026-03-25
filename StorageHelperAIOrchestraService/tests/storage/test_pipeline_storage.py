@@ -3,6 +3,34 @@ from unittest.mock import MagicMock, patch, AsyncMock
 from app.storage.pipeline_storage import LocationDataHandler, PipelineStorage
 
 
+# ---------------------------------------------------------------------------
+# Helpers shared by multiple test classes
+# ---------------------------------------------------------------------------
+
+def _make_schedule_for_recent(date_str: str, meal_time: str, dish_names: list) -> dict:
+    """Build a minimal schedule response dict for get_recent_dishes_from_schedules tests."""
+    return {
+        "metadata": {
+            "features": [
+                {
+                    "type": "meal_plan",
+                    "plans": [
+                        {
+                            "date": date_str,
+                            "meals": [
+                                {
+                                    "mealTime": meal_time,
+                                    "dishes": [{"name": n} for n in dish_names],
+                                }
+                            ],
+                        }
+                    ],
+                }
+            ]
+        }
+    }
+
+
 def _make_schedule(*dishes):
     """Helper: build a minimal schedule dict containing the given dish dicts."""
     return {
@@ -314,4 +342,181 @@ class TestConvertToFeatureFormatDishDataPreservation:
         assert dish is not None
         # Steps are NOT restored via the legacy path alone
         assert not dish.get("cookingSteps")
+
+
+# ---------------------------------------------------------------------------
+# get_recent_dishes_from_schedules
+# ---------------------------------------------------------------------------
+
+def _mock_http_response(schedules: list):
+    """Return an AsyncMock that simulates a successful httpx GET returning *schedules*."""
+    mock_resp = MagicMock()
+    mock_resp.raise_for_status = MagicMock()
+    mock_resp.json.return_value = schedules
+    mock_client = AsyncMock()
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+    mock_client.get = AsyncMock(return_value=mock_resp)
+    return mock_client
+
+
+class TestGetRecentDishesFromSchedules:
+    """Unit tests for PipelineStorage.get_recent_dishes_from_schedules."""
+
+    @pytest.mark.asyncio
+    async def test_returns_dishes_from_single_schedule(self):
+        sched = _make_schedule_for_recent("2026-03-20", "dinner", ["宫保鸡丁", "白灼菜心"])
+        with patch("app.storage.pipeline_storage._get_storage_base_url", return_value="http://storage"), \
+             patch("httpx.AsyncClient", return_value=_mock_http_response([sched])):
+            result = await PipelineStorage().get_recent_dishes_from_schedules(owner_id=1)
+
+        names = [e["dish"] for e in result]
+        assert "宫保鸡丁" in names
+        assert "白灼菜心" in names
+
+    @pytest.mark.asyncio
+    async def test_result_sorted_newest_first(self):
+        schedules = [
+            _make_schedule_for_recent("2026-03-15", "lunch",  ["麻婆豆腐"]),
+            _make_schedule_for_recent("2026-03-20", "dinner", ["红烧肉"]),
+            _make_schedule_for_recent("2026-03-10", "breakfast", ["白粥"]),
+        ]
+        with patch("app.storage.pipeline_storage._get_storage_base_url", return_value="http://storage"), \
+             patch("httpx.AsyncClient", return_value=_mock_http_response(schedules)):
+            result = await PipelineStorage().get_recent_dishes_from_schedules(owner_id=1)
+
+        dates = [e["date"] for e in result]
+        assert dates == sorted(dates, reverse=True), "entries should be sorted newest-first"
+
+    @pytest.mark.asyncio
+    async def test_deduplicates_same_dish_same_date(self):
+        # Two separate schedule records with the same dish on the same date
+        sched1 = _make_schedule_for_recent("2026-03-20", "dinner", ["宫保鸡丁"])
+        sched2 = _make_schedule_for_recent("2026-03-20", "dinner", ["宫保鸡丁"])
+        with patch("app.storage.pipeline_storage._get_storage_base_url", return_value="http://storage"), \
+             patch("httpx.AsyncClient", return_value=_mock_http_response([sched1, sched2])):
+            result = await PipelineStorage().get_recent_dishes_from_schedules(owner_id=1)
+
+        matches = [e for e in result if e["dish"] == "宫保鸡丁" and e["date"] == "2026-03-20"]
+        assert len(matches) == 1, "same (dish, date) pair should appear only once"
+
+    @pytest.mark.asyncio
+    async def test_same_dish_different_dates_kept_separately(self):
+        sched1 = _make_schedule_for_recent("2026-03-18", "dinner", ["麻婆豆腐"])
+        sched2 = _make_schedule_for_recent("2026-03-22", "dinner", ["麻婆豆腐"])
+        with patch("app.storage.pipeline_storage._get_storage_base_url", return_value="http://storage"), \
+             patch("httpx.AsyncClient", return_value=_mock_http_response([sched1, sched2])):
+            result = await PipelineStorage().get_recent_dishes_from_schedules(owner_id=1)
+
+        mapo_entries = [e for e in result if e["dish"] == "麻婆豆腐"]
+        assert len(mapo_entries) == 2
+
+    @pytest.mark.asyncio
+    async def test_ignores_non_meal_plan_features(self):
+        sched = {
+            "metadata": {
+                "features": [
+                    {"type": "shopping_list", "items": ["葱", "姜"]},
+                    {
+                        "type": "meal_plan",
+                        "plans": [{"date": "2026-03-20", "meals": [{"mealTime": "lunch", "dishes": [{"name": "炒饭"}]}]}],
+                    },
+                ]
+            }
+        }
+        with patch("app.storage.pipeline_storage._get_storage_base_url", return_value="http://storage"), \
+             patch("httpx.AsyncClient", return_value=_mock_http_response([sched])):
+            result = await PipelineStorage().get_recent_dishes_from_schedules(owner_id=1)
+
+        assert result == [{"dish": "炒饭", "date": "2026-03-20"}]
+
+    @pytest.mark.asyncio
+    async def test_skips_dishes_with_empty_name(self):
+        sched = _make_schedule_for_recent("2026-03-20", "dinner", ["", "  ", "红烧肉"])
+        with patch("app.storage.pipeline_storage._get_storage_base_url", return_value="http://storage"), \
+             patch("httpx.AsyncClient", return_value=_mock_http_response([sched])):
+            result = await PipelineStorage().get_recent_dishes_from_schedules(owner_id=1)
+
+        assert len(result) == 1
+        assert result[0]["dish"] == "红烧肉"
+
+    @pytest.mark.asyncio
+    async def test_skips_plans_without_date(self):
+        sched = {
+            "metadata": {
+                "features": [
+                    {
+                        "type": "meal_plan",
+                        "plans": [
+                            {"date": "", "meals": [{"mealTime": "lunch", "dishes": [{"name": "炒饭"}]}]},
+                            {"date": "2026-03-20", "meals": [{"mealTime": "dinner", "dishes": [{"name": "红烧肉"}]}]},
+                        ],
+                    }
+                ]
+            }
+        }
+        with patch("app.storage.pipeline_storage._get_storage_base_url", return_value="http://storage"), \
+             patch("httpx.AsyncClient", return_value=_mock_http_response([sched])):
+            result = await PipelineStorage().get_recent_dishes_from_schedules(owner_id=1)
+
+        names = [e["dish"] for e in result]
+        assert "炒饭" not in names
+        assert "红烧肉" in names
+
+    @pytest.mark.asyncio
+    async def test_empty_schedule_list_returns_empty(self):
+        with patch("app.storage.pipeline_storage._get_storage_base_url", return_value="http://storage"), \
+             patch("httpx.AsyncClient", return_value=_mock_http_response([])):
+            result = await PipelineStorage().get_recent_dishes_from_schedules(owner_id=1)
+
+        assert result == []
+
+    @pytest.mark.asyncio
+    async def test_no_storage_url_returns_empty(self):
+        with patch("app.storage.pipeline_storage._get_storage_base_url", return_value=None):
+            result = await PipelineStorage().get_recent_dishes_from_schedules(owner_id=1)
+
+        assert result == []
+
+    @pytest.mark.asyncio
+    async def test_http_error_returns_empty_not_raise(self):
+        import httpx
+        mock_client = AsyncMock()
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        mock_client.get = AsyncMock(side_effect=httpx.RequestError("timeout"))
+
+        with patch("app.storage.pipeline_storage._get_storage_base_url", return_value="http://storage"), \
+             patch("httpx.AsyncClient", return_value=mock_client):
+            result = await PipelineStorage().get_recent_dishes_from_schedules(owner_id=1)
+
+        assert result == []
+
+    @pytest.mark.asyncio
+    async def test_correct_date_range_params_sent(self):
+        """Verify that start_time and end_time query params span the requested days window."""
+        from datetime import datetime, timezone, timedelta
+
+        captured = {}
+
+        async def fake_get(url, headers=None, params=None):
+            captured["params"] = params
+            resp = MagicMock()
+            resp.raise_for_status = MagicMock()
+            resp.json.return_value = []
+            return resp
+
+        mock_client = AsyncMock()
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        mock_client.get = fake_get
+
+        with patch("app.storage.pipeline_storage._get_storage_base_url", return_value="http://storage"), \
+             patch("httpx.AsyncClient", return_value=mock_client):
+            await PipelineStorage().get_recent_dishes_from_schedules(owner_id=1, days=14)
+
+        start = datetime.fromisoformat(captured["params"]["start_time"])
+        end   = datetime.fromisoformat(captured["params"]["end_time"])
+        delta = end - start
+        assert 13 <= delta.days <= 15, "time range should span ~14 days"
 

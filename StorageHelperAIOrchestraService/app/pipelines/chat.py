@@ -1082,6 +1082,12 @@ LANGUAGE REQUIREMENT: {language_instruction} This applies to ALL text you genera
                     # Fetch user profile for meal blueprint (cuisine weights, disliked ingredients, etc.)
                     _user_profile = await _default_storage.get_user_profile(owner_id)
                     if _user_profile:
+                        # Override recent_dishes with real-time data derived from schedule records
+                        # so the diversity engine always reflects the user's actual meal history
+                        # rather than the potentially stale User.recent_dishes JSON field.
+                        _rt_recent = await _default_storage.get_recent_dishes_from_schedules(owner_id)
+                        _user_profile["recent_dishes"] = _rt_recent
+
                         _disliked   = _user_profile.get("disliked_ingredients") or []
                         _cw         = _user_profile.get("cuisine_weights") or {}
                         _recent     = _user_profile.get("recent_dishes") or []
@@ -1091,8 +1097,8 @@ LANGUAGE REQUIREMENT: {language_instruction} This applies to ALL text you genera
                             f"servings={_servings}, "
                             f"disliked={_disliked if _disliked else '(none)'}, "
                             f"cuisine_weights={_cw}, "
-                            f"recent_dishes_count={len(_recent)}"
-                            + (f", recent_banned={[e['dish'] for e in _recent[:3]]}" if _recent else "")
+                            f"recent_dishes_count={len(_recent)} (from schedules)"
+                            + (f", recent_sample={[e['dish'] for e in _recent[:3]]}" if _recent else "")
                         )
                     else:
                         logger.warning(f"[MEAL_BLUEPRINT] User {owner_id} profile NOT loaded — blueprint/diversity skipped.")

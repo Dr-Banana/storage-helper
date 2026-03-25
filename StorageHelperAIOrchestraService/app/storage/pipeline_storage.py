@@ -1101,6 +1101,79 @@ class PipelineStorage:
             )
             return False
 
+    async def get_recent_dishes_from_schedules(
+        self,
+        owner_id: int,
+        days: int = 14,
+    ) -> List[Dict[str, Any]]:
+        """
+        Derive the user's recent dish history directly from committed schedule records.
+
+        Queries GET /api/schedule/range for the past `days` days and extracts
+        dish names from meal_plan features inside each schedule's metadata.
+        This reflects the *actual* meals the user has planned/eaten, rather than
+        the potentially stale User.recent_dishes JSON field.
+
+        Returns a list of {"dish": str, "date": "YYYY-MM-DD"} dicts, de-duplicated
+        by (dish, date) key.  Returns [] on any failure (non-fatal).
+        """
+        from datetime import datetime, timezone, timedelta
+
+        base_url = _get_storage_base_url()
+        if not base_url:
+            return []
+
+        now = datetime.now(timezone.utc)
+        start = now - timedelta(days=days)
+        url = "/api/schedule/range"
+        headers = {"Authorization": f"Bearer user_{owner_id}"}
+        params = {
+            "start_time": start.isoformat(),
+            "end_time": now.isoformat(),
+        }
+
+        try:
+            async with httpx.AsyncClient(base_url=base_url, timeout=10.0) as client:
+                response = await client.get(url, headers=headers, params=params)
+                response.raise_for_status()
+                schedules = response.json()
+        except Exception as e:
+            logger.warning(
+                f"[PIPELINE_STORAGE] Failed to fetch schedules for recent-dishes "
+                f"(user {owner_id}): {e}"
+            )
+            return []
+
+        entries: List[Dict[str, Any]] = []
+        seen: set = set()
+
+        for sched in schedules:
+            metadata = sched.get("metadata") or {}
+            for feat in metadata.get("features") or []:
+                if feat.get("type") != "meal_plan":
+                    continue
+                for day_plan in feat.get("plans") or []:
+                    date_str = (day_plan.get("date") or "").strip()
+                    if not date_str:
+                        continue
+                    for meal in day_plan.get("meals") or []:
+                        for dish in meal.get("dishes") or []:
+                            name = (dish.get("name") or "").strip()
+                            if name and (name, date_str) not in seen:
+                                entries.append({"dish": name, "date": date_str})
+                                seen.add((name, date_str))
+
+        # Sort newest-first so DiversityEngine's seen-dedup picks the most recent
+        # date for each dish (it stops at the first occurrence per dish name).
+        entries.sort(key=lambda e: e.get("date", ""), reverse=True)
+
+        logger.info(
+            f"[PIPELINE_STORAGE] get_recent_dishes_from_schedules: "
+            f"user={owner_id}, days={days}, found={len(entries)} dish-date entries "
+            f"from {len(schedules)} schedules."
+        )
+        return entries
+
     async def delete_schedule(
         self,
         schedule_id: int,
