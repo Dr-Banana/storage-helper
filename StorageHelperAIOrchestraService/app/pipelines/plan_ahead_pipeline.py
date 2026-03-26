@@ -3158,7 +3158,7 @@ class PlanAheadPipeline:
             if user_profile is not None and new_sid:
                 try:
                     from app.services.diversity_engine import extract_dishes_for_history
-                    _new_dish_entries = extract_dishes_for_history(draft_slots)
+                    _new_dish_entries = extract_dishes_for_history(draft_slots, dish_ingredients=draft_di)
                     if _new_dish_entries:
                         _dish_names_log = [e["dish"] for e in _new_dish_entries[:5]]
                         logger.info(
@@ -3608,7 +3608,7 @@ class PlanAheadPipeline:
             if user_profile is not None and new_sid and action in ("add", "modify"):
                 try:
                     from app.services.diversity_engine import extract_dishes_for_history
-                    _new_dish_entries = extract_dishes_for_history(new_meal_plan_slots)
+                    _new_dish_entries = extract_dishes_for_history(new_meal_plan_slots, dish_ingredients=new_dish_ingredients)
                     if _new_dish_entries:
                         import asyncio
                         asyncio.ensure_future(

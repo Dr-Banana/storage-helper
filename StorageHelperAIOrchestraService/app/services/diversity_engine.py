@@ -21,7 +21,19 @@ the probability score is translated into a plain-text directive:
 
   • HARD BAN  (eaten ≤ HARD_BAN_DAYS ago)   → "DO NOT recommend"
   • SOFT AVOID (eaten ≤ SOFT_AVOID_DAYS ago) → "prefer alternatives"
+  • INGREDIENT SOFT AVOID                    → key ingredients stored at commit time
   • WEEKLY VARIETY TARGET                    → from cuisine_weights
+
+Ingredient-level diversity
+--------------------------
+Each recent_dishes entry may carry an optional "ingredients" list.  This list
+is populated at plan-commit time from the already-resolved dish_ingredients
+mapping — so it is language-agnostic and requires no keyword scanning.
+
+When hard-banned dishes carry ingredient lists, the engine emits an
+INGREDIENT SOFT AVOID line so the LLM avoids re-using the same dominant
+ingredients in new recommendations (e.g. if 番茄炖排骨 is hard-banned and
+its ingredients include "番茄", a new 番茄牛腩汤 would be soft-discouraged).
 """
 from __future__ import annotations
 
@@ -55,6 +67,36 @@ def _days_since(date_str: str, today: date) -> int:
     return max(0, (today - d).days)
 
 
+def _collect_banned_ingredients(
+    recent_dishes: List[Dict[str, Any]],
+    hard_banned_names: List[str],
+) -> List[str]:
+    """
+    Collect ingredient names from entries whose dish appears in hard_banned_names.
+
+    Returns a de-duplicated list preserving first-seen order.
+    Each entry may have an "ingredients" field: List[str | dict].
+    dict format: {"name": str, ...} (same shape as dish_ingredients values).
+    """
+    banned_set = set(hard_banned_names)
+    seen: set = set()
+    result: List[str] = []
+
+    for entry in recent_dishes:
+        if entry.get("dish") not in banned_set:
+            continue
+        for ing in (entry.get("ingredients") or []):
+            name: str = ""
+            if isinstance(ing, str):
+                name = ing.strip()
+            elif isinstance(ing, dict):
+                name = (ing.get("name") or "").strip()
+            if name and name not in seen:
+                seen.add(name)
+                result.append(name)
+    return result
+
+
 # ── Public API ────────────────────────────────────────────────────────────────
 
 def recency_penalty(days: int) -> float:
@@ -76,8 +118,8 @@ def compute_diversity_directive(
     Produce a natural-language diversity directive for the LLM system prompt.
 
     Args:
-        recent_dishes:   List of {"dish": str, "date": "YYYY-MM-DD"} records
-                         from the user's recent_dishes DB field.
+        recent_dishes:   List of {"dish": str, "date": "YYYY-MM-DD",
+                         "ingredients": List[str|dict] (optional)} records.
         cuisine_weights: Optional {cuisine_name: weight_pct} for variety hints.
         today:           Today's date (injectable for deterministic testing).
 
@@ -118,6 +160,18 @@ def compute_diversity_directive(
             f"choose alternatives when possible): {avoid_str}."
         )
 
+    # Ingredient-level soft avoid: use stored ingredients from hard-banned entries.
+    # Ingredients are recorded at plan-commit time from dish_ingredients, so they
+    # are language-agnostic and require no keyword scanning.
+    if hard_banned:
+        banned_ingredients = _collect_banned_ingredients(recent_dishes or [], hard_banned)
+        if banned_ingredients:
+            lines.append(
+                f"- INGREDIENT SOFT AVOID (key ingredients that dominated recently "
+                f"eaten dishes — avoid making these the star of a new dish when "
+                f"alternatives exist): {', '.join(banned_ingredients)}."
+            )
+
     if not hard_banned and not soft_discouraged:
         lines.append("- No recent dish history — feel free to recommend any dishes.")
 
@@ -156,8 +210,9 @@ def compute_diversity_directive(
 
 def extract_dishes_for_history(
     meal_plan_slots: Optional[Dict[str, Any]],
+    dish_ingredients: Optional[Dict[str, Any]] = None,
     today: Optional[date] = None,
-) -> List[Dict[str, str]]:
+) -> List[Dict[str, Any]]:
     """
     Extract dish entries from a committed meal_plan_slots for recent_dishes.
 
@@ -165,36 +220,59 @@ def extract_dishes_for_history(
     planned dates are included too — they count once reached).
 
     Args:
-        meal_plan_slots: {date_str: {meal_time: dish_list | str}}.
-        today:           Override for deterministic testing.
+        meal_plan_slots:  {date_str: {meal_time: dish_list | str}}.
+        dish_ingredients: Optional {dish_name: List[str | dict]} mapping from
+                          the plan state.  When provided, each entry gains an
+                          "ingredients" field so the diversity engine can emit
+                          ingredient-level soft-avoids on future turns.
+        today:            Override for deterministic testing.
 
     Returns:
-        List of {"dish": str, "date": "YYYY-MM-DD"} records.
+        List of {"dish": str, "date": "YYYY-MM-DD",
+                 "ingredients": List[str]} records.
+        The "ingredients" key is omitted when dish_ingredients is not provided
+        or the dish has no recorded ingredients.
     """
     if today is None:
         today = date.today()
     cutoff = today - timedelta(days=WINDOW_DAYS)
 
-    entries: List[Dict[str, str]] = []
+    entries: List[Dict[str, Any]] = []
     for date_str, slots in (meal_plan_slots or {}).items():
         d = _parse_date(date_str)
         if d is None or d < cutoff:
             continue
         for _meal_time, dishes in (slots or {}).items():
+            dish_names: List[str] = []
             if isinstance(dishes, list):
-                for name in dishes:
-                    if name and isinstance(name, str) and name.strip():
-                        entries.append({"dish": name.strip(), "date": date_str})
+                dish_names = [n.strip() for n in dishes if n and isinstance(n, str) and n.strip()]
             elif isinstance(dishes, str) and dishes.strip():
-                entries.append({"dish": dishes.strip(), "date": date_str})
+                dish_names = [dishes.strip()]
+
+            for name in dish_names:
+                entry: Dict[str, Any] = {"dish": name, "date": date_str}
+                if dish_ingredients:
+                    raw = dish_ingredients.get(name) or []
+                    # Normalise to plain strings for compact storage.
+                    ing_names: List[str] = []
+                    for ing in raw:
+                        if isinstance(ing, str) and ing.strip():
+                            ing_names.append(ing.strip())
+                        elif isinstance(ing, dict):
+                            n = (ing.get("name") or "").strip()
+                            if n:
+                                ing_names.append(n)
+                    if ing_names:
+                        entry["ingredients"] = ing_names
+                entries.append(entry)
     return entries
 
 
 def merge_and_prune_recent_dishes(
-    existing: Optional[List[Dict[str, str]]],
-    new_entries: List[Dict[str, str]],
+    existing: Optional[List[Dict[str, Any]]],
+    new_entries: List[Dict[str, Any]],
     today: Optional[date] = None,
-) -> List[Dict[str, str]]:
+) -> List[Dict[str, Any]]:
     """
     Merge new entries into existing recent_dishes and prune >WINDOW_DAYS old records.
 
@@ -210,7 +288,7 @@ def merge_and_prune_recent_dishes(
         today = date.today()
     cutoff = today - timedelta(days=WINDOW_DAYS)
 
-    merged: List[Dict[str, str]] = list(existing or [])
+    merged: List[Dict[str, Any]] = list(existing or [])
     seen_keys: set = {(e.get("dish", ""), e.get("date", "")) for e in merged}
 
     for entry in new_entries:
