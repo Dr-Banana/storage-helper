@@ -137,6 +137,10 @@ def get_plan_state(owner_id: int) -> Dict[str, Any]:
             # Resets to 0 when the queue content changes or is confirmed.
             # Used to detect dead-loop and trigger guided recovery.
             "confirmation_retry_count": state.get("confirmation_retry_count", 0),
+            # How many times the user requested a full option refresh ("再换一批") in the
+            # current planning session.  Used to drive dynamic temperature escalation:
+            # 0-1 → 0.2 (default), 2 → 0.45, ≥3 → 0.7 (maximum creativity).
+            "refresh_count": state.get("refresh_count", 0),
             "updated_at": state.get("updated_at"),
         }
     return {
@@ -149,6 +153,7 @@ def get_plan_state(owner_id: int) -> Dict[str, Any]:
         "meal_planning_total": 0,
         "confirmation_retry_count": 0,
         "pending_ask_dates": [],
+        "refresh_count": 0,
     }
 
 
@@ -172,6 +177,7 @@ def update_plan_state(
     meal_planning_queue = _UNSET,  # List[str] remaining dates to plan in sequential queue mode
     meal_planning_total = _UNSET,  # int total dates in the original queue (for progress display)
     confirmation_retry_count = _UNSET,  # int: consecutive no-op corrections, for dead-loop guard
+    refresh_count = _UNSET,  # int: consecutive "再换一批" requests, drives temperature escalation
     merge: bool = True,
 ) -> Dict[str, Any]:
     """
@@ -329,6 +335,12 @@ def update_plan_state(
             current.pop("confirmation_retry_count", None)
         else:
             current["confirmation_retry_count"] = int(confirmation_retry_count)
+
+    if refresh_count is not _UNSET:
+        if refresh_count is None:
+            current.pop("refresh_count", None)
+        else:
+            current["refresh_count"] = int(refresh_count)
 
     current["updated_at"] = datetime.now(timezone.utc)
     _plan_states[owner_id] = current

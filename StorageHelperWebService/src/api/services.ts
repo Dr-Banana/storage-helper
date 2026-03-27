@@ -35,7 +35,6 @@ export interface User {
   include_soup: boolean
   calorie_target?: number | null
   disliked_ingredients?: string[]
-  cuisine_weights?: Record<string, number>
   recent_dishes?: Array<{ dish: string; date: string }>
   created_at: string
   updated_at: string
@@ -238,7 +237,7 @@ export const userService = {
    * Update user
    * PATCH /api/users/{user_id}
    */
-  update: async (id: number, data: Partial<{ display_name: string; note: string; cooking_level: CookingLevel; language: UserLanguage; default_servings: number; meat_veg_ratio: string; include_soup: boolean; calorie_target: number | null; disliked_ingredients: string[]; cuisine_weights: Record<string, number>; recent_dishes: Array<{ dish: string; date: string }> }>): Promise<User> => {
+  update: async (id: number, data: Partial<{ display_name: string; note: string; cooking_level: CookingLevel; language: UserLanguage; default_servings: number; meat_veg_ratio: string; include_soup: boolean; calorie_target: number | null; disliked_ingredients: string[]; recent_dishes: Array<{ dish: string; date: string }> }>): Promise<User> => {
     const response = await apiClient.patch(`/users/${id}`, data)
     return response.data
   },

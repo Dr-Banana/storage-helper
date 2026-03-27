@@ -1089,14 +1089,12 @@ LANGUAGE REQUIREMENT: {language_instruction} This applies to ALL text you genera
                         _user_profile["recent_dishes"] = _rt_recent
 
                         _disliked   = _user_profile.get("disliked_ingredients") or []
-                        _cw         = _user_profile.get("cuisine_weights") or {}
                         _recent     = _user_profile.get("recent_dishes") or []
                         _servings   = _user_profile.get("default_servings", 1)
                         logger.info(
                             f"[MEAL_BLUEPRINT] User {owner_id} profile loaded: "
                             f"servings={_servings}, "
                             f"disliked={_disliked if _disliked else '(none)'}, "
-                            f"cuisine_weights={_cw}, "
                             f"recent_dishes_count={len(_recent)} (from schedules)"
                             + (f", recent_sample={[e['dish'] for e in _recent[:3]]}" if _recent else "")
                         )

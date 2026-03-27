@@ -1,11 +1,9 @@
 import { useState, useEffect, useRef } from 'react'
-import { Edit2, LogOut, Mail, AlertTriangle, Trash2, ChevronDown, ChefHat, Save, X, ShieldAlert, Plus, Minus, Flame, UtensilsCrossed, Tag, Lock, Unlock } from 'lucide-react'
+import { Edit2, LogOut, Mail, AlertTriangle, Trash2, ChevronDown, ChefHat, Save, X, ShieldAlert, Plus, Minus, Flame, UtensilsCrossed, Tag } from 'lucide-react'
 import { useAuth } from '../contexts/AuthContext'
 import { userService, User as UserType, CookingLevel, UserLanguage, USER_LANGUAGE_LABELS } from '../api/services'
 import { useNavigate } from 'react-router-dom'
 import clsx from 'clsx'
-import { PieChart, Pie, Cell, Tooltip, ResponsiveContainer, Legend } from 'recharts'
-
 const COOKING_LEVELS: { value: CookingLevel; label: string; desc: string; emoji: string; color: string }[] = [
   { value: 'beginner', label: 'Beginner', desc: 'Needs step-by-step guidance', emoji: '🐣', color: 'from-green-50 to-emerald-100/50 text-green-700 border-green-200' },
   { value: 'intermediate', label: 'Intermediate', desc: 'Comfortable with everyday recipes', emoji: '🧑‍🍳', color: 'from-orange-50 to-amber-100/50 text-orange-700 border-orange-200' },
@@ -13,18 +11,6 @@ const COOKING_LEVELS: { value: CookingLevel; label: string; desc: string; emoji:
 ]
 
 // ─── Shared form shape ────────────────────────────────────────────────────────
-
-const DEFAULT_CUISINE_WEIGHTS: Record<string, number> = {
-  Chinese: 50, Western: 20, Japanese: 15, Korean: 10, Other: 5,
-}
-
-const CUISINE_COLORS: Record<string, string> = {
-  Chinese: '#f59e0b',
-  Western: '#64748b',
-  Japanese: '#f472b6',
-  Korean: '#818cf8',
-  Other: '#34d399',
-}
 
 type FormData = {
   display_name: string
@@ -35,7 +21,6 @@ type FormData = {
   meat_veg_ratio: string
   include_soup: boolean
   calorie_target: number | null
-  cuisine_weights: Record<string, number>
   disliked_ingredients: string[]
 }
 
@@ -49,9 +34,6 @@ function formFromUser(u: UserType): FormData {
     meat_veg_ratio: u.meat_veg_ratio || '1:1:1',
     include_soup: u.include_soup !== undefined ? u.include_soup : true,
     calorie_target: u.calorie_target ?? null,
-    cuisine_weights: u.cuisine_weights && Object.keys(u.cuisine_weights).length > 0
-      ? u.cuisine_weights
-      : { ...DEFAULT_CUISINE_WEIGHTS },
     disliked_ingredients: u.disliked_ingredients ?? [],
   }
 }
@@ -103,7 +85,7 @@ const ProfilePage = () => {
   const [formData, setFormData] = useState<FormData>({
     display_name: '', note: '', cooking_level: 'beginner', language: 'zh',
     default_servings: 1, meat_veg_ratio: '1:1:1', include_soup: true, calorie_target: null,
-    cuisine_weights: { ...DEFAULT_CUISINE_WEIGHTS }, disliked_ingredients: [],
+    disliked_ingredients: [],
   })
 
   // Per-section editing flags
@@ -111,7 +93,6 @@ const ProfilePage = () => {
   const [editingSkill, setEditingSkill] = useState(false)
   const [editingLang, setEditingLang] = useState(false)
   const [editingMeal, setEditingMeal] = useState(false)
-  const [editingCuisine, setEditingCuisine] = useState(false)
   const [editingDislikes, setEditingDislikes] = useState(false)
 
   const [showDangerZone, setShowDangerZone] = useState(false)
@@ -183,15 +164,6 @@ const ProfilePage = () => {
       setEditingMeal(false)
       loadUser()
     } catch { alert('Failed to save meal blueprint') }
-  }
-
-  const saveCuisine = async () => {
-    if (!userId) return
-    try {
-      await userService.update(userId, { cuisine_weights: formData.cuisine_weights })
-      setEditingCuisine(false)
-      loadUser()
-    } catch { alert('Failed to save cuisine preferences') }
   }
 
   const saveDislikes = async () => {
@@ -414,22 +386,6 @@ const ProfilePage = () => {
           formData={formData}
           user={user}
           onUpdate={(patch) => setFormData((prev) => ({ ...prev, ...patch }))}
-        />
-
-        {/* ── Cuisine Weight Chart ── */}
-        <CuisineWeightChartCard
-          editing={editingCuisine}
-          onEdit={() => {
-            setFormData((prev) => ({
-              ...prev,
-              cuisine_weights: normalizeTo100(prev.cuisine_weights),
-            }))
-            setEditingCuisine(true)
-          }}
-          onSave={saveCuisine}
-          onCancel={() => cancelSection(() => setEditingCuisine(false))}
-          weights={editingCuisine ? formData.cuisine_weights : (user.cuisine_weights ?? DEFAULT_CUISINE_WEIGHTS)}
-          onUpdate={(w) => setFormData((prev) => ({ ...prev, cuisine_weights: w }))}
         />
 
         {/* ── Disliked Ingredients ── */}
@@ -756,351 +712,6 @@ function MealBlueprintCard({ editing, onEdit, onSave, onCancel, formData, user, 
       </div>
 
       {editing && <SectionActions onSave={onSave} onCancel={onCancel} />}
-    </div>
-  )
-}
-
-// ─── CuisineWeightChartCard ───────────────────────────────────────────────────
-
-interface CuisineWeightChartCardProps {
-  editing: boolean
-  onEdit: () => void
-  onSave: () => void
-  onCancel: () => void
-  weights: Record<string, number>
-  onUpdate: (w: Record<string, number>) => void
-}
-
-// ─── Cuisine helpers ─────────────────────────────────────────────────────────
-
-const CUISINE_PRESETS: { name: string; emoji: string; weights: Record<string, number> }[] = [
-  { name: 'Balanced',    emoji: '🌐', weights: { Chinese: 20, Western: 20, Japanese: 20, Korean: 20, Other: 20 } },
-  { name: 'Asian',       emoji: '🥢', weights: { Chinese: 45, Japanese: 20, Korean: 20, Western: 10, Other:  5 } },
-  { name: 'Western',     emoji: '🍔', weights: { Western: 55, Chinese: 20, Japanese: 10, Korean: 10, Other:  5 } },
-  { name: 'East Asian',  emoji: '🍱', weights: { Chinese: 35, Japanese: 30, Korean: 25, Western:  5, Other:  5 } },
-]
-
-function normalizeTo100(weights: Record<string, number>): Record<string, number> {
-  const total = Object.values(weights).reduce((s, v) => s + v, 0)
-  if (total === 0) return weights
-  const result: Record<string, number> = {}
-  let remaining = 100
-  const keys = Object.keys(weights)
-  keys.forEach((k, i) => {
-    if (i === keys.length - 1) {
-      result[k] = remaining
-    } else {
-      const normalized = Math.round((weights[k] / total) * 100)
-      result[k] = normalized
-      remaining -= normalized
-    }
-  })
-  return result
-}
-
-/**
- * Lock-aware proportional redistribution.
- * Fixes targetKey at newValue and scales the unlocked, non-target keys
- * proportionally to fill the remaining budget (100 - locked total - newValue).
- * Returns a new weights object always summing to 100.
- */
-function balanceWeights(
-  current: Record<string, number>,
-  targetKey: string,
-  newValue: number,
-  lockedKeys: Set<string>,
-): Record<string, number> {
-  const keys = Object.keys(current)
-
-  // Total already consumed by locked keys (other than target)
-  const lockedOtherTotal = keys
-    .filter((k) => k !== targetKey && lockedKeys.has(k))
-    .reduce((sum, k) => sum + current[k], 0)
-
-  // Clamp target so locked + target ≤ 100
-  const maxValue = Math.max(0, 100 - lockedOtherTotal)
-  const clamped = Math.min(maxValue, Math.max(0, Math.round(newValue)))
-
-  const remaining = 100 - clamped - lockedOtherTotal
-  const freeKeys = keys.filter((k) => k !== targetKey && !lockedKeys.has(k))
-  const freeTotal = freeKeys.reduce((sum, k) => sum + current[k], 0)
-
-  const next: Record<string, number> = { ...current, [targetKey]: clamped }
-  if (freeKeys.length === 0) return next  // Nothing unlocked to adjust
-
-  const safeRemaining = Math.max(0, remaining)
-
-  if (freeTotal === 0) {
-    // Others are all zero — distribute evenly
-    const share = Math.floor(safeRemaining / freeKeys.length)
-    let leftover = safeRemaining
-    freeKeys.forEach((k, i) => {
-      if (i === freeKeys.length - 1) {
-        next[k] = Math.max(0, leftover)
-      } else {
-        next[k] = share
-        leftover -= share
-      }
-    })
-  } else {
-    // Scale proportionally, absorb rounding error in last key
-    let allocated = 0
-    freeKeys.forEach((k, i) => {
-      if (i === freeKeys.length - 1) {
-        next[k] = Math.max(0, safeRemaining - allocated)
-      } else {
-        const share = Math.round((current[k] / freeTotal) * safeRemaining)
-        next[k] = Math.max(0, share)
-        allocated += next[k]
-      }
-    })
-  }
-  return next
-}
-
-// ─── CuisineWeightChartCard ───────────────────────────────────────────────────
-
-function CuisineWeightChartCard({ editing, onEdit, onSave, onCancel, weights, onUpdate }: CuisineWeightChartCardProps) {
-  const [lockedKeys, setLockedKeys] = useState<Set<string>>(new Set())
-
-  // Track which slider is currently being dragged (pointer device only)
-  const isPointerDown = useRef(false)
-  const [draggingKey, setDraggingKey] = useState<string | null>(null)
-
-  // Reset lock state when leaving edit mode
-  useEffect(() => {
-    if (!editing) {
-      setLockedKeys(new Set())
-      setDraggingKey(null)
-    }
-  }, [editing])
-
-  // Pie chart always reads from the committed weights (normalized for display)
-  const pieWeights = normalizeTo100(weights)
-  const pieData = Object.entries(pieWeights)
-    .filter(([, v]) => v > 0)
-    .map(([name, value]) => ({ name, value }))
-
-  const handleChange = (key: string, value: number) => {
-    if (isPointerDown.current) {
-      // During pointer drag: only update the dragged slider live; balance on release
-      onUpdate({ ...weights, [key]: value })
-    } else {
-      // Keyboard navigation: balance immediately so total stays at 100
-      onUpdate(balanceWeights(weights, key, value, lockedKeys))
-    }
-  }
-
-  const handlePointerDown = (key: string) => {
-    isPointerDown.current = true
-    setDraggingKey(key)
-  }
-
-  const handlePointerUp = (key: string, value: number) => {
-    if (!isPointerDown.current) return
-    isPointerDown.current = false
-    setDraggingKey(null)
-    onUpdate(balanceWeights(weights, key, value, lockedKeys))
-  }
-
-  const toggleLock = (key: string) => {
-    setLockedKeys((prev) => {
-      const next = new Set(prev)
-      if (next.has(key)) next.delete(key)
-      else next.add(key)
-      return next
-    })
-  }
-
-  const applyPreset = (preset: Record<string, number>) => {
-    setLockedKeys(new Set())
-    setDraggingKey(null)
-    onUpdate(preset)
-  }
-
-  const autoBalance = () => {
-    onUpdate(normalizeTo100(weights))
-  }
-
-  const total = Object.values(weights).reduce((s, v) => s + v, 0)
-  const diff = total - 100
-
-  const renderCustomLabel = (props: {
-    cx?: number; cy?: number; midAngle?: number; innerRadius?: number; outerRadius?: number; percent?: number
-  }) => {
-    const { cx = 0, cy = 0, midAngle = 0, innerRadius = 0, outerRadius = 0, percent = 0 } = props
-    if (percent < 0.07) return null
-    const RADIAN = Math.PI / 180
-    const radius = innerRadius + (outerRadius - innerRadius) * 0.55
-    const x = cx + radius * Math.cos(-midAngle * RADIAN)
-    const y = cy + radius * Math.sin(-midAngle * RADIAN)
-    return (
-      <text x={x} y={y} fill="white" textAnchor="middle" dominantBaseline="central"
-        style={{ fontSize: 11, fontWeight: 700 }}>
-        {`${Math.round(percent * 100)}%`}
-      </text>
-    )
-  }
-
-  return (
-    <div className="bg-white rounded-3xl p-6 sm:p-8 border border-stone-100 shadow-sm shadow-stone-200/50">
-      <div className="flex items-center justify-between mb-5">
-        <div className="flex items-center gap-2">
-          <div className="w-8 h-8 rounded-full bg-yellow-100 text-yellow-600 flex items-center justify-center text-sm">🌍</div>
-          <div>
-            <h3 className="text-lg font-bold text-stone-800">Cuisine Preferences</h3>
-            <p className="text-xs text-stone-400 mt-0.5">AI uses these weights to vary your meal recommendations</p>
-          </div>
-        </div>
-        {!editing && <SectionEditBtn onClick={onEdit} />}
-      </div>
-
-      {/* Pie Chart — updates live */}
-      <div className="h-52 -mx-2">
-        <ResponsiveContainer width="100%" height="100%">
-          <PieChart>
-            <Pie
-              data={pieData}
-              cx="50%"
-              cy="50%"
-              outerRadius={80}
-              dataKey="value"
-              labelLine={false}
-              label={renderCustomLabel}
-              strokeWidth={2}
-              stroke="#fff"
-            >
-              {pieData.map((entry) => (
-                <Cell key={entry.name} fill={CUISINE_COLORS[entry.name] ?? '#94a3b8'} />
-              ))}
-            </Pie>
-            <Tooltip
-              formatter={(value) => [`${value}%`]}
-              contentStyle={{ borderRadius: 12, border: '1px solid #e5e7eb', fontSize: 12 }}
-            />
-            <Legend
-              iconType="circle"
-              iconSize={8}
-              formatter={(value) => <span className="text-xs font-semibold text-stone-600">{value}</span>}
-            />
-          </PieChart>
-        </ResponsiveContainer>
-      </div>
-
-      {/* Edit Mode */}
-      {editing && (
-        <div className="mt-4 space-y-4">
-
-          {/* Presets */}
-          <div>
-            <p className="text-[11px] font-bold text-stone-400 uppercase tracking-widest mb-2">Quick Presets</p>
-            <div className="flex flex-wrap gap-2">
-              {CUISINE_PRESETS.map((preset) => (
-                <button
-                  key={preset.name}
-                  type="button"
-                  onClick={() => applyPreset(preset.weights)}
-                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-stone-100 hover:bg-amber-100 hover:text-amber-700 text-xs font-semibold text-stone-600 transition-colors"
-                >
-                  <span>{preset.emoji}</span> {preset.name}
-                </button>
-              ))}
-            </div>
-          </div>
-
-          {/* Sliders header + total indicator */}
-          <div className="flex items-center justify-between">
-            <p className="text-[11px] font-bold text-stone-400 uppercase tracking-widest">
-              Preferences · lock to protect a value
-            </p>
-            <div className="flex items-center gap-2 min-w-[4.5rem] justify-end">
-              {!draggingKey && diff !== 0 ? (
-                <>
-                  <span className={clsx(
-                    'text-xs font-bold tabular-nums px-2 py-0.5 rounded-full',
-                    diff > 0 ? 'bg-orange-50 text-orange-500' : 'bg-blue-50 text-blue-500',
-                  )}>
-                    {diff > 0 ? `+${diff}` : diff}%
-                  </span>
-                  <button
-                    type="button"
-                    onClick={autoBalance}
-                    className="text-[11px] font-bold px-2.5 py-1 rounded-lg bg-amber-50 text-amber-700 hover:bg-amber-100 transition-colors"
-                  >
-                    Balance
-                  </button>
-                </>
-              ) : !draggingKey ? (
-                <span className="text-[11px] font-bold text-emerald-500">✓ 100%</span>
-              ) : null}
-            </div>
-          </div>
-
-          {/* Slider rows */}
-          <div className="space-y-1.5">
-            {Object.entries(weights).map(([cuisine, value]) => {
-              const isLocked = lockedKeys.has(cuisine)
-              const isDragging = draggingKey === cuisine
-              // Max value this slider can reach without going over locked total
-              const lockedOtherTotal = Object.entries(weights)
-                .filter(([k]) => k !== cuisine && lockedKeys.has(k))
-                .reduce((s, [, v]) => s + v, 0)
-              const sliderMax = Math.max(0, 100 - lockedOtherTotal)
-
-              return (
-                <div
-                  key={cuisine}
-                  className={clsx(
-                    'flex items-center gap-2.5 py-1.5 px-2 rounded-xl transition-all',
-                    isLocked ? 'bg-amber-50/70' : 'hover:bg-stone-50',
-                  )}
-                >
-                  <div
-                    className="w-2.5 h-2.5 rounded-full flex-shrink-0"
-                    style={{ backgroundColor: CUISINE_COLORS[cuisine] ?? '#94a3b8' }}
-                  />
-                  <span className="w-[4.5rem] text-sm font-semibold text-stone-700 flex-shrink-0">{cuisine}</span>
-                  <input
-                    type="range"
-                    min={0}
-                    max={sliderMax}
-                    value={value}
-                    disabled={isLocked}
-                    onChange={(e) => handleChange(cuisine, Number(e.target.value))}
-                    onPointerDown={() => handlePointerDown(cuisine)}
-                    onPointerUp={(e) => handlePointerUp(cuisine, Number((e.target as HTMLInputElement).value))}
-                    className={clsx(
-                      'flex-1 h-1.5',
-                      isLocked ? 'cursor-not-allowed opacity-25' : 'accent-amber-400 cursor-pointer',
-                    )}
-                  />
-                  <span className={clsx(
-                    'w-8 text-right text-sm font-bold tabular-nums flex-shrink-0',
-                    isDragging ? 'text-amber-500' : isLocked ? 'text-amber-600' : 'text-stone-600',
-                  )}>
-                    {value}%
-                  </span>
-                  <button
-                    type="button"
-                    onClick={() => toggleLock(cuisine)}
-                    title={isLocked ? 'Unlock' : 'Lock this value'}
-                    className={clsx(
-                      'flex-shrink-0 w-6 h-6 rounded-full flex items-center justify-center transition-all',
-                      isLocked
-                        ? 'bg-amber-100 text-amber-600 hover:bg-amber-200'
-                        : 'bg-stone-100 text-stone-400 hover:bg-stone-200 hover:text-stone-600',
-                    )}
-                  >
-                    {isLocked ? <Lock size={11} /> : <Unlock size={11} />}
-                  </button>
-                </div>
-              )
-            })}
-          </div>
-
-          <SectionActions onSave={onSave} onCancel={onCancel} />
-        </div>
-      )}
     </div>
   )
 }

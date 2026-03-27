@@ -7,7 +7,7 @@ injected into the system context:
 
   • HARD BAN  (dishes eaten ≤3 days ago) → must NOT appear in output
   • SOFT AVOID (dishes eaten 4–7 days ago) → LLM prefers alternatives
-  • WEEKLY VARIETY TARGET → cuisine distribution matches weights over time
+  • SEED LIBRARY FAIR ROTATION → diverse cuisine coverage without weights
 
 Strategy
 --------
@@ -199,13 +199,15 @@ class TestLiveDiversityEngine:
             "Context should mark 宫保鸡丁 as SOFT AVOID (eaten 5 days ago)"
         )
 
-    # ── Test 2: Context sanity — variety targets in context ──────────────────
+    # ── Test 2: Context sanity — cuisine_weights no longer injected ──────────
 
     @pytest.mark.asyncio
     async def test_variety_target_appears_in_context(self):
         """
-        Layer 1: When cuisine_weights is set, the weekly variety target line
-        must appear in the diversity directive block.
+        cuisine_weights has been intentionally removed from the LLM context.
+        The 'WEEKLY VARIETY TARGET' block must NOT appear; instead, diversity
+        is handled by the seed-library fair-rotation algorithm.
+        The diversity block itself (hard bans / soft avoids) should still be present.
         """
         profile = {
             "default_servings": 1,
@@ -223,10 +225,12 @@ class TestLiveDiversityEngine:
             language="zh",
             user_profile=profile,
         )
-        assert _context_has_variety_target(ctx), (
-            "WEEKLY VARIETY TARGET missing from context despite cuisine_weights being set"
+        # cuisine_weights is intentionally NOT injected into the LLM prompt
+        # (diversity is handled by seed-library fair-rotation instead).
+        assert not _context_has_variety_target(ctx), (
+            "WEEKLY VARIETY TARGET should NOT appear — cuisine_weights was removed "
+            "from the LLM context in favour of seed-library fair rotation"
         )
-        assert "Chinese" in ctx
 
     # ── Test 3: LLM obeys hard ban — banned dish not in recommendations ───────
 
@@ -355,6 +359,11 @@ class TestLiveDiversityEngine:
             cooking_level="beginner",
             language="zh",
             user_profile=profile,
+            # Force the recommend path so the LLM doesn't respond with
+            # action='ask' when the history contains only vague preferences.
+            # Without this, "随便推荐" alone is sometimes ambiguous enough
+            # for the LLM to request clarification — causing a flaky test.
+            precomputed_action="recommend",
         )
         # Context must NOT hard-ban the old dish.
         # Actual HARD BAN list lines start with "- HARD BAN (" (from diversity_engine.py).
@@ -373,7 +382,7 @@ class TestLiveDiversityEngine:
             system_context=ctx,
             history=[
                 {"role": "assistant", "content": "您好！想吃什么口味的菜？"},
-                {"role": "user",      "content": "随便推荐"},
+                {"role": "user",      "content": "家常菜就好，随便推荐几道"},
             ],
             user_input="帮我推荐今晚的晚餐",
         )

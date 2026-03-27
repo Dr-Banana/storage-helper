@@ -1224,15 +1224,16 @@ class TestPhase1aPreResolution:
 # ---------------------------------------------------------------------------
 
 class TestDishIntentClassifierPrompt:
-    """_classify_dish_intent must embed food-category anti-confusion rules."""
+    """ClassifyDishIntentSkill must embed food-category anti-confusion rules.
+
+    The prompt has moved from PlanAheadPipeline._classify_dish_intent to
+    ClassifyDishIntentSkill.SKILL_PROMPT.  Tests now read the Skill directly.
+    """
 
     def _get_system_prompt(self) -> str:
-        """Extract the system prompt string by inspecting the source."""
-        import inspect
-        src = inspect.getsource(PlanAheadPipeline._classify_dish_intent)
-        # The system prompt is assigned to _system inside the method
-        # We parse the string literals from the source
-        return src
+        """Return the dish-intent classifier system prompt from the Skill."""
+        from app.skills.plan_ahead.classify_dish_intent import ClassifyDishIntentSkill
+        return ClassifyDishIntentSkill.SKILL_PROMPT
 
     def test_food_category_critical_rule_present(self):
         """Prompt must warn the LLM that food categories are NOT specific dishes."""

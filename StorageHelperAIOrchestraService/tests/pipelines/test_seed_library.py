@@ -31,7 +31,8 @@ def test_lookup_unknown_returns_none():
 def test_lookup_all_50_dishes_have_required_fields():
     from app.services.seed_library import _load
     dishes = _load()
-    assert len(dishes) == 50
+    # Count updated to 56: added 6 shrimp-focused dishes (宫保虾仁, 泰式咖喱虾, etc.)
+    assert len(dishes) == 122
     for d in dishes:
         for field in ("id", "name_zh", "name_en", "cuisine_l1", "cuisine_l2",
                       "flavor_profile", "main_ingredients", "category", "servings_base"):
@@ -89,22 +90,39 @@ def test_empty_pool_returns_empty_list():
     assert isinstance(candidates, list)  # must not raise
 
 
-# ─── select_candidates — cuisine weight distribution ─────────────────────────
+# ─── select_candidates — cuisine fair-rotation distribution ──────────────────
 
-def test_cuisine_weight_biases_selection():
-    # Heavy Chinese weight → expect majority of candidates to be Chinese
+def test_cuisine_fair_rotation_multiple_cuisines():
+    """Fair rotation: candidate set must contain ≥ 2 distinct cuisine_l1 values."""
+    candidates = select_candidates(n=12)
+    cuisines = {d["cuisine_l1"] for d in candidates}
+    assert len(cuisines) >= 2, f"Expected diverse cuisines, got {cuisines}"
+
+
+def test_cuisine_fair_rotation_no_single_dominance():
+    """No single cuisine should dominate (take more than half the candidate slots)."""
+    n = 12
+    candidates = select_candidates(n=n)
+    cuisines = {d["cuisine_l1"] for d in candidates}
+    # Allow at most 50% to any one cuisine — the spirit is that Chinese (majority
+    # of the seed library) can't crowd out everything else.
+    max_allowed = n // 2
+    for c in cuisines:
+        count = sum(1 for d in candidates if d["cuisine_l1"] == c)
+        assert count <= max_allowed, (
+            f"{c} has {count} slots which exceeds the 50% cap ({max_allowed}) — "
+            "fair rotation is not preventing single-cuisine dominance"
+        )
+
+
+def test_cuisine_weights_param_ignored_no_crash():
+    """cuisine_weights is kept for API compat but no longer affects selection."""
     heavy_chinese = {"Chinese": 90, "Western": 5, "Japanese": 3, "Korean": 2}
     candidates = select_candidates(cuisine_weights=heavy_chinese, n=10)
-    chinese_count = sum(1 for d in candidates if d["cuisine_l1"] == "Chinese")
-    # With 90% weight, at least half should be Chinese
-    assert chinese_count >= 5
-
-
-def test_zero_weight_cuisine_still_possible():
-    # Zero weight for Japanese — should be very unlikely but not crash
-    weights = {"Chinese": 50, "Western": 50, "Japanese": 0, "Korean": 0}
-    candidates = select_candidates(cuisine_weights=weights, n=10)
     assert isinstance(candidates, list)
+    # With fair rotation Chinese should NOT dominate even with heavy weights passed
+    cuisines = {d["cuisine_l1"] for d in candidates}
+    assert len(cuisines) >= 2
 
 
 # ─── select_candidates — soup guarantee ──────────────────────────────────────

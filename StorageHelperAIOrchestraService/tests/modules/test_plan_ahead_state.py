@@ -44,6 +44,7 @@ class TestGetPlanState:
             "meal_planning_queue": [],
             "meal_planning_total": 0,
             "confirmation_retry_count": 0,
+            "refresh_count": 0,
         }
 
     def test_get_existing_state(self):

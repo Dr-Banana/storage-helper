@@ -1,15 +1,21 @@
 """
 Seed Library — Phase 3
 
-Loads the curated 50-dish seed library and provides candidate selection +
-LLM context building.  Selection logic uses the same P(dish) score from the
-Diversity Engine so that the two systems stay consistent:
+Loads the curated seed library and provides candidate selection +
+LLM context building.
 
-    score(dish) = W_cuisine / (1 + recency_penalty(t))
-
-where recency_penalty mirrors HARD_BAN / SOFT_AVOID constants from
-diversity_engine.py.  Dishes that would be hard-banned are excluded entirely;
-soft-avoided dishes receive a lower score and are therefore deprioritised.
+Selection algorithm (v2 — cuisine-fair rotation):
+  1. Filter out hard-banned dishes (eaten ≤ 3 days ago) and dishes containing
+     disliked ingredients.
+  2. Score each dish: score = 1 / (1 + recency_penalty(t))  [pure recency, no weights]
+  3. Distribute n slots using FAIR ROTATION:
+       • Each cuisine_l1 bucket that has eligible dishes gets a guaranteed
+         MIN_PER_CUISINE = 2 slots.
+       • Remaining slots (n - guaranteed) are filled by top-scored dishes
+         across all cuisines.
+       • This ensures Chinese, Japanese, Thai, Western all appear in every
+         candidate set, giving the LLM diverse inspiration even without weights.
+  4. Guarantee at least one Soup entry if the pool contains any.
 """
 
 from __future__ import annotations
@@ -92,25 +98,60 @@ def _is_hard_banned(dish_name_zh: str, dish_name_en: str, recent_dishes: List[Di
 
 # ─── public API ──────────────────────────────────────────────────────────────
 
+# Minimum slots reserved per cuisine_l1 bucket in the fair-rotation algorithm.
+# This prevents the Chinese-heavy seed library from crowding out all other cuisines.
+MIN_PER_CUISINE = 2
+
+
+# Number of candidate slots reserved for anchor-ingredient matching.
+# These are filled BEFORE the fair-rotation phase so the LLM always
+# has "同食材 × 不同做法" options when the user asks for a similar dish.
+ANCHOR_SLOTS = 4
+
+
+def _matches_anchor(dish: Dict[str, Any], anchor_ingredients: List[str]) -> bool:
+    """True if any anchor ingredient appears in the dish's main_ingredients."""
+    if not anchor_ingredients:
+        return False
+    dish_ings_lower = {i.lower() for i in dish.get("main_ingredients", [])}
+    for term in anchor_ingredients:
+        t = term.lower()
+        if t in dish_ings_lower:
+            return True
+        for ing in dish_ings_lower:
+            if t in ing or ing in t:   # substring match (e.g. "虾" ⊆ "虾仁")
+                return True
+    return False
+
+
 def select_candidates(
-    cuisine_weights: Optional[Dict[str, int]] = None,
+    cuisine_weights: Optional[Dict[str, int]] = None,  # kept for API compat; no longer used
     disliked_ingredients: Optional[List[str]] = None,
     recent_dishes: Optional[List[Dict[str, Any]]] = None,
+    anchor_ingredients: Optional[List[str]] = None,
     n: int = DEFAULT_CANDIDATE_COUNT,
 ) -> List[Dict[str, Any]]:
     """
-    Select up to *n* candidate dishes from the seed library, weighted by
-    cuisine preference and filtered by disliked ingredients / recency bans.
+    Select up to *n* candidate dishes with two-phase retrieval:
+
+    Phase 1 — Anchored Retrieval (when anchor_ingredients is provided):
+      Reserve up to ANCHOR_SLOTS (4) slots for dishes that share a main
+      ingredient with the rejected dish.  This ensures the LLM sees
+      "同食材 × 不同做法" options (e.g. 泰式咖喱虾, 蒜蓉粉丝蒸虾, 宫保虾仁)
+      rather than random safe fallbacks (西红柿炒蛋).
+
+    Phase 2 — Cuisine-fair rotation for remaining slots:
+      Give every cuisine_l1 bucket MIN_PER_CUISINE (2) guaranteed slots,
+      then fill the rest with globally top-scored un-picked dishes.
 
     Algorithm:
-    1. Filter out hard-banned dishes and dishes containing disliked ingredients.
-    2. Score remaining dishes:  score = W_cuisine / (1 + recency_penalty)
-    3. Distribute n slots proportionally across cuisine_l1 buckets, then pick
-       top-scored (with a small random jitter for freshness).
-    4. Guarantee at least one Soup entry if the pool contains any.
+    1. Filter hard-banned (eaten ≤ 3 days) and disliked-ingredient dishes.
+    2. Score purely by recency: score = 1 / (1 + recency_penalty)  + jitter.
+    3. (If anchor_ingredients) fill up to ANCHOR_SLOTS with anchor-matching dishes.
+    4. Fair rotation for remaining (n - anchor_count) slots.
+    5. Guarantee at least one Soup entry if the pool contains any.
     """
     all_dishes = _load()
-    weights = cuisine_weights or {"Chinese": 50, "Western": 20, "Japanese": 15, "Korean": 10, "Other": 5}
     disliked = disliked_ingredients or []
     recent = recent_dishes or []
 
@@ -127,36 +168,82 @@ def select_candidates(
         logger.warning("[SEED_LIBRARY] Pool is empty after filtering — returning empty list")
         return []
 
-    # Step 2 — score each dish
-    total_weight = sum(weights.values()) or 100
+    # Step 2 — score each dish by recency only (no cuisine weight bias)
     scored: List[tuple[float, Dict[str, Any]]] = []
     for dish in pool:
-        w = weights.get(dish["cuisine_l1"], weights.get("Other", 5))
-        normalized_w = w / total_weight
         penalty = _recency_penalty(dish["name_zh"], dish["name_en"], recent)
-        score = normalized_w / (1.0 + penalty)
-        # small random jitter so repeated calls yield variety
+        score = 1.0 / (1.0 + penalty)
         jitter = random.uniform(0.85, 1.15)
         scored.append((score * jitter, dish))
 
     scored.sort(key=lambda t: t[0], reverse=True)
 
-    # Step 3 — pick top n
-    candidates = [d for _, d in scored[:n]]
+    selected: List[Dict[str, Any]] = []
+    selected_ids: set = set()
 
-    # Step 4 — ensure at least one Soup if requested
+    # Step 3 (NEW) — Anchor phase: reserve up to ANCHOR_SLOTS for dishes that
+    # share a main ingredient with the rejected dish so the LLM always has
+    # "same ingredient × different cooking method" choices in view.
+    _anchor = anchor_ingredients or []
+    if _anchor:
+        for _, dish in scored:
+            if len(selected) >= ANCHOR_SLOTS:
+                break
+            if dish["id"] not in selected_ids and _matches_anchor(dish, _anchor):
+                selected.append(dish)
+                selected_ids.add(dish["id"])
+        logger.info(
+            "[SEED_LIBRARY] Anchor phase: %d/%d slots filled for ingredients=%s",
+            len(selected), ANCHOR_SLOTS, _anchor,
+        )
+
+    # Remaining slots available for fair rotation
+    remaining_slots = n - len(selected)
+
+    # Step 4 — fair rotation: guarantee MIN_PER_CUISINE slots per cuisine_l1
+    # a. Build per-cuisine sorted sublists
+    from collections import defaultdict
+    cuisine_buckets: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    for _, dish in scored:
+        if dish["id"] not in selected_ids:
+            cuisine_buckets[dish["cuisine_l1"]].append(dish)
+
+    # b. Guaranteed picks — take up to MIN_PER_CUISINE from each bucket
+    for cuisine, bucket in cuisine_buckets.items():
+        if len(selected) >= n:
+            break
+        count = 0
+        for dish in bucket:
+            if count >= MIN_PER_CUISINE or len(selected) >= n:
+                break
+            if dish["id"] not in selected_ids:
+                selected.append(dish)
+                selected_ids.add(dish["id"])
+                count += 1
+
+    # c. Fill remaining slots with globally top-scored un-picked dishes
+    for _, dish in scored:
+        if len(selected) >= n:
+            break
+        if dish["id"] not in selected_ids:
+            selected.append(dish)
+            selected_ids.add(dish["id"])
+
+    candidates = selected[:n]
+
+    # Step 4 — ensure at least one Soup if pool contains any
     has_soup = any(d["category"] == "Soup" for d in candidates)
     if not has_soup:
-        soup_pool = [d for _, d in scored if d["category"] == "Soup"]
+        soup_pool = [d for _, d in scored if d["category"] == "Soup" and d["id"] not in selected_ids]
         if soup_pool:
-            candidates[-1] = soup_pool[0]  # replace lowest-ranked with a soup
+            candidates[-1] = soup_pool[0]
 
+    cuisine_dist = {}
+    for d in candidates:
+        cuisine_dist[d["cuisine_l1"]] = cuisine_dist.get(d["cuisine_l1"], 0) + 1
     logger.info(
-        "[SEED_LIBRARY] Selected %d candidates (pool=%d, disliked_filter=%d, hard_ban_filter=%d)",
-        len(candidates),
-        len(pool),
-        len(all_dishes) - len(pool),
-        sum(1 for d in all_dishes if _is_hard_banned(d["name_zh"], d["name_en"], recent)),
+        "[SEED_LIBRARY] Selected %d candidates (pool=%d, cuisine_dist=%s)",
+        len(candidates), len(pool), cuisine_dist,
     )
     return candidates
 

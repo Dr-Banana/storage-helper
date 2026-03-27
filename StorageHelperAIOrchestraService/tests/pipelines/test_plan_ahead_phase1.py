@@ -166,44 +166,20 @@ class TestBuildContextUserProfile:
         )
         assert "FORBIDDEN" not in ctx
 
-    # ── 1g. cuisine_weights ──────────────────────────────────────────────────
+    # ── 1g. cuisine_weights — removed from prompt (AI no longer receives weights) ──
 
-    def test_cuisine_weights_injected(self):
+    def test_cuisine_weights_not_injected_into_context(self):
+        """Cuisine weights are stored in the profile but no longer exposed to the LLM."""
         ctx = _pipeline()._build_context(
             _empty_state(), None,
             user_profile=_full_profile(
                 cuisine_weights={"Chinese": 60, "Western": 20, "Japanese": 15, "Korean": 5}
             ),
         )
-        assert "Chinese" in ctx
-        assert "Western" in ctx
-        assert "60%" in ctx
+        assert "Cuisine preference weights" not in ctx
+        assert "60%" not in ctx
 
-    def test_cuisine_weights_sorted_by_descending_weight(self):
-        """Higher-weight cuisines must appear before lower-weight ones."""
-        ctx = _pipeline()._build_context(
-            _empty_state(), None,
-            user_profile=_full_profile(
-                cuisine_weights={"Korean": 5, "Chinese": 60, "Western": 20}
-            ),
-        )
-        chinese_pos = ctx.find("Chinese")
-        western_pos = ctx.find("Western")
-        korean_pos = ctx.find("Korean")
-        assert chinese_pos < western_pos < korean_pos
-
-    def test_zero_weight_cuisines_excluded_from_context(self):
-        ctx = _pipeline()._build_context(
-            _empty_state(), None,
-            user_profile=_full_profile(cuisine_weights={"Chinese": 70, "Western": 30, "Japanese": 0})
-        )
-        # "Japanese(0%)" must not pollute the context
-        assert "Japanese(0%)" not in ctx
-        # Non-zero cuisines should still appear
-        assert "Chinese" in ctx
-        assert "Western" in ctx
-
-    def test_empty_cuisine_weights_omits_cuisine_line(self):
+    def test_empty_cuisine_weights_no_cuisine_line(self):
         ctx = _pipeline()._build_context(
             _empty_state(), None,
             user_profile=_full_profile(cuisine_weights={})
@@ -381,7 +357,7 @@ class TestFullProfileContextRoundTrip:
     """
 
     def test_typical_single_person_student_profile(self):
-        """USC学生 — 1人份、不吃香菜、偏中餐。"""
+        """USC学生 — 1人份、不吃香菜。"""
         profile = {
             "default_servings": 1,
             "meat_veg_ratio": "1:1:1",
@@ -394,8 +370,8 @@ class TestFullProfileContextRoundTrip:
         assert "1 person" in ctx
         assert "香菜" in ctx
         assert "FORBIDDEN" in ctx
-        assert "Chinese" in ctx
-        assert "70%" in ctx
+        assert "Cuisine preference weights" not in ctx
+        assert "70%" not in ctx
         assert "MUST include at least one soup" not in ctx
 
     def test_family_profile_with_all_constraints(self):

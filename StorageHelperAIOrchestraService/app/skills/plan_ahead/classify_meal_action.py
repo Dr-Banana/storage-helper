@@ -97,17 +97,20 @@ Return ONLY valid JSON: {"action": "...", "reason": "one line explanation"}
         *,
         is_explicit_dish: bool = False,
         pipeline_phase: str = "idle",
+        is_draft: bool = False,
     ) -> Dict[str, Any]:
         """
         Classify the action for the current turn.
 
         Parameters
         ----------
-        query          : User's latest message.
-        history        : Recent conversation turns (role/content dicts).
+        query           : User's latest message.
+        history         : Recent conversation turns (role/content dicts).
         is_explicit_dish: True if ClassifyDishIntentSkill already detected a specific dish.
-        pipeline_phase : Current FSM phase from get_phase() as string value
-                         ("idle", "in_queue", "awaiting_date_confirm", etc.)
+        pipeline_phase  : Current FSM phase from get_phase() as string value
+                          ("idle", "in_queue", "awaiting_date_confirm", etc.)
+        is_draft        : True when a draft plan is currently active.  Used to detect
+                          modification signals so they don't get misrouted as "add".
 
         Returns
         -------
@@ -124,12 +127,29 @@ Return ONLY valid JSON: {"action": "...", "reason": "one line explanation"}
             # Previous turn was ask → user just answered → suggest_options
             return {"action": "suggest_options", "reason": "user answered preference question"}
 
+        # ── Draft-mode modification fast-path ─────────────────────────────────
+        # When a draft is active and the user uses swap/replace language WITHOUT
+        # naming a specific dish, we pre-route to "modify" so the main LLM is
+        # not given the "add a specific dish" directive that causes it to add a
+        # random safe dish (e.g. 西红柿炒蛋) instead of intelligently swapping.
+        if is_draft and not is_explicit_dish:
+            _swap_patterns = (
+                "换一个", "换一下", "换掉", "换掉这道", "换这道",
+                "不要这道", "不喜欢这个", "这道换", "这个换",
+                "replace", "swap", "change this", "不想要这道",
+            )
+            if any(p in query for p in _swap_patterns):
+                return {
+                    "action": "modify",
+                    "reason": "draft-mode fast-path: swap signal without explicit dish → let main LLM choose replacement",
+                }
+
         # ── LLM classification ───────────────────────────────────────────────
         user_msg = f'User message: "{query}"'
         raw = await self._call(user_msg, history)
         if raw:
             parsed = self._extract_json(raw)
-            if parsed and parsed.get("action") in ("ask", "suggest_options", "add", "recommend"):
+            if parsed and parsed.get("action") in ("ask", "suggest_options", "add", "recommend", "modify"):
                 result = {
                     "action": parsed["action"],
                     "reason": str(parsed.get("reason", "")),
@@ -142,19 +162,52 @@ Return ONLY valid JSON: {"action": "...", "reason": "one line explanation"}
 
         # ── Keyword fallback ──────────────────────────────────────────────────
         logger.warning("[%s] LLM failed, using keyword fallback for %r", self.SKILL_NAME, query[:60])
-        return self._keyword_fallback(query)
+        return self._keyword_fallback(query, is_draft=is_draft)
 
     @staticmethod
-    def _keyword_fallback(query: str) -> Dict[str, Any]:
+    def _keyword_fallback(query: str, is_draft: bool = False) -> Dict[str, Any]:
         """Heuristic fallback when the LLM call fails."""
         q = query.lower()
 
-        # Selection signals → recommend
-        _select_kw = ("选方案", "选第", "第一个", "第二个", "选1", "选2", "choose option", "option 1", "option 2")
-        if any(kw in q for kw in _select_kw):
+        # ── Selection signals → recommend ─────────────────────────────────────
+        # Covers both "选方案2" and compound "我想要方案2，但把X换成Y" patterns.
+        # Extended to capture "方案1/2/3", "我要方案", "想要方案X" without "选".
+        _select_kw = (
+            "选方案", "选第", "第一个", "第二个", "选1", "选2",
+            "choose option", "option 1", "option 2",
+            "我要方案", "我选方案", "想要方案", "选择方案",
+            "方案一", "方案二", "方案三", "方案1", "方案2", "方案3",
+        )
+        _has_selection = any(kw in q for kw in _select_kw)
+
+        # ── Modification/swap signals ─────────────────────────────────────────
+        # "换成" is deliberately included here so "把X换成另一道类似的" doesn't fall
+        # into the add-kw path. When is_explicit_dish=True the fast-path in
+        # execute() already routes to "add" before we reach the fallback.
+        _modify_kw = (
+            "换一个", "换一下", "换掉", "替换", "换这道", "换成",
+            "change to", "replace with", "instead of",
+            "不要这道", "这道换", "再换", "换个别的",
+            "类似的", "similar", "差不多的", "相似的",
+        )
+        _has_modification = any(kw in q for kw in _modify_kw)
+
+        # ── Compound: selection + modification → recommend (main LLM handles both) ──
+        # e.g. "我想要方案2，但把蒜蓉虾仁换成另一道类似的菜"
+        # Route to "recommend" so the selected plan is loaded; the main LLM will
+        # apply the modification on top of the chosen option.
+        if _has_selection and _has_modification:
+            return {"action": "recommend", "reason": "fallback: select+modify compound — recommend with in-line swap"}
+
+        # Selection only → recommend
+        if _has_selection:
             return {"action": "recommend", "reason": "fallback: selection keyword detected"}
 
-        # Preference / category / cuisine signals → suggest_options (check BEFORE add)
+        # Modification only in draft mode → modify
+        if is_draft and _has_modification:
+            return {"action": "modify", "reason": "fallback: modification signal in draft mode"}
+
+        # ── Preference / category / cuisine signals → suggest_options ─────────
         _preference_kw = (
             "海鲜", "肉", "蔬菜", "辣", "清淡", "日式", "川菜", "粤菜", "西餐",
             "家常", "简单", "快手", "减脂", "素", "甜", "酸",
@@ -163,7 +216,7 @@ Return ONLY valid JSON: {"action": "...", "reason": "one line explanation"}
         if any(kw in q for kw in _preference_kw):
             return {"action": "suggest_options", "reason": "fallback: preference keyword detected"}
 
-        # Ingredient "I have X / what can I make with X" signals → suggest_options
+        # ── Ingredient "I have X / what can I make with X" → suggest_options ──
         _have_ingredient_kw = (
             "的话", "能做", "可以做", "怎么做", "做什么", "能做啥",
             "有个", "有点", "有一些", "有很多", "有剩",
@@ -172,8 +225,8 @@ Return ONLY valid JSON: {"action": "...", "reason": "one line explanation"}
         if any(kw in q for kw in _have_ingredient_kw):
             return {"action": "suggest_options", "reason": "fallback: ingredient-on-hand signal detected"}
 
-        # Explicit add signals (most specific — checked last among suggest/add split)
-        _add_kw = ("加个", "加上", "吃个", "做个", "换成", "来个", "add ", "want ")
+        # ── Explicit add signals (no modification context) ────────────────────
+        _add_kw = ("加个", "加上", "吃个", "做个", "来个", "add ", "want ")
         if any(kw in q for kw in _add_kw):
             return {"action": "add", "reason": "fallback: add keyword detected"}
 
