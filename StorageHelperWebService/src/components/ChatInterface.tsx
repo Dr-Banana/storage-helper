@@ -322,6 +322,111 @@ const DraftPlanCard: React.FC<DraftPlanCardProps> = ({ actionData, onConfirm, on
   )
 }
 
+// ─── Meal date & meal-type confirmation card ─────────────────────────────────
+interface PendingSlot { date: string; meal_type: string }
+interface MealDateConfirmCardProps {
+  slots: PendingSlot[]
+  onConfirm: (selectedSlots: string[]) => void
+  onCancel: () => void
+}
+
+const MEAL_LABELS: Record<string, string> = { breakfast: '早餐', lunch: '午餐', dinner: '晚餐' }
+const MEAL_ORDER = ['breakfast', 'lunch', 'dinner']
+
+function formatDateZh(dateStr: string): string {
+  try {
+    const [y, m, d] = dateStr.split('-').map(Number)
+    const dt = new Date(y, m - 1, d)
+    const weekdays = ['周日', '周一', '周二', '周三', '周四', '周五', '周六']
+    return `${m}月${d}日（${weekdays[dt.getDay()]}）`
+  } catch { return dateStr }
+}
+
+const MealDateConfirmCard: React.FC<MealDateConfirmCardProps> = ({ slots, onConfirm, onCancel }) => {
+  const dateMap = new Map<string, Set<string>>()
+  for (const s of slots) {
+    if (!dateMap.has(s.date)) dateMap.set(s.date, new Set())
+    dateMap.get(s.date)!.add(s.meal_type)
+  }
+  const sortedDates = Array.from(dateMap.keys()).sort()
+
+  const [selected, setSelected] = useState<Set<string>>(
+    () => new Set(slots.map(s => `${s.date}|${s.meal_type}`))
+  )
+
+  const toggle = (date: string, meal: string) => {
+    const key = `${date}|${meal}`
+    setSelected(prev => {
+      const next = new Set(prev)
+      if (next.has(key)) next.delete(key); else next.add(key)
+      return next
+    })
+  }
+
+  return (
+    <div className="mt-2 overflow-hidden rounded-2xl border border-gray-200 bg-white shadow-sm w-full">
+      <div className="flex items-center gap-2 border-b border-gray-100 bg-white px-4 py-3">
+        <div className="flex h-6 w-6 shrink-0 items-center justify-center rounded-lg bg-orange-50 text-orange-500">
+          <Calendar size={13} />
+        </div>
+        <span className="flex-1 text-sm font-bold text-gray-800">确认规划日期与餐次</span>
+        <span className="rounded-full border border-blue-200 bg-blue-50 px-2 py-0.5 text-[10px] font-semibold text-blue-600">
+          待确认
+        </span>
+      </div>
+
+      <div className="divide-y divide-gray-50 px-4 py-1">
+        {sortedDates.map(date => {
+          const availableMeals = dateMap.get(date)!
+          return (
+            <div key={date} className="flex items-center gap-3 py-2.5">
+              <span className="w-28 shrink-0 text-sm font-medium text-gray-700">
+                {formatDateZh(date)}
+              </span>
+              <div className="flex gap-1.5">
+                {MEAL_ORDER.filter(m => availableMeals.has(m)).map(meal => {
+                  const key = `${date}|${meal}`
+                  const on = selected.has(key)
+                  return (
+                    <button
+                      key={meal}
+                      onClick={() => toggle(date, meal)}
+                      className={`rounded-lg px-2.5 py-1 text-xs font-semibold transition-all active:scale-95 ${
+                        on
+                          ? 'bg-home-primary-600 text-white shadow-sm'
+                          : 'bg-gray-100 text-gray-400 line-through'
+                      }`}
+                    >
+                      {MEAL_LABELS[meal] || meal}
+                    </button>
+                  )
+                })}
+              </div>
+            </div>
+          )
+        })}
+      </div>
+
+      <div className="flex gap-2 border-t border-gray-100 bg-gray-50/30 px-4 py-3">
+        <button
+          onClick={onCancel}
+          className="flex-1 rounded-xl border border-gray-200 bg-white py-2 text-sm font-semibold text-gray-500 transition-all hover:bg-gray-50 active:scale-[0.98]"
+        >
+          取消
+        </button>
+        <button
+          disabled={selected.size === 0}
+          onClick={() => onConfirm(Array.from(selected))}
+          className="flex-[2] flex items-center justify-center gap-2 rounded-xl bg-home-primary-600 py-2 text-sm font-bold text-white shadow-sm transition-all hover:bg-home-primary-700 active:scale-[0.98] disabled:opacity-40 disabled:pointer-events-none"
+        >
+          <Check size={14} />
+          确认规划
+        </button>
+      </div>
+    </div>
+  )
+}
+
 // Define props interface
 interface MessageItemProps {
   msg: Message;
@@ -335,6 +440,7 @@ interface MessageItemProps {
   onReplaceInOption?: (optionId: string, label: string, dishName: string) => void;
   onConfirmDraft?: () => void;
   onReplaceDraftDish?: (dishName: string) => void;
+  onConfirmMealDates?: (selectedSlots: string[]) => void;
 }
 
 const MessageItem = memo(({
@@ -342,6 +448,7 @@ const MessageItem = memo(({
   overwriteDismissed, onOverwriteSaved, onOverwriteDismiss,
   onSelectOption, onReplaceInOption,
   onConfirmDraft, onReplaceDraftDish,
+  onConfirmMealDates,
 }: MessageItemProps) => {
     const navigate = useNavigate();
 
@@ -480,6 +587,18 @@ const MessageItem = memo(({
             actionData={msg.actionData}
             onConfirm={onConfirmDraft}
             onReplace={onReplaceDraftDish || (() => {})}
+          />
+        )}
+
+        {/* Meal Date & Meal-Type Confirmation Card (ask_confirm_dates phase) */}
+        {msg.role === 'model' && msg.action === 'PLAN_AHEAD' &&
+          msg.actionData?.ask_type === 'date_meal_confirm' &&
+          (msg.actionData?.pending_slots?.length ?? 0) > 0 &&
+          onConfirmMealDates && (
+          <MealDateConfirmCard
+            slots={msg.actionData.pending_slots}
+            onConfirm={onConfirmMealDates}
+            onCancel={() => onConfirmMealDates([])}
           />
         )}
 
@@ -742,6 +861,15 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ isOpen, onClose }) => {
     handleSend(`当前方案中，请把"${dishName}"换成另一道类似的菜，其他菜品保持不变`)
   }
 
+  /** 餐次确认卡片：用户点击确认/取消 */
+  const handleConfirmMealDates = (selectedSlots: string[]) => {
+    if (selectedSlots.length === 0) {
+      handleSend('取消，不用规划了')
+    } else {
+      handleSend('确认', { confirmed_slots: selectedSlots })
+    }
+  }
+
   // Event Listeners (Open Chat, Context Updates)
   useEffect(() => {
     const handleOpenChat = (e: any) => {
@@ -858,6 +986,7 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ isOpen, onClose }) => {
             onReplaceInOption={handleReplaceInOption}
             onConfirmDraft={handleConfirmDraft}
             onReplaceDraftDish={handleReplaceDraftDish}
+            onConfirmMealDates={handleConfirmMealDates}
           />
         ))}
         

@@ -712,9 +712,19 @@ Current schedules (id, title, scheduled_time):
 
 Rules:
 - "delete ... on Monday" / "remove the meeting on Feb 20" -> operation "delete" and set schedule_id to the matching schedule's id.
-- "add a meeting on Feb 20" / "create ..." -> operation "add", set title, scheduled_time (YYYY-MM-DDTHH:MM:SS), optionally end_time, description, event_type.
-- "change the title of ..." / "update ..." / "reschedule ..." -> operation "modify", set schedule_id and only the fields to change (title, scheduled_time, end_time, description).
+- "add a meeting on Feb 20" / "create ..." / "帮我安排..." / "约个..." -> operation "add", set title, scheduled_time (YYYY-MM-DDTHH:MM:SS), end_time if specified, description, event_type.
+- "change the title of ..." / "update ..." / "reschedule ..." / "改成..." -> operation "modify", set schedule_id and only the fields to change (title, scheduled_time, end_time, description).
 - If no clear add/delete/modify intent, output operation "none" and no other fields.
+
+Time range parsing rules (CRITICAL):
+- "从X点到Y点" / "from X to Y" / "X点—Y点" → scheduled_time=X, end_time=Y
+- "下午2点到4点" → scheduled_time=14:00:00, end_time=16:00:00
+- "上午10点半到12点" → scheduled_time=10:30:00, end_time=12:00:00
+- "开X小时" / "for X hours" → end_time = scheduled_time + X hours
+- "开X分钟" / "for X minutes" → end_time = scheduled_time + X minutes
+- "明天" = tomorrow's date, "后天" = day after tomorrow, "下周一" = next Monday, etc.
+- Always output full datetime: YYYY-MM-DDTHH:MM:SS (no timezone suffix)
+- If end_time is not mentioned at all, output null for end_time (do NOT guess)
 
 Output ONLY valid JSON. Use null for missing fields. Format:
 {{"operation": "add"|"delete"|"modify"|"none", "schedule_id": null or int, "title": null or string, "scheduled_time": null or "YYYY-MM-DDTHH:MM:SS", "end_time": null or "YYYY-MM-DDTHH:MM:SS", "description": null or string, "event_type": null or string}}

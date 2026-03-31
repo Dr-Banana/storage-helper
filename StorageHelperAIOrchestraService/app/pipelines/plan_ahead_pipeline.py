@@ -100,6 +100,22 @@ class PlanAheadPipeline:
             "\n  ".join(_targets),
         )
 
+    @staticmethod
+    def _augment_ask_confirm_result(
+        result: Dict[str, Any],
+        slots: List[str],
+    ) -> Dict[str, Any]:
+        """Inject pending_slots + ask_type into action_data so the frontend
+        can render an interactive meal-selector card instead of relying on text."""
+        parsed: List[Dict[str, str]] = []
+        for s in slots:
+            parts = s.split("|", 1)
+            if len(parts) == 2:
+                parsed.append({"date": parts[0], "meal_type": parts[1]})
+        result["action_data"]["ask_type"] = "date_meal_confirm"
+        result["action_data"]["pending_slots"] = parsed
+        return result
+
     def _build_date_confirm_message(
         self, slots: List[str], language: Optional[str] = "zh"
     ) -> str:
@@ -687,6 +703,11 @@ class PlanAheadPipeline:
                 new_meal_times = _detected
             return {"intent": "corrected", "new_dates": [], "new_meal_times": new_meal_times}
 
+        # Cancel check — must come before confirm so "取消" doesn't partially match confirm
+        _cancel_kw = ("取消", "不用了", "不用规划", "算了", "不想了", "cancel", "never mind", "forget it")
+        if any(kw in _q.lower() for kw in _cancel_kw):
+            return {"intent": "cancel", "new_dates": [], "new_meal_times": None}
+
         # Confirm check comes AFTER correction so that "不对…对…" doesn't false-fire here.
         _confirm_kw = (
             "好", "行", "是的", "对", "没问题", "可以", "确认", "开始", "嗯", "好的",
@@ -904,22 +925,24 @@ class PlanAheadPipeline:
         import json as _json
         import re as _re
 
+        # Use a semantic schema so the LLM expresses *meaning*, not absolute dates.
+        # Python handles all date arithmetic — this makes the prompt language-agnostic.
         system_prompt = (
-            f"Today is {today_str}. Current proposal: {current_start} to {current_end}.\n"
-            "The user wants to change the meal plan dates or meals. Extract what they want.\n\n"
-            "Return JSON with:\n"
-            "  new_start: YYYY-MM-DD | null   (if user specifies a new start date)\n"
-            "  new_end:   YYYY-MM-DD | null   (if user specifies a new end date)\n"
-            "  new_meal_times: ['breakfast','lunch','dinner'] subset | null  "
-            "(null = all three meals, set only if user restricts/expands meals)\n\n"
-            "Date resolution rules:\n"
-            "- '明天' = today + 1 day\n"
-            "- '后天' = today + 2 days\n"
-            "- '下周X' = next week's Monday/Tuesday/... (weekday names: 一=Mon,二=Tue,...,日=Sun)\n"
-            "- '这周X' = this week's corresponding weekday\n"
-            "- '大后天' = today + 3 days\n"
-            "If user says 'until X' or 'to X', resolve that as new_end.\n"
-            "If only one endpoint is mentioned, set both new_start and new_end to that date.\n"
+            f"Today is {today_str}. The current meal plan proposal covers {current_start} to {current_end}.\n"
+            "The user wants to change the proposed dates or meals. Extract their intent.\n\n"
+            "Return JSON with these fields (omit fields that don't apply):\n\n"
+            "  // Option A — user named specific dates or day anchors\n"
+            "  new_start: 'YYYY-MM-DD'   // first day of the new period\n"
+            "  new_end:   'YYYY-MM-DD'   // last day  (>= new_start)\n\n"
+            "  // Option B — user expressed a duration ('3 days', '三天', 'a week', etc.)\n"
+            "  duration_days:     <integer>  // total number of days in the new period\n"
+            "  start_offset_days: 0 or 1    // 0 = starts TODAY, 1 = starts TOMORROW\n"
+            "    (use 1 for 'next/upcoming/后面/接下来/以后/from tomorrow' expressions)\n"
+            "    (use 0 for 'today/today onward/今天' expressions)\n\n"
+            "  // Meal scope (only if the user changes which meals to plan)\n"
+            "  new_meal_times: ['breakfast','lunch','dinner'] subset | null\n"
+            "    (null = all three meals)\n\n"
+            "Choose Option A OR Option B — do not mix them.\n"
             "Return JSON only — no explanation, no markdown."
         )
         payload = {
@@ -927,7 +950,7 @@ class PlanAheadPipeline:
             "systemInstruction": {"parts": [{"text": system_prompt}]},
             "generationConfig": {
                 "temperature": 0.0,
-                "maxOutputTokens": 120,
+                "maxOutputTokens": 150,
                 "responseMimeType": "application/json",
             },
         }
@@ -947,21 +970,38 @@ class PlanAheadPipeline:
             if not _match:
                 return {"new_dates": [], "new_meal_times": None}
             extracted = _json.loads(_match.group())
-            new_start = (extracted.get("new_start") or "")[:10]
-            new_end = (extracted.get("new_end") or "")[:10]
+
+            from datetime import date as _d
+
+            ref_today = _d.fromisoformat(today_str[:10])
             new_dates: List[str] = []
-            if new_start and new_end:
-                from datetime import date as _d
-                try:
-                    s = _d.fromisoformat(new_start)
-                    e = _d.fromisoformat(new_end)
-                    if e >= s:
-                        new_dates = [
-                            (s + timedelta(days=i)).strftime("%Y-%m-%d")
-                            for i in range((e - s).days + 1)
-                        ]
-                except ValueError:
-                    pass
+
+            # Option B — duration-based (language-agnostic)
+            _duration = extracted.get("duration_days")
+            _offset = extracted.get("start_offset_days") or 0
+            if _duration and int(_duration) > 0:
+                s = ref_today + timedelta(days=int(_offset))
+                e = s + timedelta(days=int(_duration) - 1)
+                new_dates = [
+                    (s + timedelta(days=i)).strftime("%Y-%m-%d")
+                    for i in range((e - s).days + 1)
+                ]
+            else:
+                # Option A — explicit dates
+                new_start = (extracted.get("new_start") or "")[:10]
+                new_end = (extracted.get("new_end") or "")[:10]
+                if new_start and new_end:
+                    try:
+                        s = _d.fromisoformat(new_start)
+                        e = _d.fromisoformat(new_end)
+                        if e >= s:
+                            new_dates = [
+                                (s + timedelta(days=i)).strftime("%Y-%m-%d")
+                                for i in range((e - s).days + 1)
+                            ]
+                    except ValueError:
+                        pass
+
             _new_meal_times = extracted.get("new_meal_times") or None
             if isinstance(_new_meal_times, list) and not _new_meal_times:
                 _new_meal_times = None
@@ -1490,6 +1530,7 @@ class PlanAheadPipeline:
         user_timezone: Optional[str],
         language: Optional[str],
         intent_result: Any,
+        context: Optional[Dict] = None,
     ) -> Optional[Dict[str, Any]]:
         """Phase 1b: handle the user's reply to an outstanding date-range confirmation.
 
@@ -1519,6 +1560,27 @@ class PlanAheadPipeline:
         if not (_pending_queue and current_state.get("last_pipeline_action") == "ask_confirm_dates"):
             return None  # not in date-confirmation phase
 
+        # ── Fast-path: frontend submitted confirmed slots directly (button click) ──────
+        _direct_slots: List[str] = [
+            s for s in list((context or {}).get("confirmed_slots") or [])
+            if isinstance(s, str) and "|" in s
+        ]
+        if _direct_slots:
+            update_plan_state(
+                owner_id=owner_id,
+                pending_planning_queue=None,
+                last_pipeline_action=None,
+                meal_planning_queue=_direct_slots,
+                meal_planning_total=len(_direct_slots),
+                meal_plan={}, meal_plan_slots={}, dish_ingredients={}, shopping_list=[],
+                is_draft=False, confirmation_retry_count=None, merge=False,
+            )
+            logger.info(
+                "[PLAN_AHEAD_PIPELINE] Phase 1b fast-path: %d slot(s) confirmed directly via frontend button.",
+                len(_direct_slots),
+            )
+            return None  # fall through to queue-aware LLM planning
+
         # Use skill — prompt lives in ClassifyDateConfirmationSkill.SKILL_PROMPT
         _now = self._now_in_timezone(user_timezone)
         _today_str_skill = _now.strftime("%Y-%m-%d")
@@ -1530,6 +1592,22 @@ class PlanAheadPipeline:
             "[PLAN_AHEAD_PIPELINE] Phase 1b classifier: intent=%r for %r",
             _clf_intent, user_input,
         )
+
+        if _clf_intent == "cancel":
+            update_plan_state(
+                owner_id=owner_id,
+                pending_planning_queue=None,
+                last_pipeline_action=None,
+                confirmation_retry_count=None,
+            )
+            logger.info("[PLAN_AHEAD_PIPELINE] Phase 1b: user cancelled meal planning.")
+            _cur = get_plan_state(owner_id)
+            return self._build_result(
+                response_text="好的，已取消本次规划。之后想规划餐食随时告诉我！",
+                meal_plan=_cur.get("meal_plan", {}), meal_plan_slots=_cur.get("meal_plan_slots", {}),
+                dish_ingredients=_cur.get("dish_ingredients", {}), shopping_list=_cur.get("shopping_list", []),
+                schedule_id=_cur.get("schedule_id"), intent_result=intent_result,
+            )
 
         if _clf_intent == "confirmed":
             _planning_slots = list(_pending_queue)
@@ -1604,12 +1682,14 @@ class PlanAheadPipeline:
                     update_plan_state(owner_id=owner_id, confirmation_retry_count=_retry)
 
             _cur = get_plan_state(owner_id)
-            return self._build_result(
+            _result = self._build_result(
                 response_text=_confirm_msg,
                 meal_plan=_cur.get("meal_plan", {}), meal_plan_slots=_cur.get("meal_plan_slots", {}),
                 dish_ingredients=_cur.get("dish_ingredients", {}), shopping_list=_cur.get("shopping_list", []),
                 schedule_id=_cur.get("schedule_id"), intent_result=intent_result,
             )
+            _slots_for_card = _cur.get("pending_planning_queue") or _pending_queue
+            return self._augment_ask_confirm_result(_result, _slots_for_card)
 
         # "unclear" — attempt date recovery via InitPlanningQueueSkill
         _recovery_result = await InitPlanningQueueSkill(self.gemini_api_url).execute(
@@ -1633,12 +1713,14 @@ class PlanAheadPipeline:
             _confirm_msg = self._build_date_confirm_message(_pending_queue, language)
             logger.info("[PLAN_AHEAD_PIPELINE] Phase 1b: unclear reply, re-asking.")
         _cur = get_plan_state(owner_id)
-        return self._build_result(
+        _result = self._build_result(
             response_text=_confirm_msg,
             meal_plan=_cur.get("meal_plan", {}), meal_plan_slots=_cur.get("meal_plan_slots", {}),
             dish_ingredients=_cur.get("dish_ingredients", {}), shopping_list=_cur.get("shopping_list", []),
             schedule_id=_cur.get("schedule_id"), intent_result=intent_result,
         )
+        _slots_for_card = _recovery_queue if _recovery_queue else _pending_queue
+        return self._augment_ask_confirm_result(_result, _slots_for_card)
 
     async def _handle_ask_dates_resolution(
         self,
@@ -1794,12 +1876,13 @@ class PlanAheadPipeline:
         _confirm_msg = self._build_date_confirm_message(_new_queue, language)
         self._log_pending_dates(_new_queue, current_state.get("meal_plan_slots"), "Multi-day planning detected")
         _cur = current_state  # state not yet changed for these fields
-        return self._build_result(
+        _result = self._build_result(
             response_text=_confirm_msg,
             meal_plan=_cur.get("meal_plan", {}), meal_plan_slots=_cur.get("meal_plan_slots", {}),
             dish_ingredients=_cur.get("dish_ingredients", {}), shopping_list=_cur.get("shopping_list", []),
             schedule_id=_cur.get("schedule_id"), intent_result=intent_result,
         )
+        return self._augment_ask_confirm_result(_result, _new_queue)
 
     def _handle_queue_advance(
         self,
@@ -1937,7 +2020,7 @@ class PlanAheadPipeline:
         # ---- Phase 1b: Date confirmation ----
         if result := await self._handle_date_confirmation(
             owner_id, user_input, current_state, _is_explicit_dish,
-            user_timezone, language, intent_result,
+            user_timezone, language, intent_result, context=context,
         ):
             return result
         current_state = get_plan_state(owner_id)
