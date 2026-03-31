@@ -133,6 +133,7 @@ Use start/end when the user names SPECIFIC dates or day-of-week anchors:
 Return has_planning_intent: false when:
 • User is VIEWING, DELETING, or MODIFYING an existing plan (not creating new meals).
 • User names a SPECIFIC DISH (e.g. "红烧肉", "fish tacos", "pasta carbonara").
+  Rule: HAS DISH = NOT PLANNING (a concrete dish name → this is a single-slot op, not multi-day planning).
   — Naming a food category ("seafood", "海鲜", "something spicy") is NOT a specific
     dish; treat it as a planning request with a preference.
 • User says "add X to …" / "再加个X" / "replace X with Y" — single-slot ops.
