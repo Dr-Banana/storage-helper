@@ -235,7 +235,7 @@ const MealActionCard: React.FC<MealActionCardProps> = ({
               </div>
               <span className="flex-1 text-sm font-medium text-gray-800">{name}</span>
               {/* Action buttons — revealed on row hover */}
-              <div className="flex items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100">
+              <div className="flex items-center gap-1">
                 <button
                   onClick={() => onReplace(name)}
                   title="直接换掉"
