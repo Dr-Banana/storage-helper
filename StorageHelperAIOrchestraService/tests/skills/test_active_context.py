@@ -35,6 +35,9 @@ class TestActiveContextGetUpdateClear:
     def test_get_empty_returns_default(self):
         ctx = get_active_context(999)
         assert ctx["active_ingredients"] == []
+        assert ctx["avoid_dishes"] == []
+        assert ctx["avoid_ingredients"] == []
+        assert ctx["avoid_cuisines"] == []
         assert ctx["target_date"] is None
         assert ctx["target_meal_type"] is None
 
@@ -71,6 +74,18 @@ class TestActiveContextGetUpdateClear:
         ctx = get_active_context(1)
         assert ctx["target_date"] == "2026-03-23"
         assert ctx["target_meal_type"] == "dinner"
+
+    def test_update_adds_session_avoidance_preferences(self):
+        update_active_context(
+            1,
+            add_avoid_dishes=["番茄炒蛋"],
+            add_avoid_ingredients=["香菜"],
+            add_avoid_cuisines=["韩餐"],
+        )
+        ctx = get_active_context(1)
+        assert "番茄炒蛋" in ctx["avoid_dishes"]
+        assert "香菜" in ctx["avoid_ingredients"]
+        assert "韩餐" in ctx["avoid_cuisines"]
 
     def test_clear_removes_context(self):
         update_active_context(1, add_ingredients=["牛棒骨"])
@@ -255,6 +270,26 @@ class TestBuildContextActiveContextInjection:
         )
         assert "ACTIVE CONVERSATION CONTEXT" not in ctx
 
+    def test_session_avoidance_section_injected(self):
+        pipeline = self._make_pipeline()
+        ctx = pipeline._build_context(
+            state={},
+            user_timezone=None,
+            active_context={
+                "active_ingredients": [],
+                "avoid_dishes": ["番茄炒蛋"],
+                "avoid_ingredients": ["香菜"],
+                "avoid_cuisines": ["韩餐"],
+                "target_date": None,
+                "target_meal_type": None,
+                "updated_at": None,
+            },
+        )
+        assert "SESSION AVOIDANCE PREFERENCES" in ctx
+        assert "番茄炒蛋" in ctx
+        assert "香菜" in ctx
+        assert "韩餐" in ctx
+
     def test_none_active_context_not_injected(self):
         pipeline = self._make_pipeline()
         ctx = pipeline._build_context(
@@ -263,3 +298,14 @@ class TestBuildContextActiveContextInjection:
             active_context=None,
         )
         assert "ACTIVE CONVERSATION CONTEXT" not in ctx
+
+
+class TestSessionAvoidanceExtraction:
+    """Verify cuisine-level avoidance is not duplicated as dish-level avoidance."""
+
+    def test_cuisine_avoidance_not_misclassified_as_dish(self):
+        from app.pipelines.plan_ahead_pipeline import PlanAheadPipeline
+
+        parsed = PlanAheadPipeline._extract_session_avoidance_preferences("最近不想吃韩餐")
+        assert "韩餐" in parsed["avoid_cuisines"]
+        assert "韩餐" not in parsed["avoid_dishes"]

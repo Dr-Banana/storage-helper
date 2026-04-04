@@ -11,6 +11,7 @@ Replaces the scattered PLAN_AHEAD handling in chat.py with a clean 5-step flow:
 
 import json
 import logging
+import re
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
@@ -56,6 +57,80 @@ class PlanAheadPipeline:
         except Exception:
             tz = None
         return datetime.now(tz) if tz else datetime.utcnow()
+
+    @staticmethod
+    def _extract_session_avoidance_preferences(user_input: str) -> Dict[str, List[str]]:
+        """
+        Extract short-lived "don't want" preferences from current user turn.
+
+        These are session-level constraints (not permanent profile edits), e.g.:
+          - "最近不想吃韩餐"
+          - "先不要番茄炒蛋"
+          - "别推荐香菜"
+        """
+        text = (user_input or "").strip()
+        if not text:
+            return {"avoid_dishes": [], "avoid_ingredients": [], "avoid_cuisines": []}
+
+        avoid_dishes: List[str] = []
+        avoid_ingredients: List[str] = []
+        avoid_cuisines: List[str] = []
+
+        def _add_unique(bucket: List[str], value: str) -> None:
+            v = value.strip(" ，,。！？!?.;；:：\"'“”‘’")
+            if not v:
+                return
+            if v.lower() not in {x.lower() for x in bucket}:
+                bucket.append(v)
+
+        # Cuisine-level dislike/avoid
+        cuisine_patterns = {
+            "韩餐": [r"(?:不爱吃|不喜欢|不想吃|不要|别(?:给我)?推荐).{0,3}(韩餐|韩式|韩国菜)"],
+            "日料": [r"(?:不爱吃|不喜欢|不想吃|不要|别(?:给我)?推荐).{0,3}(日料|日式|日本菜)"],
+            "川菜": [r"(?:不爱吃|不喜欢|不想吃|不要|别(?:给我)?推荐).{0,3}(川菜)"],
+            "粤菜": [r"(?:不爱吃|不喜欢|不想吃|不要|别(?:给我)?推荐).{0,3}(粤菜)"],
+            "西餐": [r"(?:不爱吃|不喜欢|不想吃|不要|别(?:给我)?推荐).{0,3}(西餐)"],
+        }
+        cuisine_alias_to_canonical = {
+            "韩餐": "韩餐", "韩式": "韩餐", "韩国菜": "韩餐",
+            "日料": "日料", "日式": "日料", "日本菜": "日料",
+            "川菜": "川菜",
+            "粤菜": "粤菜",
+            "西餐": "西餐",
+        }
+        for canonical, patterns in cuisine_patterns.items():
+            if any(re.search(pat, text, flags=re.IGNORECASE) for pat in patterns):
+                _add_unique(avoid_cuisines, canonical)
+
+        # Dish/ingredient-level avoidance: capture phrase tail after negation trigger
+        for m in re.finditer(
+            r"(?:最近|这几天|今天|今晚|明天|先)?\s*(?:不想吃|不爱吃|不喜欢|不要|别(?:给我)?推荐)\s*([^\n，,。！？!?.]{1,16})",
+            text,
+            flags=re.IGNORECASE,
+        ):
+            phrase = (m.group(1) or "").strip()
+            if not phrase:
+                continue
+            # Cuisine aliases must stay in avoid_cuisines, not avoid_dishes.
+            # This prevents duplicated/conflicting constraints like "Avoid dishes: 韩餐".
+            canonical_cuisine = cuisine_alias_to_canonical.get(phrase)
+            if canonical_cuisine:
+                _add_unique(avoid_cuisines, canonical_cuisine)
+                continue
+            # Skip broad generic nouns
+            if phrase in {"这个", "这个菜", "那道", "这道", "吃的"}:
+                continue
+            # Prefer ingredient bucket for common single ingredients
+            if len(phrase) <= 4 and phrase in {"香菜", "葱", "蒜", "姜", "辣椒", "洋葱", "番茄", "土豆", "茄子"}:
+                _add_unique(avoid_ingredients, phrase)
+            else:
+                _add_unique(avoid_dishes, phrase)
+
+        return {
+            "avoid_dishes": avoid_dishes,
+            "avoid_ingredients": avoid_ingredients,
+            "avoid_cuisines": avoid_cuisines,
+        }
 
     def _log_pending_dates(
         self,
@@ -2006,12 +2081,20 @@ class PlanAheadPipeline:
         _ext_ingredients: List[str] = _extracted.get("ingredients", [])
         _ext_target_date: Optional[str] = _extracted.get("target_date")
         _ext_meal_type: Optional[str] = _extracted.get("target_meal_type")
+        _avoid = self._extract_session_avoidance_preferences(user_input)
         if _ext_ingredients or _ext_target_date or _ext_meal_type:
             update_active_context(
                 owner_id,
                 add_ingredients=_ext_ingredients,
                 target_date=_ext_target_date,
                 target_meal_type=_ext_meal_type,
+            )
+        if _avoid["avoid_dishes"] or _avoid["avoid_ingredients"] or _avoid["avoid_cuisines"]:
+            update_active_context(
+                owner_id,
+                add_avoid_dishes=_avoid["avoid_dishes"],
+                add_avoid_ingredients=_avoid["avoid_ingredients"],
+                add_avoid_cuisines=_avoid["avoid_cuisines"],
             )
 
         # Read the (now possibly updated) active context for context injection

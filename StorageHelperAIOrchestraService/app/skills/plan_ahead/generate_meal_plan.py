@@ -210,6 +210,9 @@ class GenerateMealPlanSkill(LLMSkill):
 
         # --- Active Conversation Context (Memory Layer) ---
         _active_ingredients: List[str] = (active_context or {}).get("active_ingredients", [])
+        _avoid_dishes: List[str] = (active_context or {}).get("avoid_dishes", [])
+        _avoid_ingredients: List[str] = (active_context or {}).get("avoid_ingredients", [])
+        _avoid_cuisines: List[str] = (active_context or {}).get("avoid_cuisines", [])
         _active_target_date: Optional[str] = (active_context or {}).get("target_date")
         _active_meal_type: Optional[str] = (active_context or {}).get("target_meal_type")
         if _active_ingredients:
@@ -233,6 +236,26 @@ class GenerateMealPlanSkill(LLMSkill):
                 "[%s] ACTIVE CONTEXT injected: ingredients=%s",
                 self.SKILL_NAME, _active_ingredients,
             )
+        if _avoid_dishes or _avoid_ingredients or _avoid_cuisines:
+            ctx += "\n\n=== SESSION AVOIDANCE PREFERENCES (HIGHEST PRIORITY) ==="
+            ctx += (
+                "\nThe user explicitly said they do NOT want these items recently in this conversation."
+                "\nTreat these as temporary hard constraints for this planning session."
+            )
+            if _avoid_dishes:
+                ctx += f"\n- Avoid dishes: {', '.join(_avoid_dishes)}"
+            if _avoid_ingredients:
+                ctx += f"\n- Avoid ingredients: {', '.join(_avoid_ingredients)}"
+            if _avoid_cuisines:
+                ctx += f"\n- Avoid cuisines/styles: {', '.join(_avoid_cuisines)}"
+            ctx += (
+                "\nDo NOT suggest these in options/recommendations unless the user explicitly asks for them again"
+                " in the current turn."
+            )
+            logger.info(
+                "[%s] SESSION AVOIDANCE injected: dishes=%s ingredients=%s cuisines=%s",
+                self.SKILL_NAME, _avoid_dishes or "none", _avoid_ingredients or "none", _avoid_cuisines or "none",
+            )
 
         # --- Cooking level section ---
         _level_map = {
@@ -245,9 +268,10 @@ class GenerateMealPlanSkill(LLMSkill):
         if cooking_level == "beginner":
             ctx += (
                 "\nThis user is a complete beginner. When recommending meals:"
-                "\n- Suggest simple, beginner-friendly dishes with minimal steps (e.g. stir-fries, fried eggs, simple soups)."
+                "\n- Suggest beginner-friendly dishes, but keep them varied and interesting (avoid repetitive 'safe' defaults)."
                 "\n- Avoid dishes requiring advanced knife skills, precise temperatures, or complex techniques."
-                "\n- Prefer dishes with fewer than 5 ingredients when possible."
+                "\n- Keep prep approachable, while still introducing diverse cuisines/flavors and different protein sources."
+                "\n- Do NOT repeatedly default to cliche starter dishes (e.g. tomato-egg, generic stir-fried pork slices) unless user explicitly asks."
             )
         elif cooking_level == "intermediate":
             ctx += (
@@ -569,6 +593,11 @@ class GenerateMealPlanSkill(LLMSkill):
         ctx += "\n\nRULES:"
         ctx += "\n- NEVER invent meals for dates not mentioned unless user explicitly asks."
         ctx += (
+            "\n- ANTI-TEMPLATE RULE: Do NOT repeatedly start recommendations with the same high-frequency home dishes."
+            "\n  Across options, enforce novelty in at least TWO dimensions: protein source, cuisine style, or cooking method."
+            "\n  If a common fallback dish appeared recently in this session, avoid repeating it unless user explicitly requests it."
+        )
+        ctx += (
             "\n- EXPLICIT DISH RULE: If the user explicitly names specific dish(es) they want"
             " (e.g. '吃个萝卜炖牛腩', '加个红烧肉', 'I want beef stew'):"
             "\n  1. Use action='add' and include ONLY those exact dishes — do NOT pad the meal with extra dishes."
@@ -629,12 +658,10 @@ class GenerateMealPlanSkill(LLMSkill):
             )
         ctx += "\n\n--- MULTI-TURN RECOMMENDATION FLOW (read carefully) ---"
         ctx += (
-            "\n- Use 'ask' when the user wants a recommendation but has NOT yet told you their preferences"
-            " (cuisine style, dietary restrictions, number of servings, specific dishes, etc.)."
-            "\n  * Set meal_entries=[] — do NOT generate or save any plan yet."
-            "\n  * In user_message, ask ONE focused, friendly question to learn their preference."
-            "\n  * Example: 'What cuisine do you prefer — Chinese home-style, Japanese, or Western?' or 'Any ingredients you avoid?'"
-            "\n  * NEVER jump straight to generating a full meal plan on the first request without context."
+            "\n- Use 'ask' SPARINGLY. Prefer 'suggest_options' by default, even when user preferences are minimal."
+            "\n  * Ask only when there is truly insufficient planning scope (no usable date/meal hint and no inferable context)."
+            "\n  * If you ask, ask ONE concise question and avoid repeated back-and-forth."
+            "\n  * The first recommendation turn should generally provide concrete options, not only clarifying questions."
         )
         ctx += (
             "\n- Use 'suggest_options' whenever the user asks for meal suggestions AND has any preference"

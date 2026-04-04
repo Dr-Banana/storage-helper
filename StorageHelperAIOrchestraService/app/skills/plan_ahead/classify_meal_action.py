@@ -19,7 +19,7 @@ Decision rules (in priority order)
 2. pipeline_phase="in_queue"         → "recommend" (queue mode: plan one slot)
 3. pipeline_phase="awaiting_suggest" → "recommend" (user just selected an option)
 4. has_food_preference=True          → "suggest_options" (preference given, show options)
-5. (default)                         → "ask"     (gather preferences first)
+5. (default)                         → "suggest_options" (proactively provide options; avoid over-questioning)
 
 Output schema
 -------------
@@ -68,8 +68,9 @@ CRITICAL decision rules:
    they have on hand (e.g. 海鲜, 日式, 清淡, 辣的, 牛棒骨, 葱花, 土豆, 鸡蛋, beef, onion) → "suggest_options"
    The user is telling you what ingredients/preferences they have — help them use those.
 3. If the user says "选方案X" / "I choose option X" / "第一个" / "就第一个" → "recommend"
-4. Only use "ask" when there is truly NO preference AND no ingredient mentioned at all
-   (e.g. "今天吃什么" with absolutely no other context)
+4. Prefer "suggest_options" even when preference is sparse. The assistant should be proactive.
+5. Only use "ask" when the message is too ambiguous to plan anything useful
+   (e.g. pure small-talk or no planning signal at all).
 
 Examples:
   "我今天晚上想吃个海鲜"              → suggest_options  // 海鲜 is a food category
@@ -82,8 +83,8 @@ Examples:
   "加个红烧肉"                        → add              // specific dish
   "换成番茄炒蛋"                      → add              // specific dish
   "选方案2"                          → recommend        // user selected an option
-  "今晚吃什么好呢"                    → ask              // no preference, no ingredient
-  "帮我想想今天吃什么"                → ask              // no preference, no ingredient
+  "今晚吃什么好呢"                    → suggest_options  // default to proactive options
+  "帮我想想今天吃什么"                → suggest_options  // default to proactive options
 
 Return ONLY valid JSON: {"action": "...", "reason": "one line explanation"}
 """
@@ -230,5 +231,5 @@ Return ONLY valid JSON: {"action": "...", "reason": "one line explanation"}
         if any(kw in q for kw in _add_kw):
             return {"action": "add", "reason": "fallback: add keyword detected"}
 
-        # Default: ask for preferences
-        return {"action": "ask", "reason": "fallback: no clear preference signal"}
+        # Default: proactively provide options instead of forcing another clarification turn
+        return {"action": "suggest_options", "reason": "fallback: default to proactive options"}

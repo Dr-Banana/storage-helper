@@ -45,6 +45,9 @@ def get_active_context(owner_id: int) -> Dict[str, Any]:
 
     return {
         "active_ingredients": list(raw.get("active_ingredients", [])),
+        "avoid_dishes": list(raw.get("avoid_dishes", [])),
+        "avoid_ingredients": list(raw.get("avoid_ingredients", [])),
+        "avoid_cuisines": list(raw.get("avoid_cuisines", [])),
         "target_date": raw.get("target_date"),
         "target_meal_type": raw.get("target_meal_type"),
         "updated_at": raw.get("updated_at"),
@@ -55,6 +58,9 @@ def update_active_context(
     owner_id: int,
     *,
     add_ingredients: Optional[List[str]] = None,
+    add_avoid_dishes: Optional[List[str]] = None,
+    add_avoid_ingredients: Optional[List[str]] = None,
+    add_avoid_cuisines: Optional[List[str]] = None,
     target_date: Optional[str] = None,
     target_meal_type: Optional[str] = None,
     ttl_minutes: int = _DEFAULT_TTL_MINUTES,
@@ -68,18 +74,31 @@ def update_active_context(
     """
     raw = _active_contexts.get(owner_id, {})
 
-    # Union-merge ingredients (preserve order, deduplicate case-insensitively)
-    existing: List[str] = raw.get("active_ingredients", [])
-    if add_ingredients:
-        seen_lower = {i.lower() for i in existing}
-        for ing in add_ingredients:
-            if ing and ing.lower() not in seen_lower:
-                existing.append(ing)
-                seen_lower.add(ing.lower())
+    # Union-merge list fields (preserve order, deduplicate case-insensitively)
+    def _merge_list(existing: List[str], to_add: Optional[List[str]]) -> List[str]:
+        merged = list(existing or [])
+        if not to_add:
+            return merged
+        seen_lower = {i.lower() for i in merged}
+        for item in to_add:
+            if item and item.lower() not in seen_lower:
+                merged.append(item)
+                seen_lower.add(item.lower())
+        return merged
+
+    existing_ingredients: List[str] = _merge_list(raw.get("active_ingredients", []), add_ingredients)
+    existing_avoid_dishes: List[str] = _merge_list(raw.get("avoid_dishes", []), add_avoid_dishes)
+    existing_avoid_ingredients: List[str] = _merge_list(
+        raw.get("avoid_ingredients", []), add_avoid_ingredients
+    )
+    existing_avoid_cuisines: List[str] = _merge_list(raw.get("avoid_cuisines", []), add_avoid_cuisines)
 
     now = datetime.now(timezone.utc)
     updated: Dict[str, Any] = {
-        "active_ingredients": existing,
+        "active_ingredients": existing_ingredients,
+        "avoid_dishes": existing_avoid_dishes,
+        "avoid_ingredients": existing_avoid_ingredients,
+        "avoid_cuisines": existing_avoid_cuisines,
         "target_date": target_date if target_date is not None else raw.get("target_date"),
         "target_meal_type": (
             target_meal_type if target_meal_type is not None else raw.get("target_meal_type")
@@ -89,14 +108,20 @@ def update_active_context(
     }
     _active_contexts[owner_id] = updated
     logger.info(
-        "[ActiveContext] Updated for user %d: ingredients=%s, target=%s %s",
+        "[ActiveContext] Updated for user %d: ingredients=%s, avoid_dishes=%s, avoid_ingredients=%s, avoid_cuisines=%s, target=%s %s",
         owner_id,
         updated["active_ingredients"],
+        updated["avoid_dishes"],
+        updated["avoid_ingredients"],
+        updated["avoid_cuisines"],
         updated.get("target_date"),
         updated.get("target_meal_type") or "",
     )
     return {
         "active_ingredients": list(updated["active_ingredients"]),
+        "avoid_dishes": list(updated["avoid_dishes"]),
+        "avoid_ingredients": list(updated["avoid_ingredients"]),
+        "avoid_cuisines": list(updated["avoid_cuisines"]),
         "target_date": updated["target_date"],
         "target_meal_type": updated["target_meal_type"],
         "updated_at": updated["updated_at"],
@@ -124,6 +149,9 @@ def clear_active_context(owner_id: int) -> bool:
 def _empty() -> Dict[str, Any]:
     return {
         "active_ingredients": [],
+        "avoid_dishes": [],
+        "avoid_ingredients": [],
+        "avoid_cuisines": [],
         "target_date": None,
         "target_meal_type": None,
         "updated_at": None,

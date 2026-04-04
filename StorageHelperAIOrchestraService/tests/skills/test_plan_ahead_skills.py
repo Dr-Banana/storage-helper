@@ -329,10 +329,10 @@ class TestClassifyMealActionSkill:
         assert result["action"] == "suggest_options"
 
     @pytest.mark.asyncio
-    async def test_llm_failure_no_preference_defaults_to_ask(self):
+    async def test_llm_failure_no_preference_defaults_to_suggest_options(self):
         skill = _skill_with_mock_call_none(ClassifyMealActionSkill)
         result = await skill.execute("今天晚上吃什么呢", [])
-        assert result["action"] == "ask"
+        assert result["action"] == "suggest_options"
 
     @pytest.mark.asyncio
     async def test_llm_failure_selection_returns_recommend(self):
