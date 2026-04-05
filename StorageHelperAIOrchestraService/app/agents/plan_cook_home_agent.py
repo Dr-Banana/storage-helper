@@ -39,7 +39,7 @@ class PlanCookHomeAgent(BaseAgent):
             url = f"{base_url}/api/users/{owner_id}/documents"
             self.logger.debug(f"Fetching user documents from: {url}")
             
-            async with httpx.AsyncClient(timeout=10.0) as client:
+            async with httpx.AsyncClient(timeout=30.0) as client:
                 response = await client.get(url)
                 response.raise_for_status()
                 result = response.json()
@@ -79,6 +79,9 @@ class PlanCookHomeAgent(BaseAgent):
             self.logger.info(f"Retrieved {len(inventory_items)} food items from inventory for user {owner_id}")
             return inventory_items
             
+        except httpx.TimeoutException as e:
+            self.logger.warning(f"Timeout fetching inventory for user {owner_id}: {e}")
+            return []
         except httpx.ConnectError as e:
             self.logger.error(f"Cannot connect to DataStorageService to get inventory: {e}")
             return []
