@@ -210,8 +210,8 @@ const HomePage = () => {
           </div>
         </section>
 
-        {/* ── Quick Actions ── */}
-        <section>
+        {/* ── Quick Actions ── (temporarily hidden) */}
+        {/* <section>
           <h2 className="text-[11px] font-bold text-stone-400 uppercase tracking-widest mb-3 px-0.5">
             Quick Actions
           </h2>
@@ -232,10 +232,10 @@ const HomePage = () => {
               </Link>
             ))}
           </div>
-        </section>
+        </section> */}
 
-        {/* ── Try Asking ── */}
-        <section>
+        {/* ── Try Asking ── (temporarily hidden) */}
+        {/* <section>
           <h2 className="text-[11px] font-bold text-stone-400 uppercase tracking-widest mb-3 px-0.5">
             Try Asking
           </h2>
@@ -255,7 +255,7 @@ const HomePage = () => {
               </button>
             ))}
           </div>
-        </section>
+        </section> */}
 
       </div>
     </div>

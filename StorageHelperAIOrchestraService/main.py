@@ -13,10 +13,10 @@ if _is_local:
     logging.getLogger("app").setLevel(logging.DEBUG)
     _uvicorn_log_level = "debug"
 else:
-    # preprod / prod：只保留 WARNING 及以上（包含 ERROR / CRITICAL）
-    logging.basicConfig(level=logging.WARNING, format=_LOG_FORMAT)
-    logging.getLogger("app").setLevel(logging.WARNING)
-    _uvicorn_log_level = "warning"
+    # preprod / prod：INFO 及以上，确保 Render 等平台能看到访问日志和启动信息
+    logging.basicConfig(level=logging.INFO, format=_LOG_FORMAT)
+    logging.getLogger("app").setLevel(logging.INFO)
+    _uvicorn_log_level = "info"
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware

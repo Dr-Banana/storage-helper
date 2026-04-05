@@ -5,9 +5,7 @@ import { MealPlanDetailDrawer } from '../pages/SchedulePage'
 import ScheduleService, { type Schedule } from '../api/scheduleService'
 import {
   Home,
-  FileText,
   User,
-  Package,
   Calendar,
   ChevronLeft,
   Sparkles,
@@ -24,9 +22,9 @@ const routeTitles: Record<string, string> = {
 
 const navigation = [
   { name: 'Home',      label: 'Home',      href: '/',          icon: Home },
-  { name: 'Documents', label: 'Documents', href: '/documents', icon: FileText },
+  // { name: 'Documents', label: 'Documents', href: '/documents', icon: FileText }, // temporarily hidden
   { name: 'Schedule',  label: 'Schedule',  href: '/schedule',  icon: Calendar },
-  { name: 'Storage',   label: 'Storage',   href: '/locations', icon: Package },
+  // { name: 'Storage', label: 'Storage', href: '/locations', icon: Package }, // temporarily hidden
   { name: 'Profile',   label: 'Profile',   href: '/profile',   icon: User },
 ]
 
