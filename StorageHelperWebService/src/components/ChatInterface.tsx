@@ -787,15 +787,22 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ isOpen, onClose }) => {
       } else if (response.action === 'PLAN_AHEAD' && response.action_data) {
         setActiveContext({ type: 'plan_ahead', data: response.action_data })
         const _planSid = response.action_data.schedule_id
+        const _isDraft = response.action_data.is_draft === true
         // Immediate refresh to show the saved meal plan
-        window.dispatchEvent(new CustomEvent('schedule-updated', { 
-          detail: { scheduleId: _planSid, reason: 'plan_updated' } 
+        window.dispatchEvent(new CustomEvent('schedule-updated', {
+          detail: { scheduleId: _planSid, reason: 'plan_updated' }
         }))
-        // Background step generation runs server-side after the response is sent and
-        // typically completes within 5–15 s.  Poll a few times so the drawer picks up
-        // the freshly generated steps without requiring a manual page refresh.
-        if (_planSid) {
-          ;[4000, 9000, 16000].forEach(delay => {
+        // Background step generation only runs after a confirmed (non-draft) save.
+        // Firing for draft responses causes the old schedule's poll to race-clear
+        // the indicator that should belong to the newly confirmed schedule.
+        if (_planSid && !_isDraft) {
+          // Signal that steps are being generated so the drawer can show an indicator.
+          window.dispatchEvent(new CustomEvent('steps-generating', {
+            detail: { scheduleId: _planSid }
+          }))
+          // Poll at 5 s, 12 s, 22 s, 35 s — steps typically finish in 8–20 s per dish,
+          // and batches of 3 dishes can take up to ~25 s for the slowest one.
+          ;[5000, 12000, 22000, 35000].forEach(delay => {
             setTimeout(() => {
               window.dispatchEvent(new CustomEvent('schedule-updated', {
                 detail: { scheduleId: _planSid, reason: 'cooking_steps_new' }

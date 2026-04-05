@@ -2651,6 +2651,43 @@ class PlanAheadPipeline:
                 except Exception as _rd_err:
                     logger.warning(f"[PLAN_AHEAD_PIPELINE] recent_dishes update failed (non-fatal): {_rd_err}")
 
+            # Background auto-generation of cooking steps for all confirmed dishes.
+            if schedule_id and draft_slots:
+                _all_confirmed_dishes = list({
+                    dish
+                    for meals in draft_slots.values()
+                    for mt_dishes in meals.values()
+                    for dish in (mt_dishes if isinstance(mt_dishes, list) else [mt_dishes])
+                    if dish
+                })
+                if _all_confirmed_dishes:
+                    import asyncio as _asyncio
+                    from app.agents.cooking_steps_agent import CookingStepsAgent as _CSA
+                    _batch_ctx = {
+                        "type": "plan_ahead",
+                        "data": {
+                            "schedule_id": schedule_id,
+                            "meal_plan_slots": draft_slots,
+                            "dish_ingredients": draft_di,
+                        },
+                    }
+                    logger.info(
+                        "[PLAN_AHEAD_PIPELINE] confirm: scheduling background step generation for "
+                        "%d dish(es) in schedule_id=%s: %s",
+                        len(_all_confirmed_dishes), schedule_id, _all_confirmed_dishes,
+                    )
+                    _asyncio.ensure_future(
+                        _CSA().execute_batch(
+                            dish_names=_all_confirmed_dishes,
+                            owner_id=owner_id,
+                            context=_batch_ctx,
+                            schedule_id=schedule_id,
+                            cooking_level=cooking_level,
+                            language=language,
+                            skip_if_exists=True,
+                        )
+                    )
+
             return self._build_result(
                 response_text=user_message,
                 meal_plan=draft_plan,
@@ -3104,6 +3141,43 @@ class PlanAheadPipeline:
             last_pipeline_action=action,
             merge=False,
         )
+
+        # Background auto-generation of cooking steps for all newly added dishes.
+        # Runs fire-and-forget so it never delays the chat response.
+        if action in ("add", "modify", "generate") and schedule_id and new_meal_plan_slots:
+            _all_dishes = list({
+                dish
+                for meals in new_meal_plan_slots.values()
+                for mt_dishes in meals.values()
+                for dish in (mt_dishes if isinstance(mt_dishes, list) else [mt_dishes])
+                if dish
+            })
+            if _all_dishes:
+                import asyncio as _asyncio
+                from app.agents.cooking_steps_agent import CookingStepsAgent as _CSA
+                _batch_ctx = {
+                    "type": "plan_ahead",
+                    "data": {
+                        "schedule_id": schedule_id,
+                        "meal_plan_slots": new_meal_plan_slots,
+                        "dish_ingredients": new_dish_ingredients,
+                    },
+                }
+                _asyncio.ensure_future(
+                    _CSA().execute_batch(
+                        dish_names=_all_dishes,
+                        owner_id=owner_id,
+                        context=_batch_ctx,
+                        schedule_id=schedule_id,
+                        cooking_level=cooking_level,
+                        language=language,
+                        skip_if_exists=True,
+                    )
+                )
+                logger.info(
+                    "[PLAN_AHEAD_PIPELINE] Triggered background step generation for %d dish(es): %s",
+                    len(_all_dishes), _all_dishes,
+                )
 
         logger.info(
             f"[PLAN_AHEAD_PIPELINE] Completed: action={action}, "

@@ -1491,6 +1491,11 @@ class CookingStepsAgent(BaseAgent):
         auto-generation after PLAN_AHEAD so that existing steps are never silently
         overwritten by a background task.
         """
+        self.logger.info(
+            "[CookingStepsAgent.batch] Starting generation for '%s' "
+            "(owner=%s, schedule_id=%s, skip_if_exists=%s)",
+            dish_name, owner_id, schedule_id, skip_if_exists,
+        )
         # Extract ingredients from plan context
         ingredients: List[str] = []
         if context and context.get("type") == "plan_ahead":
@@ -1642,6 +1647,12 @@ class CookingStepsAgent(BaseAgent):
             ctx_sid = (context.get("data") or {}).get("schedule_id")
         effective_sid = ctx_sid or schedule_id
 
+        self.logger.info(
+            "[CookingStepsAgent.batch] execute_batch started: %d dish(es) for owner=%s, "
+            "schedule_id=%s, skip_if_exists=%s — %s",
+            len(dish_names), owner_id, effective_sid, skip_if_exists, dish_names,
+        )
+
         tasks = [
             self._generate_and_save_for_dish(
                 dish_name=dish,
@@ -1656,12 +1667,26 @@ class CookingStepsAgent(BaseAgent):
         ]
         raw = await asyncio.gather(*tasks, return_exceptions=True)
         results: List[Dict[str, Any]] = []
+        saved_count = 0
+        skipped_count = 0
+        failed_count = 0
         for dish, outcome in zip(dish_names, raw):
             if isinstance(outcome, Exception):
-                self.logger.error(f"[CookingStepsAgent.batch] Error for '{dish}': {outcome}")
+                self.logger.error("[CookingStepsAgent.batch] Error for '%s': %s", dish, outcome, exc_info=outcome)
                 results.append({"dish_name": dish, "cooking_steps": [], "saved": False, "error": str(outcome)})
+                failed_count += 1
             else:
                 results.append(outcome)
+                if outcome.get("skipped"):
+                    skipped_count += 1
+                elif outcome.get("saved"):
+                    saved_count += 1
+                else:
+                    failed_count += 1
+        self.logger.info(
+            "[CookingStepsAgent.batch] execute_batch complete: saved=%d, skipped=%d, failed=%d",
+            saved_count, skipped_count, failed_count,
+        )
         return results
 
     # ------------------------------------------------------------------

@@ -42,6 +42,19 @@ const Layout = () => {
   const mealDrawerDataRef = useRef(mealDrawerData);
   useEffect(() => { mealDrawerDataRef.current = mealDrawerData; }, [mealDrawerData]);
 
+  // Track which schedule_id is currently undergoing background step generation.
+  // Stored here (not in the drawer) so it survives before the drawer mounts.
+  const [generatingStepsScheduleId, setGeneratingStepsScheduleId] = useState<number | null>(null);
+
+  useEffect(() => {
+    const handleGenerating = (e: Event) => {
+      const { scheduleId } = (e as CustomEvent<{ scheduleId: number }>).detail ?? {};
+      if (scheduleId) setGeneratingStepsScheduleId(scheduleId);
+    };
+    window.addEventListener('steps-generating', handleGenerating);
+    return () => window.removeEventListener('steps-generating', handleGenerating);
+  }, []);
+
   useEffect(() => {
     const openHandler = (e: Event) => {
       const detail = (e as CustomEvent<{ schedule: Schedule; date: string }>).detail;
@@ -111,6 +124,15 @@ const Layout = () => {
           // Also fire a 'schedule-calendar-refresh' event so SchedulePage can
           // update its calendar view without requiring navigation.
           const fresh = await ScheduleService.getSchedule(scheduleId);
+          // Clear the generating indicator once all dishes have steps.
+          setGeneratingStepsScheduleId(prev => {
+            if (prev !== scheduleId) return prev;
+            const allDishes = (fresh as Schedule & { features?: any[] }).features
+              ?.find((f: any) => f.type === 'meal_plan')
+              ?.plans?.flatMap((p: any) => p.meals?.flatMap((m: any) => m.dishes ?? []) ?? []) ?? [];
+            const anyMissing = allDishes.some((d: any) => !d.cookingSteps?.length);
+            return anyMissing ? prev : null;
+          });
           // Store the fresh schedule keyed by id so the MealPlanDetailDrawer
           // opener can use it instead of making another network call.
           window.dispatchEvent(new CustomEvent('schedule-prefetched', {
@@ -223,6 +245,7 @@ const Layout = () => {
               date={mealDrawerData.date}
               onClose={handleMealDrawerClose}
               onEdit={handleMealDrawerEdit}
+              stepsGenerating={generatingStepsScheduleId === mealDrawerData.schedule.id}
             />
           )}
         </div>

@@ -3,7 +3,7 @@ import {
   Calendar, Plus, Edit2, Trash2, CheckCircle2, Circle,
   ChevronLeft, ChevronRight, ChevronDown, Utensils, ShoppingBag, X,
   ChefHat, ArrowRight, Sparkles, LayoutGrid, Rows, GripHorizontal, Clock,
-  ShoppingCart, Check,
+  ShoppingCart, Check, Loader2,
 } from 'lucide-react';
 import ScheduleService, { Schedule, CreateScheduleRequest } from '../api/scheduleService';
 import clsx from 'clsx';
@@ -1836,21 +1836,30 @@ const DishReadCard: React.FC<{
   dish: Dish;
   expanded: boolean;
   onToggle: () => void;
-}> = memo(({ dish, expanded, onToggle }) => {
+  stepsGenerating?: boolean;
+}> = memo(({ dish, expanded, onToggle, stepsGenerating = false }) => {
   const hasIngredients = dish.ingredients.filter(i => i.name).length > 0;
   const hasSteps = (dish.cookingSteps?.length ?? 0) > 0;
-  const hasDetails = hasIngredients || hasSteps;
+  // Card is always expandable when steps are generating or available
+  const hasDetails = hasIngredients || hasSteps || stepsGenerating;
   const hasTiming = dish.prepTime || dish.cookTime;
 
-  // Active tab inside the expanded panel: 'ingredients' | 'steps'
+  // Show Steps tab by default when generating or already available; fall back to Ingredients
   const [activeTab, setActiveTab] = useState<'ingredients' | 'steps'>(
-    hasSteps ? 'steps' : 'ingredients'
+    hasSteps || stepsGenerating ? 'steps' : 'ingredients'
   );
 
-  // Switch to 'steps' tab automatically when steps become available for the first time
+  // Switch to Steps tab the moment steps arrive
   useEffect(() => {
     if (hasSteps) setActiveTab('steps');
   }, [hasSteps]);
+
+  // Also switch to Steps tab when generation starts (so user sees the spinner)
+  useEffect(() => {
+    if (stepsGenerating && !hasSteps) setActiveTab('steps');
+  }, [stepsGenerating, hasSteps]);
+
+  const showStepsTab = hasSteps || stepsGenerating;
 
   return (
     <div className="bg-white rounded-2xl border border-stone-100 overflow-hidden shadow-sm">
@@ -1879,6 +1888,12 @@ const DishReadCard: React.FC<{
                 {dish.cookingSteps!.filter(s => classifyStep(s) === 'step').length} steps
               </span>
             )}
+            {!hasSteps && stepsGenerating && (
+              <span className="flex items-center gap-1 text-[11px] text-stone-400">
+                <Loader2 size={10} className="animate-spin" />
+                步骤生成中
+              </span>
+            )}
             {hasTiming && (
               <span className="flex items-center gap-0.5 text-[11px] text-stone-400">
                 <Clock size={10} />
@@ -1897,8 +1912,8 @@ const DishReadCard: React.FC<{
 
       {expanded && hasDetails && (
         <div className="border-t border-stone-100 bg-stone-50/50">
-          {/* Tab bar — only show if both ingredients AND steps are present */}
-          {hasIngredients && hasSteps && (
+          {/* Tab bar — show when ingredients exist alongside steps (real or loading) */}
+          {hasIngredients && showStepsTab && (
             <div className="flex border-b border-stone-100 px-4 pt-2 gap-3">
               <button
                 type="button"
@@ -1922,15 +1937,19 @@ const DishReadCard: React.FC<{
                     : 'border-transparent text-stone-400 hover:text-stone-600',
                 )}
               >
-                <ChefHat size={9} /> Steps
+                <ChefHat size={9} />
+                Steps
+                {stepsGenerating && !hasSteps && (
+                  <Loader2 size={9} className="animate-spin ml-0.5" />
+                )}
               </button>
             </div>
           )}
 
           {/* Ingredients panel */}
-          {(activeTab === 'ingredients' || !hasSteps) && hasIngredients && (
+          {(activeTab === 'ingredients' || !showStepsTab) && hasIngredients && (
             <div className="px-4 py-3">
-              {(!hasSteps) && (
+              {!showStepsTab && (
                 <p className="text-[10px] font-bold text-stone-400 uppercase tracking-wider mb-2 flex items-center gap-1">
                   <ShoppingBag size={9} /> Ingredients
                 </p>
@@ -1948,48 +1967,56 @@ const DishReadCard: React.FC<{
             </div>
           )}
 
-          {/* Cooking steps panel */}
-          {(activeTab === 'steps' || !hasIngredients) && hasSteps && (
+          {/* Cooking steps panel — shown when active tab is steps, or no ingredients */}
+          {(activeTab === 'steps' || !hasIngredients) && showStepsTab && (
             <div className="px-4 py-3">
-              {(!hasIngredients) && (
+              {!hasIngredients && (
                 <p className="text-[10px] font-bold text-stone-400 uppercase tracking-wider mb-2 flex items-center gap-1">
                   <ChefHat size={9} /> Cooking Steps
                 </p>
               )}
-              <div className="space-y-2">
-                {(() => {
-                  let stepNum = 0;
-                  return dish.cookingSteps!.map((step, i) => {
-                    const kind = classifyStep(step.trimStart());
+              {stepsGenerating && !hasSteps ? (
+                /* Loading state */
+                <div className="flex flex-col items-center justify-center gap-2 py-6 text-stone-400">
+                  <Loader2 size={22} className="animate-spin text-orange-300" />
+                  <span className="text-xs">正在生成步骤，请稍候…</span>
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  {(() => {
+                    let stepNum = 0;
+                    return dish.cookingSteps!.map((step, i) => {
+                      const kind = classifyStep(step.trimStart());
 
-                    if (kind === 'phase') {
-                      return (
-                        <p key={i} className="text-sm font-semibold text-stone-600 pt-3 pb-1 border-t border-stone-100 first:border-t-0 first:pt-0">
-                          {step.trimStart()}
-                        </p>
-                      );
-                    }
+                      if (kind === 'phase') {
+                        return (
+                          <p key={i} className="text-sm font-semibold text-stone-600 pt-3 pb-1 border-t border-stone-100 first:border-t-0 first:pt-0">
+                            {step.trimStart()}
+                          </p>
+                        );
+                      }
 
-                    if (kind === 'tip') {
+                      if (kind === 'tip') {
+                        return (
+                          <div key={i} className="flex gap-1.5 bg-amber-50 border border-amber-100 rounded-md px-2.5 py-1.5 text-xs text-amber-700 leading-relaxed">
+                            {parseBoldText(step)}
+                          </div>
+                        );
+                      }
+
+                      stepNum++;
                       return (
-                        <div key={i} className="flex gap-1.5 bg-amber-50 border border-amber-100 rounded-md px-2.5 py-1.5 text-xs text-amber-700 leading-relaxed">
-                          {parseBoldText(step)}
+                        <div key={i} className="flex gap-2.5 items-start">
+                          <span className="flex-shrink-0 w-5 h-5 rounded-full bg-orange-100 text-orange-600 text-[10px] font-bold flex items-center justify-center mt-0.5">
+                            {stepNum}
+                          </span>
+                          <span className="text-xs text-stone-700 leading-relaxed">{parseBoldText(step)}</span>
                         </div>
                       );
-                    }
-
-                    stepNum++;
-                    return (
-                      <div key={i} className="flex gap-2.5 items-start">
-                        <span className="flex-shrink-0 w-5 h-5 rounded-full bg-orange-100 text-orange-600 text-[10px] font-bold flex items-center justify-center mt-0.5">
-                          {stepNum}
-                        </span>
-                        <span className="text-xs text-stone-700 leading-relaxed">{parseBoldText(step)}</span>
-                      </div>
-                    );
-                  });
-                })()}
-              </div>
+                    });
+                  })()}
+                </div>
+              )}
             </div>
           )}
         </div>
@@ -2007,7 +2034,8 @@ export const MealPlanDetailDrawer: React.FC<{
   date: string;
   onClose: () => void;
   onEdit: () => void;
-}> = ({ schedule, date, onClose, onEdit }) => {
+  stepsGenerating?: boolean;
+}> = ({ schedule, date, onClose, onEdit, stepsGenerating = false }) => {
   const mpf = getMealPlanFeature(schedule);
   const dayPlan = mpf?.plans.find(p => p.date === date);
   const [expandedDish, setExpandedDish] = useState<string | null>(null);
@@ -2079,6 +2107,7 @@ export const MealPlanDetailDrawer: React.FC<{
                       dish={dish}
                       expanded={expandedDish === dish.id}
                       onToggle={() => setExpandedDish(prev => prev === dish.id ? null : dish.id)}
+                      stepsGenerating={stepsGenerating}
                     />
                   ))}
                 </div>

@@ -3,6 +3,7 @@ test_images/
 **/test_images/
 
 .cursor
+.claude
 
 # Temporary files and directories
 # tmp/
