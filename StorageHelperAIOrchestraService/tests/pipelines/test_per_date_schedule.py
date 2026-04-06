@@ -6,12 +6,18 @@ Rule: Every calendar date must live in exactly ONE schedule.
       Two different dates must NEVER share the same schedule_id.
       Adding a meal on Date B must NOT touch the schedule for Date A.
 
+Also covers the confirm-vs-add regression:
+      Confirming a draft must REPLACE existing dishes, not merge alongside them.
+      Bug: confirm path used action="add" (is_append=True) → old + new dishes
+           both saved.  Fix: action="confirm" → is_append=False.
+
 Tests run without a live API: all HTTP calls are mocked.
 """
 
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch, call
 from app.storage.pipeline_storage import PipelineStorage
+from app.pipelines.plan_ahead_pipeline import PlanAheadPipeline
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -277,3 +283,210 @@ class TestPerDateScheduleIsolation:
         assert sid == 30
         storage.update_schedule.assert_called_once()
         storage.create_schedule.assert_not_called()
+
+
+# ─── Confirm-vs-Add regression ────────────────────────────────────────────────
+
+
+def _saved_dishes(metadata: dict) -> list:
+    """Extract dish names from schedule metadata features."""
+    dishes = []
+    for feat in metadata.get("features", []):
+        if feat.get("type") == "meal_plan":
+            for plan in feat.get("plans", []):
+                for meal in plan.get("meals", []):
+                    dishes.extend(d["name"] for d in meal.get("dishes", []))
+    return dishes
+
+
+class TestConfirmReplacesNotMerges:
+    """
+    Regression tests for the bug where the confirm path called
+    _persist(action="add"), making is_append=True and causing new dishes to be
+    merged with old ones instead of replacing them.
+
+    Fix: confirm path now calls _persist(action="confirm") → is_append=False,
+    existing_schedule_id forwarded → storage replaces dishes in-place.
+
+    Scenario that triggered the bug:
+        1. User had 肥牛寿喜烧 saved (schedule 16).
+        2. User said "replace with something similar" → draft updated to 蚝油牛肉.
+        3. User said "确认保存" → confirm path called _persist(action="add").
+        4. Storage merged: schedule 16 ended up with [肥牛寿喜烧, 蚝油牛肉, ...].
+    """
+
+    # ── Storage layer ─────────────────────────────────────────────────────────
+
+    @pytest.mark.asyncio
+    async def test_is_append_false_replaces_existing_dishes(self):
+        """
+        is_append=False + existing schedule for the same date → update_schedule
+        is called and the saved metadata contains ONLY the new dishes.
+        """
+        old_schedule = _make_schedule(
+            sid=16, date_str="2026-04-05", meal_time="dinner", dish="肥牛寿喜烧"
+        )
+
+        async def fake_get_schedules(owner_id):
+            return [old_schedule]
+
+        captured: dict = {}
+
+        async def fake_update(owner_id, schedule_id, event_type, metadata):
+            captured["meta"] = metadata
+            return True
+
+        storage = _storage()
+        storage.get_user_schedules = AsyncMock(side_effect=fake_get_schedules)
+        storage.update_schedule = AsyncMock(side_effect=fake_update)
+        storage.create_schedule = AsyncMock()
+
+        await storage.create_or_update_meal_plan_schedule(
+            owner_id=1,
+            meal_plan={"2026-04-05": "蚝油牛肉"},
+            shopping_list=[],
+            event_type="meal_plan_draft",
+            meal_plan_slots={"2026-04-05": {"dinner": ["蚝油牛肉", "味噌汤", "米饭"]}},
+            is_append=False,
+            existing_schedule_id=16,
+        )
+
+        storage.update_schedule.assert_called_once()
+        storage.create_schedule.assert_not_called()
+
+        saved = _saved_dishes(captured["meta"])
+        assert "蚝油牛肉" in saved, "new dish must be saved"
+        assert "肥牛寿喜烧" not in saved, "old dish must NOT survive when is_append=False"
+
+    @pytest.mark.asyncio
+    async def test_is_append_true_merges_existing_dishes(self):
+        """
+        is_append=True + existing schedule → dishes are merged (not replaced).
+        This is the correct behaviour for genuine action="add" turns, where the
+        user is adding a NEW dish to a date that already has other dishes.
+        """
+        old_schedule = _make_schedule(
+            sid=20, date_str="2026-04-05", meal_time="dinner", dish="番茄炒蛋"
+        )
+
+        async def fake_get_schedules(owner_id):
+            return [old_schedule]
+
+        captured: dict = {}
+
+        async def fake_update(owner_id, schedule_id, event_type, metadata):
+            captured["meta"] = metadata
+            return True
+
+        storage = _storage()
+        storage.get_user_schedules = AsyncMock(side_effect=fake_get_schedules)
+        storage.update_schedule = AsyncMock(side_effect=fake_update)
+        storage.create_schedule = AsyncMock()
+
+        await storage.create_or_update_meal_plan_schedule(
+            owner_id=1,
+            meal_plan={"2026-04-05": "米饭"},
+            shopping_list=[],
+            event_type="meal_plan_draft",
+            meal_plan_slots={"2026-04-05": {"dinner": ["米饭"]}},
+            is_append=True,
+        )
+
+        storage.update_schedule.assert_called_once()
+        storage.create_schedule.assert_not_called()
+
+        saved = _saved_dishes(captured["meta"])
+        assert "番茄炒蛋" in saved, "old dish must be kept when is_append=True"
+        assert "米饭" in saved, "new dish must also be present"
+
+    # ── Pipeline _persist layer ───────────────────────────────────────────────
+
+    @pytest.mark.asyncio
+    async def test_persist_confirm_uses_is_append_false_and_forwards_schedule_id(self):
+        """
+        _persist(action="confirm") must call persist_meal_plan with:
+          - is_append=False   (replace semantics, not merge)
+          - existing_schedule_id == old_state["schedule_id"]  (target the right record)
+
+        This is the contract that prevents the duplicate-dish bug at the pipeline level.
+        """
+        pipeline = PlanAheadPipeline(gemini_api_url="http://fake/")
+
+        captured: dict = {}
+
+        async def fake_persist_meal_plan(**kwargs):
+            captured.update(kwargs)
+            return 16
+
+        pipeline.plan_ahead_agent.persist_meal_plan = fake_persist_meal_plan
+
+        mock_storage = AsyncMock()
+        mock_storage.delete_schedule = AsyncMock(return_value=True)
+
+        old_state = {
+            "meal_plan": {"2026-04-05": "肥牛寿喜烧"},
+            "meal_plan_slots": {"2026-04-05": {"dinner": ["肥牛寿喜烧"]}},
+            "schedule_id": 16,
+        }
+
+        await pipeline._persist(
+            owner_id=1,
+            action="confirm",
+            target_date=None,
+            old_state=old_state,
+            new_meal_plan={"2026-04-05": "蚝油牛肉"},
+            new_meal_plan_slots={"2026-04-05": {"dinner": ["蚝油牛肉", "味噌汤", "米饭"]}},
+            dish_ingredients={"蚝油牛肉": ["牛肉", "蚝油"], "味噌汤": ["味噌"], "米饭": ["米"]},
+            shopping_list=[],
+            storage_client=mock_storage,
+            user_timezone=None,
+        )
+
+        assert captured.get("is_append") is False, (
+            "confirm must use is_append=False so dishes are replaced, not merged"
+        )
+        assert captured.get("existing_schedule_id") == 16, (
+            "confirm must forward existing_schedule_id so the right schedule is updated"
+        )
+
+    @pytest.mark.asyncio
+    async def test_persist_add_uses_is_append_true_and_no_existing_id(self):
+        """
+        _persist(action="add") must call persist_meal_plan with:
+          - is_append=True          (append/merge — user is adding a new dish)
+          - existing_schedule_id=None  (let storage do per-date lookup; never bind to a stale id)
+        """
+        pipeline = PlanAheadPipeline(gemini_api_url="http://fake/")
+
+        captured: dict = {}
+
+        async def fake_persist_meal_plan(**kwargs):
+            captured.update(kwargs)
+            return 20
+
+        pipeline.plan_ahead_agent.persist_meal_plan = fake_persist_meal_plan
+
+        mock_storage = AsyncMock()
+
+        old_state = {
+            "meal_plan": {},
+            "schedule_id": 10,  # stale id — must NOT be forwarded for "add"
+        }
+
+        await pipeline._persist(
+            owner_id=1,
+            action="add",
+            target_date=None,
+            old_state=old_state,
+            new_meal_plan={"2026-04-06": "宫保鸡丁"},
+            new_meal_plan_slots={"2026-04-06": {"dinner": ["宫保鸡丁"]}},
+            dish_ingredients={"宫保鸡丁": ["鸡肉", "花生"]},
+            shopping_list=[],
+            storage_client=mock_storage,
+            user_timezone=None,
+        )
+
+        assert captured.get("is_append") is True
+        assert captured.get("existing_schedule_id") is None, (
+            "add must NOT forward existing_schedule_id to avoid merging into a stale schedule"
+        )

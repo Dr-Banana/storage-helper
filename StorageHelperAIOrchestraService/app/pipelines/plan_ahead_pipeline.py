@@ -2557,7 +2557,7 @@ class PlanAheadPipeline:
 
             new_sid = await self._persist(
                 owner_id=owner_id,
-                action="add",
+                action="confirm",
                 target_date=None,
                 old_state=current_state,
                 new_meal_plan=draft_plan,
