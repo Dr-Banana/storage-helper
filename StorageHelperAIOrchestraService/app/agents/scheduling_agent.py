@@ -94,6 +94,8 @@ PLAN_AHEAD_RESPONSE_SCHEMA: Dict[str, Any] = {
         },
         "target_date": {"type": "string"},
         "meal_time": {"type": "string", "enum": ["breakfast", "lunch", "dinner"]},
+        "source_date": {"type": "string", "nullable": True},
+        "source_meal_time": {"type": "string", "nullable": True},
         "recommendation_reason": {"type": "string", "nullable": True},
         "user_message": {"type": "string"},
         "meal_entries": {
@@ -1434,6 +1436,8 @@ class PlanAheadAgent:
             "action": (data.get("action") or "view").strip(),
             "target_date": (data.get("target_date") or "").strip() or None,
             "meal_time": (data.get("meal_time") or "").strip() or None,
+            "source_date": (data.get("source_date") or "").strip() or None,
+            "source_meal_time": (data.get("source_meal_time") or "").strip() or None,
             "user_message": (data.get("user_message") or "").strip(),
             "meal_plan": meal_plan,
             "meal_plan_slots": meal_plan_slots,

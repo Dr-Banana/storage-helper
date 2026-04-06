@@ -552,6 +552,10 @@ class GenerateMealPlanSkill(LLMSkill):
                 "\n\n=== ACTION DIRECTIVE (mandatory — do not override) ==="
                 "\nThe user explicitly named a specific dish to add."
                 "\nMandatory action: use 'add' to add that exact dish."
+                "\nCRITICAL — PAST DATE RECORDING: If the user mentions a past date"
+                " (e.g. '昨天', 'yesterday', '前天', '上周X'), add those dishes to the"
+                " correct past date in meal_entries. Do NOT just acknowledge ('好的，我知道了')."
+                " Record the meal even if the date is before today."
             )
 
         ctx += "\n\n=== INSTRUCTIONS ==="
@@ -562,6 +566,14 @@ class GenerateMealPlanSkill(LLMSkill):
         ctx += (
             "\n2. Set 'target_date' (YYYY-MM-DD) for the affected date,"
             " and 'meal_time' (breakfast/lunch/dinner)."
+            "\n   MOVE OPERATION: If the user wants to MOVE/RESCHEDULE a meal from one date to another"
+            " (e.g. '把今天晚饭移到明天', 'move tonight's dinner to tomorrow'):"
+            "\n   - Use action='modify', set target_date to the DESTINATION date."
+            "\n   - Set source_date (YYYY-MM-DD) to the ORIGIN date being vacated."
+            "\n   - Set source_meal_time to the meal slot being removed from the origin"
+            " (breakfast/lunch/dinner)."
+            "\n   - meal_entries must contain ONLY the destination date with the moved dishes."
+            "\n   The system will automatically delete the source slot after persisting."
         )
         ctx += "\n3. Apply the change and output the relevant dates in 'meal_entries':"
         ctx += "\n   - For 'add': include ONLY the new date(s) the user mentioned. Do NOT echo back dates that already exist in the current plan."
@@ -603,6 +615,13 @@ class GenerateMealPlanSkill(LLMSkill):
             "\n  1. Use action='add' and include ONLY those exact dishes — do NOT pad the meal with extra dishes."
             "\n  2. IGNORE diversity soft-avoids and hard-bans for those dishes — user's explicit choice overrides variety rules."
             "\n  3. NEVER refuse or redirect with 'you ate this recently' — honor the request directly."
+        )
+        ctx += (
+            "\n- PAST MEAL RECORDING RULE: When the user reports what they ate on a past date"
+            " (e.g. '昨天吃的是麻婆豆腐', '前天晚上吃了红烧肉', 'yesterday I had pizza'),"
+            " ALWAYS use action='add' and add those dishes to the correct past date in meal_entries."
+            " Do NOT respond with only an acknowledgement like '好的，我知道了' or 'I noted that' without"
+            " populating meal_entries. Past meals must be recorded in the schedule just like future meals."
         )
         ctx += (
             "\n- INGREDIENT PERSISTENCE RULE (applies when user asks to swap/replace a dish"

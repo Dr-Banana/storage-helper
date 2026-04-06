@@ -12,6 +12,7 @@ TestClassifyMealActionSkill  — fast-path overrides + LLM routing + fallback
 TestClassifyDateConfirmationSkill — L2 guard + LLM routing + date parsing
 TestInitPlanningQueueSkill   — slot expansion + meal_times handling
 TestSkillIntegration         — pipeline uses skills (smoke test)
+TestPastMealRecording        — past-date meal declarations are added to schedule
 """
 from __future__ import annotations
 
@@ -561,3 +562,128 @@ class TestPipelineUsesSkills:
         )
         assert "ACTION DIRECTIVE" in ctx
         assert "add" in ctx
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Past meal recording — "昨天吃的是..." must be added to schedule, not ignored
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestPastMealRecording:
+    """
+    When a user declares what they ate on a past date
+    (e.g. '昨天吃的是麻婆豆腐辣椒炒肉和米饭'),
+    the pipeline must:
+      1. Classify the dishes as EXPLICIT (ClassifyDishIntentSkill)
+      2. Route to action='add' (ClassifyMealActionSkill fast-path)
+      3. Inject a PAST DATE RECORDING directive in the LLM context
+      4. Have a PAST MEAL RECORDING RULE in the RULES section
+    """
+
+    # ── ClassifyDishIntentSkill: past-date phrasings → EXPLICIT ─────────────
+
+    @pytest.mark.asyncio
+    async def test_昨天吃的是_classified_as_explicit(self):
+        """'昨天吃的是麻婆豆腐辣椒炒肉' → dishes are EXPLICIT, not a planning request."""
+        skill = _skill_with_mock_call(
+            ClassifyDishIntentSkill,
+            '{"intent":"EXPLICIT","dishes":["麻婆豆腐","辣椒炒肉"]}'
+        )
+        result = await skill.execute("昨天吃的是个麻婆豆腐辣椒炒肉和米饭", [])
+        assert result["is_explicit"] is True
+        assert "麻婆豆腐" in result["dishes"]
+        assert "辣椒炒肉" in result["dishes"]
+
+    @pytest.mark.asyncio
+    async def test_前天吃了_classified_as_explicit(self):
+        """'前天吃了红烧肉' → EXPLICIT, past date should not change classification."""
+        skill = _skill_with_mock_call(
+            ClassifyDishIntentSkill,
+            '{"intent":"EXPLICIT","dishes":["红烧肉"]}'
+        )
+        result = await skill.execute("前天晚上吃了红烧肉", [])
+        assert result["is_explicit"] is True
+        assert "红烧肉" in result["dishes"]
+
+    @pytest.mark.asyncio
+    async def test_yesterday_english_classified_as_explicit(self):
+        """'yesterday I had pizza' → EXPLICIT."""
+        skill = _skill_with_mock_call(
+            ClassifyDishIntentSkill,
+            '{"intent":"EXPLICIT","dishes":["pizza"]}'
+        )
+        result = await skill.execute("yesterday I had pizza for dinner", [])
+        assert result["is_explicit"] is True
+        assert "pizza" in result["dishes"]
+
+    # ── ClassifyMealActionSkill: is_explicit_dish=True → fast-path 'add' ────
+
+    @pytest.mark.asyncio
+    async def test_past_meal_explicit_dish_routes_to_add(self):
+        """With is_explicit_dish=True (from past-date report), action must be 'add'."""
+        skill = ClassifyMealActionSkill(URL)
+        # Fast-path: no LLM call needed when is_explicit_dish=True
+        result = await skill.execute(
+            "昨天吃的是个麻婆豆腐辣椒炒肉和米饭",
+            [],
+            is_explicit_dish=True,
+            pipeline_phase="idle",
+        )
+        assert result["action"] == "add"
+
+    # ── _build_context: precomputed_action='add' must include past-date rule ─
+
+    def test_add_action_directive_contains_past_date_rule(self):
+        """
+        When precomputed_action='add', the context must explicitly instruct the
+        LLM to record past meals instead of just acknowledging them.
+        """
+        from app.pipelines.plan_ahead_pipeline import PlanAheadPipeline
+        pipeline = PlanAheadPipeline(gemini_api_url="http://fake")
+        ctx = pipeline._build_context(
+            state={},
+            user_timezone=None,
+            precomputed_action="add",
+        )
+        # The critical fix: past-date guidance in the ACTION DIRECTIVE
+        assert "昨天" in ctx or "yesterday" in ctx.lower() or "past date" in ctx.lower(), (
+            "ACTION DIRECTIVE for 'add' must mention past dates so the LLM records them"
+        )
+        assert "好的，我知道了" not in ctx or "Do NOT" in ctx, (
+            "Context should warn against acknowledge-only responses for past meals"
+        )
+
+    def test_rules_section_contains_past_meal_recording_rule(self):
+        """
+        The RULES section must include a PAST MEAL RECORDING RULE so the LLM
+        never responds with only an acknowledgement for past-date meal reports.
+        """
+        from app.pipelines.plan_ahead_pipeline import PlanAheadPipeline
+        pipeline = PlanAheadPipeline(gemini_api_url="http://fake")
+        ctx = pipeline._build_context(
+            state={},
+            user_timezone=None,
+            precomputed_action="add",
+        )
+        assert "PAST MEAL RECORDING" in ctx, (
+            "RULES section must contain PAST MEAL RECORDING RULE"
+        )
+        # Must forbid the acknowledge-only pattern
+        assert "好的，我知道了" in ctx or "acknowledgement" in ctx.lower(), (
+            "Rule must explicitly name the banned acknowledge-only response pattern"
+        )
+
+    def test_past_meal_rule_present_regardless_of_action(self):
+        """
+        The PAST MEAL RECORDING RULE should be present in the RULES section
+        even without precomputed_action so the baseline LLM call also respects it.
+        """
+        from app.pipelines.plan_ahead_pipeline import PlanAheadPipeline
+        pipeline = PlanAheadPipeline(gemini_api_url="http://fake")
+        ctx = pipeline._build_context(
+            state={},
+            user_timezone=None,
+            precomputed_action=None,
+        )
+        assert "PAST MEAL RECORDING" in ctx, (
+            "PAST MEAL RECORDING RULE must appear in RULES even without precomputed_action"
+        )

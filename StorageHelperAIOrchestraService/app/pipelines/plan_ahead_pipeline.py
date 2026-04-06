@@ -2219,6 +2219,8 @@ class PlanAheadPipeline:
         new_dish_slots = parsed.get("dish_slots") or {}
         action = parsed["action"]
         target_date = parsed.get("target_date")
+        source_date = parsed.get("source_date")
+        source_meal_time = parsed.get("source_meal_time")
 
         # ---- Phase 3: Guardian validation (non-blocking) ----
         try:
@@ -2795,13 +2797,26 @@ class PlanAheadPipeline:
                         _requested,
                     )
                 else:
-                    # Collect dishes that were already in the draft BEFORE this turn.
+                    # Collect dishes that were already in the plan BEFORE this turn.
                     # In draft mode, the LLM returns the full modified draft (not just the
                     # newly-added dish), so we must not strip pre-existing draft content.
                     # Example: draft has [番茄炖排骨, 蚝油生菜]; user says "加个米饭，不要生菜"
                     # → LLM correctly returns [番茄炖排骨, 米饭]; filter must NOT strip 番茄炖排骨.
+                    #
+                    # For non-draft MODIFY (dish swap), the same logic applies: the LLM
+                    # correctly returns the full updated slot (sibling dishes carried over +
+                    # the replacement dish).  Without this guard the filter would strip the
+                    # siblings because they are not in _requested.
+                    # Example: DB has [清炖牛骨汤, 蒜蓉炒蒜苔, 杂粮饭]; user says "换成蒜苔炒鸡蛋"
+                    # → LLM returns [清炖牛骨汤, 蒜苔炒鸡蛋, 杂粮饭].
+                    # → Guard preserves 清炖牛骨汤 and 杂粮饭; only strips truly new LLM extras.
                     _pre_draft_dishes: set = set()
                     if is_currently_draft:
+                        for _pd_meals in (current_state.get("meal_plan_slots") or {}).values():
+                            for _pd_dishes in _pd_meals.values():
+                                _pre_draft_dishes.update(_pd_dishes)
+                    elif action == "modify":
+                        # Non-draft modify: protect dishes already in the persisted DB slot.
                         for _pd_meals in (current_state.get("meal_plan_slots") or {}).values():
                             for _pd_dishes in _pd_meals.values():
                                 _pre_draft_dishes.update(_pd_dishes)
@@ -2903,6 +2918,48 @@ class PlanAheadPipeline:
                 new_dish_slots = {d: v for d, v in new_dish_slots.items() if d in _kept_add_dishes}
                 # Recompute shopping list after filtering
                 shopping_list = compute_shopping_list(new_dish_ingredients)
+
+        # ---- Step 4e: Restore full dish list for update_ingredients / remove_ingredients ----
+        # The LLM only returns the dish whose ingredients changed (e.g. "辣椒炒肉"),
+        # but persist uses is_append=False which PUTs and OVERWRITES the whole slot.
+        # Without this fix, sibling dishes (e.g. 麻婆豆腐, 米饭) are silently wiped.
+        # Solution: replace the LLM's partial dish list with the full existing dish list
+        # from DB state, and merge the updated dish_ingredients on top.
+        if action in ("update_ingredients", "remove_ingredients") and new_meal_plan_slots:
+            _ui_existing_slots = current_state.get("meal_plan_slots") or {}
+            _ui_existing_ingr = current_state.get("dish_ingredients") or {}
+            _ui_fixed_slots: dict = {}
+            for _ui_date, _ui_mt_map in new_meal_plan_slots.items():
+                _ui_existing_date = _ui_existing_slots.get(_ui_date) or {}
+                _ui_fixed_mt: dict = {}
+                for _ui_mt, _ui_llm_dishes in _ui_mt_map.items():
+                    _ui_existing_dishes = _ui_existing_date.get(_ui_mt)
+                    # Prefer existing dish list; fall back to LLM output if slot is new
+                    _ui_fixed_mt[_ui_mt] = (
+                        list(_ui_existing_dishes)
+                        if _ui_existing_dishes
+                        else list(_ui_llm_dishes)
+                    )
+                _ui_fixed_slots[_ui_date] = _ui_fixed_mt
+            new_meal_plan_slots = _ui_fixed_slots
+            new_meal_plan = {
+                d: ", ".join(
+                    dish
+                    for mt_dishes in meals.values()
+                    for dish in (mt_dishes if isinstance(mt_dishes, list) else [mt_dishes])
+                )
+                for d, meals in _ui_fixed_slots.items()
+            }
+            # Merge LLM's ingredient updates into the full existing ingredients dict
+            _ingr_merged = dict(_ui_existing_ingr)
+            _ingr_merged.update(new_dish_ingredients)
+            new_dish_ingredients = _ingr_merged
+            shopping_list = compute_shopping_list(new_dish_ingredients)
+            logger.info(
+                "[PLAN_AHEAD_PIPELINE] %s: restored full dish list from existing state "
+                "(sibling-dish preservation). dates=%s",
+                action, list(_ui_fixed_slots.keys()),
+            )
 
         # ---- Step 5: Draft-mode check ----
         # recommend always creates a draft.
@@ -3112,6 +3169,58 @@ class PlanAheadPipeline:
             )
             if new_sid:
                 schedule_id = new_sid
+
+            # ---- Step 6b: Move operation — delete source slot ----
+            # When the LLM sets source_date, the user wants to MOVE a meal.
+            # The destination was just persisted above; now delete the origin slot.
+            if source_date and action == "modify":
+                logger.info(
+                    "[PLAN_AHEAD_PIPELINE] move: deleting source slot %s %s",
+                    source_date, source_meal_time or "(all)",
+                )
+                _src_existing_slots = (current_state.get("meal_plan_slots") or {})
+                _src_date_slots = _src_existing_slots.get(source_date, {})
+                _src_remaining_mt = (
+                    {mt: v for mt, v in _src_date_slots.items()
+                     if mt != source_meal_time and v}
+                    if source_meal_time else {}
+                )
+                if source_meal_time and _src_remaining_mt:
+                    # Only one meal_time removed — update the source date in DB.
+                    _src_old_mp = current_state.get("meal_plan") or {}
+                    _src_remaining_dishes: List[str] = [
+                        d for mt_dishes in _src_remaining_mt.values() for d in mt_dishes
+                    ]
+                    _src_new_mp = {**_src_old_mp, source_date: ", ".join(_src_remaining_dishes)}
+                    _src_new_slots = {**_src_existing_slots, source_date: _src_remaining_mt}
+                    _src_di = current_state.get("dish_ingredients") or {}
+                    _src_kept_dishes = {d for mt_dishes in _src_remaining_mt.values() for d in mt_dishes}
+                    _src_new_di = {k: v for k, v in _src_di.items() if k in _src_kept_dishes}
+                    await self.plan_ahead_agent.persist_meal_plan(
+                        meal_plan=_src_new_mp,
+                        shopping_list=compute_shopping_list(_src_new_di),
+                        owner_id=owner_id,
+                        existing_schedule_id=current_state.get("schedule_id"),
+                        storage_client=storage_client,
+                        user_timezone=user_timezone,
+                        event_type="meal_plan_draft",
+                        dish_ingredients=_src_new_di,
+                        meal_plan_slots=_src_new_slots,
+                        is_append=False,
+                    )
+                    logger.info(
+                        "[PLAN_AHEAD_PIPELINE] move: source %s updated — removed %s, kept %s",
+                        source_date, source_meal_time, list(_src_remaining_mt.keys()),
+                    )
+                else:
+                    # Entire source date is now empty — delete its schedule.
+                    await self._delete_orphaned_schedules(
+                        owner_id, [source_date], storage_client
+                    )
+                    logger.info(
+                        "[PLAN_AHEAD_PIPELINE] move: source date %s deleted (no remaining slots)",
+                        source_date,
+                    )
 
             # Phase 2: update recent_dishes after direct persist (add / modify)
             if user_profile is not None and new_sid and action in ("add", "modify"):

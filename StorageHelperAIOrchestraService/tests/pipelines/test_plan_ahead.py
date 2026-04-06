@@ -796,3 +796,608 @@ class TestRemovePartialMealTime:
         assert "2026-03-14" not in mp, (
             "Entire date should be removed when no specific meal_time is given"
         )
+
+
+class TestPastMealRecordingPipeline:
+    """
+    Regression tests for the past-meal recording bug.
+
+    Before the fix: saying "昨天吃的是麻婆豆腐辣椒炒肉和米饭" caused the LLM
+    to respond with "好的，我知道了" and an empty meal_entries — the meal was
+    never added to the schedule.
+
+    After the fix: past-date meal reports must be parsed and persisted just
+    like any other action='add' operation.
+    """
+
+    def _agent(self):
+        return PlanAheadAgent(gemini_api_url="http://fake")
+
+    def _make_past_meal_response(self, date_str: str, meal_time: str, dishes: list):
+        """Build a structured LLM response for adding past meals."""
+        return json.dumps({
+            "action": "add",
+            "target_date": date_str,
+            "meal_time": meal_time,
+            "user_message": f"好的，已为您记录 {date_str} {meal_time} 的用餐记录。",
+            "meal_entries": [
+                {
+                    "date": date_str,
+                    "meal_time": meal_time,
+                    "dishes": [
+                        {"name": d, "ingredients": [{"name": "食材", "category": "other"}]}
+                        for d in dishes
+                    ],
+                }
+            ],
+        })
+
+    def test_past_date_meal_parsed_correctly(self):
+        """A past-date meal (e.g. yesterday) is parsed the same as a future meal."""
+        agent = self._agent()
+        # Use a clearly past date
+        raw = self._make_past_meal_response("2026-04-04", "dinner", ["麻婆豆腐", "辣椒炒肉", "米饭"])
+        result = agent.parse_structured_response(raw)
+        assert result is not None
+        assert result["action"] == "add"
+        assert "2026-04-04" in result["meal_plan"]
+        assert "2026-04-04" in result["meal_plan_slots"]
+        dinner_dishes = result["meal_plan_slots"]["2026-04-04"].get("dinner", [])
+        assert "麻婆豆腐" in dinner_dishes
+        assert "辣椒炒肉" in dinner_dishes
+        assert "米饭" in dinner_dishes
+
+    def test_past_date_multiple_dishes_all_captured(self):
+        """All dishes in a past-meal report end up in dish_ingredients."""
+        agent = self._agent()
+        raw = self._make_past_meal_response("2026-04-03", "lunch", ["宫保鸡丁", "白米饭"])
+        result = agent.parse_structured_response(raw)
+        assert result is not None
+        assert "宫保鸡丁" in result["dish_ingredients"]
+        assert "白米饭" in result["dish_ingredients"]
+
+    def test_past_meal_shopping_list_computed(self):
+        """shopping_list is computed from ingredients even for past-date meals."""
+        agent = self._agent()
+        raw = json.dumps({
+            "action": "add",
+            "target_date": "2026-04-04",
+            "meal_time": "dinner",
+            "user_message": "已记录。",
+            "meal_entries": [
+                {
+                    "date": "2026-04-04",
+                    "meal_time": "dinner",
+                    "dishes": [
+                        {
+                            "name": "麻婆豆腐",
+                            "ingredients": [
+                                {"name": "豆腐", "category": "protein"},
+                                {"name": "豆瓣酱", "category": "spice"},
+                            ],
+                        }
+                    ],
+                }
+            ],
+        })
+        result = agent.parse_structured_response(raw)
+        assert result is not None
+        names = {i["name"] if isinstance(i, dict) else i for i in result["shopping_list"]}
+        assert "豆腐" in names
+        assert "豆瓣酱" in names
+
+    def test_past_breakfast_meal_type_preserved(self):
+        """Past breakfast reports use meal_time='breakfast', not defaulting to dinner."""
+        agent = self._agent()
+        raw = self._make_past_meal_response("2026-04-04", "breakfast", ["煮鸡蛋", "粥"])
+        result = agent.parse_structured_response(raw)
+        assert result is not None
+        assert "breakfast" in result["meal_plan_slots"].get("2026-04-04", {})
+        assert "煮鸡蛋" in result["meal_plan_slots"]["2026-04-04"]["breakfast"]
+
+    def test_acknowledge_only_response_has_empty_meal_plan_slots(self):
+        """
+        Documents the bug condition: if the LLM returns an acknowledgement with
+        empty meal_entries, parse_structured_response produces a result with empty
+        meal_plan_slots — so nothing is actually saved to the schedule.
+
+        The PAST MEAL RECORDING RULE in the prompt prevents this by instructing
+        the LLM to always populate meal_entries for past-date reports.
+        """
+        agent = self._agent()
+        raw = json.dumps({
+            "action": "add",
+            "target_date": "2026-04-04",
+            "meal_time": "dinner",
+            "user_message": "好的，我知道了。",
+            "meal_entries": [],
+        })
+        result = agent.parse_structured_response(raw)
+        # parse_structured_response succeeds but produces empty meal data
+        assert result is not None
+        assert result["meal_plan_slots"] == {}, (
+            "Empty meal_entries → empty meal_plan_slots → nothing persisted to schedule (the bug)"
+        )
+        assert result["meal_plan"] == {}
+
+
+class TestUpdateIngredientsPreservesSlot:
+    """
+    Regression: "辣椒炒肉是牛肉" (ingredient clarification) must NOT wipe
+    sibling dishes from the same slot.
+
+    Root cause: for action=update_ingredients the LLM returns only the updated
+    dish in meal_entries (e.g. ['辣椒炒肉']).  The persist call uses
+    is_append=False, so a PUT with that single-dish slot OVERWRITES the full
+    ['麻婆豆腐', '辣椒炒肉', '米饭'] dinner.
+
+    Fix (Step 4e in plan_ahead_pipeline.py): restore the full existing dish
+    list from DB state before persisting; merge updated dish_ingredients on top.
+    """
+
+    def setup_method(self):
+        from app.modules.plan_ahead_state import _plan_states
+        _plan_states.clear()
+
+    def _pipeline(self):
+        return PlanAheadPipeline(gemini_api_url="http://fake")
+
+    def _state_three_dish_dinner(self) -> dict:
+        """2026-04-04 dinner has 麻婆豆腐, 辣椒炒肉, 米饭."""
+        return {
+            "meal_plan": {"2026-04-04": "麻婆豆腐, 辣椒炒肉, 米饭"},
+            "meal_plan_slots": {
+                "2026-04-04": {"dinner": ["麻婆豆腐", "辣椒炒肉", "米饭"]},
+            },
+            "dish_ingredients": {
+                "麻婆豆腐": [{"name": "豆腐", "category": "protein"}],
+                "辣椒炒肉": [{"name": "猪肉", "category": "protein"}],
+                "米饭": [{"name": "大米", "category": "grain"}],
+            },
+            "shopping_list": [],
+            "schedule_id": 100,
+            "is_draft": False,
+            "last_pipeline_action": None,
+        }
+
+    def _llm_update_ingredients_parsed(self) -> dict:
+        """LLM returns update_ingredients for 辣椒炒肉 only (beef replaces pork)."""
+        raw = json.dumps({
+            "action": "update_ingredients",
+            "target_date": "2026-04-04",
+            "meal_time": "dinner",
+            "user_message": "好的，已将辣椒炒肉的猪肉更新为牛肉。",
+            "meal_entries": [
+                {
+                    "date": "2026-04-04",
+                    "meal_time": "dinner",
+                    "dishes": [
+                        {
+                            "name": "辣椒炒肉",
+                            "ingredients": [
+                                {"name": "牛肉", "category": "protein"},
+                                {"name": "辣椒", "category": "vegetable"},
+                            ],
+                        }
+                    ],
+                }
+            ],
+        })
+        return PlanAheadAgent(gemini_api_url="http://fake").parse_structured_response(raw)
+
+    def _run_execute(self, old_state: dict, llm_parsed: dict,
+                     user_input: str = "辣椒炒肉是牛肉") -> dict:
+        pipeline = self._pipeline()
+        sc = _make_storage_client_mock()
+
+        async def _run():
+            with patch.object(
+                pipeline.plan_ahead_agent, "sync_meal_plan_from_database",
+                AsyncMock(return_value=old_state),
+            ), patch.object(
+                pipeline, "_call_llm",
+                AsyncMock(return_value=llm_parsed),
+            ), patch.object(
+                pipeline.plan_ahead_agent, "persist_meal_plan",
+                AsyncMock(return_value=old_state.get("schedule_id")),
+            ):
+                return await pipeline.execute(
+                    owner_id=1,
+                    user_input=user_input,
+                    history=[],
+                    user_timezone="Asia/Shanghai",
+                    storage_client=sc,
+                )
+
+        return asyncio.run(_run())
+
+    def _ad(self, result: dict) -> dict:
+        return result["action_data"]
+
+    def test_sibling_dishes_preserved_after_update_ingredients(self):
+        """
+        The regression: update_ingredients for 辣椒炒肉 must NOT wipe 麻婆豆腐 and 米饭.
+        """
+        result = self._run_execute(
+            old_state=self._state_three_dish_dinner(),
+            llm_parsed=self._llm_update_ingredients_parsed(),
+        )
+        slots = self._ad(result)["meal_plan_slots"]
+        dinner = slots.get("2026-04-04", {}).get("dinner", [])
+        assert "麻婆豆腐" in dinner, "麻婆豆腐 must be preserved after update_ingredients"
+        assert "辣椒炒肉" in dinner, "辣椒炒肉 must remain in the slot"
+        assert "米饭" in dinner, "米饭 must be preserved after update_ingredients"
+
+    def test_updated_ingredient_reflected_in_dish_ingredients(self):
+        """The ingredient update for 辣椒炒肉 must take effect (牛肉, not 猪肉)."""
+        result = self._run_execute(
+            old_state=self._state_three_dish_dinner(),
+            llm_parsed=self._llm_update_ingredients_parsed(),
+        )
+        di = self._ad(result)["dish_ingredients"]
+        assert "辣椒炒肉" in di
+        ing_names = {
+            i["name"] if isinstance(i, dict) else i
+            for i in di["辣椒炒肉"]
+        }
+        assert "牛肉" in ing_names, "Updated ingredient 牛肉 must appear"
+        assert "猪肉" not in ing_names, "Old ingredient 猪肉 must be replaced"
+
+    def test_unrelated_dishes_ingredients_preserved(self):
+        """Ingredients for 麻婆豆腐 and 米饭 must remain untouched."""
+        result = self._run_execute(
+            old_state=self._state_three_dish_dinner(),
+            llm_parsed=self._llm_update_ingredients_parsed(),
+        )
+        di = self._ad(result)["dish_ingredients"]
+        assert "麻婆豆腐" in di
+        assert "米饭" in di
+        mapo_names = {
+            i["name"] if isinstance(i, dict) else i for i in di["麻婆豆腐"]
+        }
+        assert "豆腐" in mapo_names
+
+    def test_meal_plan_string_contains_all_three_dishes(self):
+        """The meal_plan summary string must still contain all 3 dishes."""
+        result = self._run_execute(
+            old_state=self._state_three_dish_dinner(),
+            llm_parsed=self._llm_update_ingredients_parsed(),
+        )
+        mp = self._ad(result)["meal_plan"]
+        plan_str = mp.get("2026-04-04", "")
+        assert "麻婆豆腐" in plan_str
+        assert "辣椒炒肉" in plan_str
+        assert "米饭" in plan_str
+
+
+class TestModifyDishSwapPreservesSiblings:
+    """
+    Regression: "将蒜蓉炒蒜苔换成蒜苔炒鸡蛋" must NOT wipe sibling dishes
+    from the same slot (清炖牛骨汤, 杂粮饭).
+
+    Root cause: the explicit-dish filter (Step 4c) runs for action=modify and
+    strips any dish not matching the explicitly-named replacement dish.  The
+    filter correctly strips truly extra LLM hallucinations, but sibling dishes
+    that were already in the DB slot are legitimate — they should be preserved.
+
+    Fix: for non-draft modify, add the existing DB dishes to the
+    _pre_draft_dishes protection set inside the filter.
+    """
+
+    def setup_method(self):
+        from app.modules.plan_ahead_state import _plan_states
+        _plan_states.clear()
+
+    def _pipeline(self):
+        return PlanAheadPipeline(gemini_api_url="http://fake")
+
+    def _state_three_dish_dinner(self) -> dict:
+        """DB state: 2026-04-06 dinner = [清炖牛骨汤, 蒜蓉炒蒜苔, 杂粮饭]."""
+        return {
+            "meal_plan": {"2026-04-06": "清炖牛骨汤, 蒜蓉炒蒜苔, 杂粮饭"},
+            "meal_plan_slots": {
+                "2026-04-06": {"dinner": ["清炖牛骨汤", "蒜蓉炒蒜苔", "杂粮饭"]},
+            },
+            "dish_ingredients": {
+                "清炖牛骨汤": [{"name": "牛骨", "category": "protein"}],
+                "蒜蓉炒蒜苔": [{"name": "蒜苔", "category": "vegetable"}],
+                "杂粮饭": [{"name": "杂粮", "category": "grain"}],
+            },
+            "shopping_list": [],
+            "schedule_id": 102,
+            "is_draft": False,
+            "last_pipeline_action": None,
+        }
+
+    def _llm_modify_swap_parsed(self) -> dict:
+        """
+        LLM correctly returns the full updated slot after replacing 蒜蓉炒蒜苔 → 蒜苔炒鸡蛋.
+        The siblings 清炖牛骨汤 and 杂粮饭 are carried over.
+        """
+        raw = json.dumps({
+            "action": "modify",
+            "target_date": "2026-04-06",
+            "meal_time": "dinner",
+            "user_message": "好的，已将蒜蓉炒蒜苔调整为蒜苔炒鸡蛋。",
+            "meal_entries": [
+                {
+                    "date": "2026-04-06",
+                    "meal_time": "dinner",
+                    "dishes": [
+                        {
+                            "name": "清炖牛骨汤",
+                            "ingredients": [{"name": "牛骨", "category": "protein"}],
+                        },
+                        {
+                            "name": "蒜苔炒鸡蛋",
+                            "ingredients": [
+                                {"name": "蒜苔", "category": "vegetable"},
+                                {"name": "鸡蛋", "category": "protein"},
+                            ],
+                        },
+                        {
+                            "name": "杂粮饭",
+                            "ingredients": [{"name": "杂粮", "category": "grain"}],
+                        },
+                    ],
+                }
+            ],
+        })
+        return PlanAheadAgent(gemini_api_url="http://fake").parse_structured_response(raw)
+
+    def _run_execute(self, old_state: dict, llm_parsed: dict) -> dict:
+        pipeline = self._pipeline()
+        sc = _make_storage_client_mock()
+
+        async def _run():
+            with patch.object(
+                pipeline.plan_ahead_agent, "sync_meal_plan_from_database",
+                AsyncMock(return_value=old_state),
+            ), patch.object(
+                pipeline, "_call_llm",
+                AsyncMock(return_value=llm_parsed),
+            ), patch.object(
+                pipeline.plan_ahead_agent, "persist_meal_plan",
+                AsyncMock(return_value=old_state.get("schedule_id")),
+            ):
+                return await pipeline.execute(
+                    owner_id=1,
+                    user_input="换成蒜苔炒鸡蛋",
+                    history=[],
+                    user_timezone="Asia/Shanghai",
+                    storage_client=sc,
+                )
+
+        return asyncio.run(_run())
+
+    def _ad(self, result: dict) -> dict:
+        return result["action_data"]
+
+    def test_sibling_dishes_preserved_after_swap(self):
+        """
+        The regression: explicit-dish filter must NOT strip 清炖牛骨汤 and 杂粮饭
+        when the user replaces only 蒜蓉炒蒜苔.
+        """
+        result = self._run_execute(
+            old_state=self._state_three_dish_dinner(),
+            llm_parsed=self._llm_modify_swap_parsed(),
+        )
+        slots = self._ad(result)["meal_plan_slots"]
+        dinner = slots.get("2026-04-06", {}).get("dinner", [])
+        assert "清炖牛骨汤" in dinner, "清炖牛骨汤 must be preserved after swap"
+        assert "蒜苔炒鸡蛋" in dinner, "replacement dish 蒜苔炒鸡蛋 must be present"
+        assert "杂粮饭" in dinner, "杂粮饭 must be preserved after swap"
+        assert "蒜蓉炒蒜苔" not in dinner, "replaced dish 蒜蓉炒蒜苔 must be removed"
+
+    def test_new_dish_ingredients_saved(self):
+        """Ingredients for the replacement dish 蒜苔炒鸡蛋 must be in dish_ingredients."""
+        result = self._run_execute(
+            old_state=self._state_three_dish_dinner(),
+            llm_parsed=self._llm_modify_swap_parsed(),
+        )
+        di = self._ad(result)["dish_ingredients"]
+        assert "蒜苔炒鸡蛋" in di
+        ing_names = {i["name"] if isinstance(i, dict) else i for i in di["蒜苔炒鸡蛋"]}
+        assert "鸡蛋" in ing_names
+
+    def test_replaced_dish_removed_from_ingredients(self):
+        """蒜蓉炒蒜苔 must no longer be in dish_ingredients after swap."""
+        result = self._run_execute(
+            old_state=self._state_three_dish_dinner(),
+            llm_parsed=self._llm_modify_swap_parsed(),
+        )
+        di = self._ad(result)["dish_ingredients"]
+        assert "蒜蓉炒蒜苔" not in di
+
+    def test_meal_plan_string_has_three_dishes(self):
+        """meal_plan summary string must contain all 3 dishes after swap."""
+        result = self._run_execute(
+            old_state=self._state_three_dish_dinner(),
+            llm_parsed=self._llm_modify_swap_parsed(),
+        )
+        mp = self._ad(result)["meal_plan"]
+        plan_str = mp.get("2026-04-06", "")
+        assert "清炖牛骨汤" in plan_str
+        assert "蒜苔炒鸡蛋" in plan_str
+        assert "杂粮饭" in plan_str
+        assert "蒜蓉炒蒜苔" not in plan_str
+
+
+class TestMoveMealPlanPreservesSource:
+    """
+    Regression: "把今天晚饭移到明天" must:
+      1. Write the dishes to the destination date.
+      2. Delete the source date slot (today's dinner) from the schedule.
+
+    Before the fix: the pipeline had no "move" concept — it only persisted the
+    destination, leaving the source date untouched.
+
+    Fix (Step 6b): the LLM now sets source_date/source_meal_time; the pipeline
+    detects these fields and deletes the origin slot after persisting the destination.
+    """
+
+    def setup_method(self):
+        from app.modules.plan_ahead_state import _plan_states
+        _plan_states.clear()
+
+    def _pipeline(self):
+        return PlanAheadPipeline(gemini_api_url="http://fake")
+
+    def _state_today_dinner(self) -> dict:
+        """DB state: 2026-04-06 dinner = [清蒸鲈鱼, 蒜蓉油麦菜, 杂粮饭]."""
+        return {
+            "meal_plan": {"2026-04-06": "清蒸鲈鱼, 蒜蓉油麦菜, 杂粮饭"},
+            "meal_plan_slots": {
+                "2026-04-06": {"dinner": ["清蒸鲈鱼", "蒜蓉油麦菜", "杂粮饭"]},
+            },
+            "dish_ingredients": {
+                "清蒸鲈鱼": [{"name": "鲈鱼", "category": "protein"}],
+                "蒜蓉油麦菜": [{"name": "油麦菜", "category": "vegetable"}],
+                "杂粮饭": [{"name": "杂粮", "category": "grain"}],
+            },
+            "shopping_list": [],
+            "schedule_id": 104,
+            "is_draft": False,
+            "last_pipeline_action": None,
+        }
+
+    def _llm_move_to_tomorrow_parsed(self) -> dict:
+        """LLM response for move: source_date=2026-04-06, target_date=2026-04-07."""
+        raw = json.dumps({
+            "action": "modify",
+            "target_date": "2026-04-07",
+            "meal_time": "dinner",
+            "source_date": "2026-04-06",
+            "source_meal_time": "dinner",
+            "user_message": "好的，已将今天晚餐移动到明天。",
+            "meal_entries": [
+                {
+                    "date": "2026-04-07",
+                    "meal_time": "dinner",
+                    "dishes": [
+                        {"name": "清蒸鲈鱼", "ingredients": [{"name": "鲈鱼", "category": "protein"}]},
+                        {"name": "蒜蓉油麦菜", "ingredients": [{"name": "油麦菜", "category": "vegetable"}]},
+                        {"name": "杂粮饭", "ingredients": [{"name": "杂粮", "category": "grain"}]},
+                    ],
+                }
+            ],
+        })
+        return PlanAheadAgent(gemini_api_url="http://fake").parse_structured_response(raw)
+
+    def _run_execute(self, old_state: dict, llm_parsed: dict,
+                     user_input: str = "把今天晚饭移到明天") -> tuple:
+        """Returns (pipeline_result, persist_meal_plan_calls, delete_orphaned_calls)."""
+        pipeline = self._pipeline()
+        sc = _make_storage_client_mock()
+        persist_calls = []
+        delete_calls = []
+
+        async def _run():
+            with patch.object(
+                pipeline.plan_ahead_agent, "sync_meal_plan_from_database",
+                AsyncMock(return_value=old_state),
+            ), patch.object(
+                pipeline, "_call_llm",
+                AsyncMock(return_value=llm_parsed),
+            ), patch.object(
+                pipeline.plan_ahead_agent, "persist_meal_plan",
+                AsyncMock(side_effect=lambda **kwargs: persist_calls.append(kwargs) or 104),
+            ), patch.object(
+                pipeline, "_delete_orphaned_schedules",
+                AsyncMock(side_effect=lambda owner, dates, sc: delete_calls.append(dates)),
+            ):
+                result = await pipeline.execute(
+                    owner_id=1,
+                    user_input=user_input,
+                    history=[],
+                    user_timezone="Asia/Shanghai",
+                    storage_client=sc,
+                )
+                return result, persist_calls, delete_calls
+
+        return asyncio.run(_run())
+
+    def _ad(self, result: dict) -> dict:
+        return result["action_data"]
+
+    def test_source_date_parsed_from_llm_response(self):
+        """parse_structured_response must extract source_date and source_meal_time."""
+        parsed = self._llm_move_to_tomorrow_parsed()
+        assert parsed["source_date"] == "2026-04-06"
+        assert parsed["source_meal_time"] == "dinner"
+
+    def test_destination_date_written(self):
+        """After a move, the destination date must appear in meal_plan_slots."""
+        result, _, _ = self._run_execute(
+            old_state=self._state_today_dinner(),
+            llm_parsed=self._llm_move_to_tomorrow_parsed(),
+        )
+        slots = self._ad(result)["meal_plan_slots"]
+        assert "2026-04-07" in slots
+        dinner = slots["2026-04-07"].get("dinner", [])
+        assert "清蒸鲈鱼" in dinner
+        assert "蒜蓉油麦菜" in dinner
+        assert "杂粮饭" in dinner
+
+    def test_source_date_deleted_when_only_slot(self):
+        """
+        The regression: when the source date has only the moved slot,
+        _delete_orphaned_schedules must be called for the source date.
+        """
+        _, _, delete_calls = self._run_execute(
+            old_state=self._state_today_dinner(),
+            llm_parsed=self._llm_move_to_tomorrow_parsed(),
+        )
+        deleted_dates = [d for dates in delete_calls for d in dates]
+        assert "2026-04-06" in deleted_dates, (
+            "Source date 2026-04-06 must be deleted after moving its only dinner slot"
+        )
+
+    def test_source_date_partially_removed_when_other_slots_exist(self):
+        """
+        When the source date still has other meal slots after the move,
+        the source date should be updated (not fully deleted).
+        """
+        # Source has breakfast + dinner; move only dinner → breakfast must survive
+        state = {
+            "meal_plan": {"2026-04-06": "煮鸡蛋, 清蒸鲈鱼, 蒜蓉油麦菜, 杂粮饭"},
+            "meal_plan_slots": {
+                "2026-04-06": {
+                    "breakfast": ["煮鸡蛋"],
+                    "dinner": ["清蒸鲈鱼", "蒜蓉油麦菜", "杂粮饭"],
+                },
+            },
+            "dish_ingredients": {
+                "煮鸡蛋": [{"name": "鸡蛋", "category": "protein"}],
+                "清蒸鲈鱼": [{"name": "鲈鱼", "category": "protein"}],
+                "蒜蓉油麦菜": [{"name": "油麦菜", "category": "vegetable"}],
+                "杂粮饭": [{"name": "杂粮", "category": "grain"}],
+            },
+            "shopping_list": [],
+            "schedule_id": 104,
+            "is_draft": False,
+            "last_pipeline_action": None,
+        }
+        _, persist_calls, delete_calls = self._run_execute(
+            old_state=state,
+            llm_parsed=self._llm_move_to_tomorrow_parsed(),
+        )
+        # Source date should be updated (persist called with source date remaining)
+        # NOT deleted
+        deleted_dates = [d for dates in delete_calls for d in dates]
+        assert "2026-04-06" not in deleted_dates, (
+            "Source date with remaining breakfast must NOT be fully deleted"
+        )
+        # A persist call should have been made for the source date update
+        source_persist = [
+            c for c in persist_calls
+            if "2026-04-06" in (c.get("meal_plan") or {})
+        ]
+        assert source_persist, "persist_meal_plan must be called to update source date"
+        src_slots = source_persist[0].get("meal_plan_slots", {})
+        assert "breakfast" in src_slots.get("2026-04-06", {}), (
+            "Breakfast slot must survive on source date"
+        )
+        assert "dinner" not in src_slots.get("2026-04-06", {}), (
+            "Dinner slot must be removed from source date"
+        )
