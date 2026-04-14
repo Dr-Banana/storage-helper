@@ -13,76 +13,89 @@ BASE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 AI_SERVICE_DIR="$BASE_DIR/StorageHelperAIOrchestraService"
 DATA_STORAGE_DIR="$BASE_DIR/StorageHelperDataStorageService"
 WEB_SERVICE_DIR="$BASE_DIR/StorageHelperWebService"
+FOODIE_SERVICE_DIR="$BASE_DIR/FoodieService"
 
-echo -e "${YELLOW}========== StorageHelper 所有服务启动 ==========${NC}\n"
+echo -e "${YELLOW}========== StorageHelper - Start All Services ==========${NC}\n"
 
-# 检查 Docker 是否安装
+# Check Docker is installed
 if ! command -v docker &> /dev/null; then
-    echo -e "${RED}错误：Docker 未安装。请先安装 Docker Desktop${NC}"
+    echo -e "${RED}Error: Docker is not installed. Please install Docker Desktop${NC}"
     exit 1
 fi
 
-# 检查 Docker 是否运行
+# Check Docker is running
 if ! docker ps &> /dev/null; then
-    echo -e "${RED}错误：Docker 未运行。请先启动 Docker Desktop${NC}"
+    echo -e "${RED}Error: Docker is not running. Please start Docker Desktop${NC}"
     exit 1
 fi
 
-echo -e "${CYAN}✓ Docker 环境检查通过${NC}\n"
+echo -e "${CYAN}✓ Docker check passed${NC}\n"
 
-# 初始化数据库（在启动 Data Storage Service 之前）
-echo -e "${BLUE}[初始化] 初始化数据库...${NC}"
+# Initialize database before starting Data Storage Service
+echo -e "${BLUE}[Init] Initializing database...${NC}"
 bash "$DATA_STORAGE_DIR/scripts/init-db.sh"
 if [ $? -ne 0 ]; then
-    echo -e "${RED}❌ 数据库初始化失败${NC}"
+    echo -e "${RED}[Error] Database initialization failed${NC}"
     exit 1
 fi
 echo ""
-echo -e "${BLUE}[1/3] 启动 AI Orchestration Service...${NC}"
-osascript - "$AI_SERVICE_DIR" <<'SCRIPT'
-on run argv
-    tell application "Terminal"
-        activate
-        do script "cd " & quoted form of item 1 of argv & " && echo '停止并清理旧容器...' && docker-compose down && echo '重新构建并启动服务...' && docker-compose up -d --build && echo '✓ AI Orchestration Service 已启动（端口 8888）' && docker-compose logs -f"
-    end tell
-end run
-SCRIPT
-sleep 2
-echo -e "${GREEN}✓ AI Orchestration Service 窗口已打开${NC}\n"
-
-# 第二步：启动 Data Storage Service（Docker）
-echo -e "${BLUE}[2/3] 启动 Data Storage Service...${NC}"
+echo -e "${BLUE}[1/4] Starting Data Storage Service...${NC}"
 osascript - "$DATA_STORAGE_DIR" <<'SCRIPT'
 on run argv
     tell application "Terminal"
         activate
-        do script "cd " & quoted form of item 1 of argv & " && echo '停止并清理旧容器...' && docker-compose down && echo '重新构建并启动服务...' && docker-compose up -d --build && echo '✓ Data Storage Service 已启动（端口 8000）' && docker-compose logs -f"
+        do script "cd " & quoted form of item 1 of argv & " && echo 'Stopping old containers...' && APP_ENV=local docker-compose down && echo 'Building and starting service...' && APP_ENV=local docker-compose --profile local up -d --build && echo '[OK] Data Storage Service started (port 8000)' && APP_ENV=local docker-compose logs -f"
     end tell
 end run
 SCRIPT
 sleep 2
-echo -e "${GREEN}✓ Data Storage Service 窗口已打开${NC}\n"
+echo -e "${GREEN}✓ Data Storage Service window opened${NC}\n"
 
-# 第三步：启动 Web Service（在新窗口中）
-echo -e "${BLUE}[3/3] 启动 Web Service...${NC}"
+echo -e "${BLUE}[2/4] Starting FoodieService (HowToCook MCP)...${NC}"
+osascript - "$FOODIE_SERVICE_DIR" <<'SCRIPT'
+on run argv
+    tell application "Terminal"
+        activate
+        do script "cd " & quoted form of item 1 of argv & " && echo 'Stopping old containers...' && APP_ENV=local docker-compose down && echo 'Building and starting service...' && APP_ENV=local docker-compose up -d --build && echo '[OK] FoodieService started (host port 3010)' && APP_ENV=local docker-compose logs -f"
+    end tell
+end run
+SCRIPT
+sleep 2
+echo -e "${GREEN}✓ FoodieService window opened${NC}\n"
+
+echo -e "${BLUE}[3/4] Starting AI Orchestration Service...${NC}"
+osascript - "$AI_SERVICE_DIR" <<'SCRIPT'
+on run argv
+    tell application "Terminal"
+        activate
+        do script "cd " & quoted form of item 1 of argv & " && echo 'Stopping old containers...' && docker-compose down && echo 'Building and starting service...' && docker-compose up -d --build && echo '[OK] AI Orchestration Service started (port 8888)' && docker-compose logs -f"
+    end tell
+end run
+SCRIPT
+sleep 2
+echo -e "${GREEN}✓ AI Orchestration Service window opened${NC}\n"
+
+# Step 4: Start Web Service
+echo -e "${BLUE}[4/4] Starting Web Service...${NC}"
 osascript - "$WEB_SERVICE_DIR" <<'SCRIPT'
 on run argv
     tell application "Terminal"
         activate
-        do script "cd " & quoted form of item 1 of argv & " && if [ ! -d 'node_modules' ]; then npm install; fi && echo '✓ Web Service 依赖已安装' && npm run dev"
+        do script "cd " & quoted form of item 1 of argv & " && if [ ! -d 'node_modules' ]; then npm install; fi && echo '[OK] Dependencies installed' && npm run dev"
     end tell
 end run
 SCRIPT
 sleep 1
-echo -e "${GREEN}✓ Web Service 窗口已打开${NC}\n"
+echo -e "${GREEN}✓ Web Service window opened${NC}\n"
 
-echo -e "${YELLOW}========== 所有服务已启动 ==========${NC}\n"
-echo -e "${CYAN}服务访问地址：${NC}"
-echo -e "  📊 AI Orchestration   → ${BLUE}http://localhost:8888${NC}"
-echo -e "  💾 Data Storage API   → ${BLUE}http://localhost:8000${NC} (Swagger: /docs)"
-echo -e "  🌐 Web Service        → ${BLUE}http://localhost:5173${NC}"
+echo -e "${YELLOW}========== All services started ==========${NC}\n"
+echo -e "${CYAN}Service URLs:${NC}"
+echo -e "  [DB]  Data Storage API  -> ${BLUE}http://localhost:8000${NC} (Swagger: /docs)"
+echo -e "  [MCP] HowToCook MCP     -> ${BLUE}http://localhost:3010/health${NC}"
+echo -e "  [AI]  AI Orchestration  -> ${BLUE}http://localhost:8888${NC}"
+echo -e "  [WEB] Web Service       -> ${BLUE}http://localhost:5173${NC}"
 echo -e ""
-echo -e "${YELLOW}提示：${NC}"
-echo -e "  • 查看日志：docker-compose logs -f [service_name]"
-echo -e "  • 停止所有：docker-compose down（在各服务目录中）"
-echo -e "  • 清理资源：docker system prune"
+echo -e "${YELLOW}Tips:${NC}"
+echo -e "  - View logs: docker-compose logs -f [service_name]"
+echo -e "  - Stop all: docker-compose down (in each service directory)"
+echo -e "  - Clean up: docker system prune"

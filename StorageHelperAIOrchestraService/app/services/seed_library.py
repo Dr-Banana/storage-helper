@@ -28,8 +28,6 @@ from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
-_DATA_PATH = Path(__file__).parent.parent / "data" / "seed_dishes.json"
-
 # ─── constants (mirror diversity_engine.py) ──────────────────────────────────
 HARD_BAN_DAYS = 3
 SOFT_AVOID_DAYS = 7
@@ -37,16 +35,44 @@ SOFT_AVOID_DAYS = 7
 # How many candidate dishes to surface to the LLM
 DEFAULT_CANDIDATE_COUNT = 12
 
-# ─── internal dish cache ─────────────────────────────────────────────────────
+# ─── dish catalog (populated from HowToCookService at startup) ───────────────
 _DISHES: Optional[List[Dict[str, Any]]] = None
 
 
 def _load() -> List[Dict[str, Any]]:
     global _DISHES
     if _DISHES is None:
-        with open(_DATA_PATH, "r", encoding="utf-8") as fh:
-            _DISHES = json.load(fh)
-        logger.info("[SEED_LIBRARY] Loaded %d seed dishes from %s", len(_DISHES), _DATA_PATH)
+        try:
+            from app.services.howtocook_service import get_howtocook_service
+            catalog = get_howtocook_service().get_dish_catalog()
+            if catalog:
+                _DISHES = catalog
+                logger.info("[SEED_LIBRARY] Loaded %d dishes from HowToCookService", len(_DISHES))
+                return _DISHES
+            else:
+                from app.services.howtocook_service import FOODIE_ERR_004
+                logger.warning(
+                    "[%s] HowToCookService returned an empty catalog — "
+                    "falling back to seed_dishes.json",
+                    FOODIE_ERR_004,
+                )
+        except Exception as exc:
+            from app.services.howtocook_service import FOODIE_ERR_004
+            logger.warning(
+                "[%s] HowToCookService unavailable — meal recommendations falling back to seed_dishes.json. "
+                "Cause: %s",
+                FOODIE_ERR_004, exc,
+            )
+
+        # Fallback: bundled seed_dishes.json (used when MCP service is not yet available)
+        _DATA_PATH = Path(__file__).parent.parent / "data" / "seed_dishes.json"
+        try:
+            with open(_DATA_PATH, "r", encoding="utf-8") as fh:
+                _DISHES = json.load(fh)
+            logger.info("[SEED_LIBRARY] Loaded %d seed dishes from %s (fallback)", len(_DISHES), _DATA_PATH)
+        except FileNotFoundError:
+            logger.warning("[SEED_LIBRARY] seed_dishes.json not found and HowToCook unavailable — empty catalog")
+            _DISHES = []
     return _DISHES
 
 
@@ -273,8 +299,29 @@ def build_seed_context(candidates: List[Dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
+def invalidate_cache() -> None:
+    """Force _load() to re-fetch from HowToCookService on next call.
+
+    Called by HowToCookService after a successful catalog refresh so that
+    the seed library always reflects the latest data.
+    """
+    global _DISHES
+    _DISHES = None
+
+
 def lookup_dish(name: str) -> Optional[Dict[str, Any]]:
-    """Return the seed entry for a dish name (Chinese or English), or None."""
+    """Return the catalog entry for a dish name, or None.
+
+    Tries HowToCookService first (supports fuzzy match), then falls back
+    to linear scan of the loaded catalog.
+    """
+    try:
+        from app.services.howtocook_service import get_howtocook_service
+        entry = get_howtocook_service().lookup_dish(name)
+        if entry:
+            return entry
+    except Exception:
+        pass
     for dish in _load():
         if name in (dish["name_zh"], dish["name_en"]):
             return dish

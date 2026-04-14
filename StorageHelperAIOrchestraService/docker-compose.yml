@@ -7,15 +7,12 @@ services:
     ports:
       - "8888:8888"
     environment:
-      # APP_ENV is passed from shell (local or preprod)
       - APP_ENV=${APP_ENV:-local}
     env_file:
-      # Load the appropriate .env file based on APP_ENV
       - .env.${APP_ENV:-local}
     volumes:
       - ./app:/app/app
       - ./tmp:/app/tmp
-      # Mount .env file so config.py can verify its existence
       - ./.env.${APP_ENV:-local}:/app/.env.${APP_ENV:-local}:ro
     restart: unless-stopped
     networks:

@@ -963,6 +963,49 @@ class CookingStepsAgent(BaseAgent):
     # 3. Step generation
     # ------------------------------------------------------------------
 
+    @staticmethod
+    async def _build_howtocook_context(dish_name: str) -> str:
+        """Look up HowToCook-MCP for the dish and return a prompt context block.
+
+        Returns an empty string when the MCP service is unavailable or the recipe
+        is not found — the caller should proceed with pure LLM generation.
+        """
+        try:
+            from app.services.howtocook_service import get_howtocook_service
+            svc = get_howtocook_service()
+            recipe = await svc.find_recipe(dish_name)
+            if not recipe:
+                return ""
+
+            lines = [
+                "REFERENCE RECIPE (from HowToCook — a trusted Chinese home-cooking resource):",
+            ]
+
+            if recipe.get("estimated_time"):
+                lines.append(f"Estimated time: {recipe['estimated_time']}")
+
+            if recipe.get("ingredients"):
+                lines.append("Ingredients:")
+                for ing in recipe["ingredients"]:
+                    qty = f" {ing['quantity']}" if ing.get("quantity") else ""
+                    lines.append(f"  - {ing['name']}{qty}")
+
+            if recipe.get("steps"):
+                lines.append("Original steps:")
+                for i, step in enumerate(recipe["steps"], 1):
+                    lines.append(f"  {i}. {step}")
+
+            lines.append("")
+            lines.append(
+                "IMPORTANT: Base your response on this reference recipe. "
+                "Use the EXACT ingredient names and quantities listed above. "
+                "Reformat and adapt the steps to match the audience level and formatting rules below."
+            )
+            return "\n".join(lines)
+        except Exception as exc:
+            logger.debug("[CookingStepsAgent] HowToCook lookup skipped: %s", exc)
+            return ""
+
     async def _generate_steps(
         self,
         dish_name: str,
@@ -972,6 +1015,11 @@ class CookingStepsAgent(BaseAgent):
     ) -> Dict[str, Any]:
         """Generate step-by-step cooking instructions AND a structured ingredient list.
 
+        When HowToCookService has the recipe, its ingredients and steps are injected
+        into the LLM prompt as a trusted reference — ensuring accuracy while still
+        adapting formatting and detail level to the user's cooking skill.
+        Falls back to pure LLM generation when no recipe is found.
+
         Returns a dict:
           {
             "steps": ["step 1...", "step 2...", ...],
@@ -979,6 +1027,20 @@ class CookingStepsAgent(BaseAgent):
           }
         Falls back to {"steps": [], "ingredients": []} on failure.
         """
+        # HowToCook reference context (empty string = not found, pure LLM fallback)
+        htc_context = await self._build_howtocook_context(dish_name)
+        if htc_context:
+            self.logger.info(
+                "[CookingStepsAgent] HowToCook reference found for '%s'", dish_name
+            )
+        else:
+            from app.services.howtocook_service import FOODIE_ERR_005
+            self.logger.warning(
+                "[%s] No HowToCook recipe found for '%s' — cooking steps will be pure LLM. "
+                "If unexpected, check FoodieService is running and the dish name matches HowToCook catalog.",
+                FOODIE_ERR_005, dish_name,
+            )
+
         ing_text = ""
         if ingredients:
             ing_text = f"\nKnown ingredients: {', '.join(i for i in ingredients if i)}"
@@ -1077,11 +1139,14 @@ class CookingStepsAgent(BaseAgent):
         }
         _lang_name, _lang_enforce = _lang_instr_map.get(language or "zh", _lang_instr_map["zh"])
 
+        htc_block = f"\n{htc_context}\n" if htc_context else ""
+
         prompt = (
             f"CRITICAL LANGUAGE RULE: You MUST write ALL cooking steps and ingredient names exclusively in {_lang_name}. "
             f"{_lang_enforce} "
             f"This rule overrides everything else — even if the dish name is in a different language, the steps and ingredient names must be in {_lang_name}.\n\n"
-            f"Generate step-by-step cooking instructions AND a complete ingredient list for: {dish_name}.{ing_text}\n\n"
+            f"Generate step-by-step cooking instructions AND a complete ingredient list for: {dish_name}.{ing_text}\n"
+            f"{htc_block}"
             f"AUDIENCE: {level_instr}\n"
             'Respond with a JSON object:\n'
             '{\n'

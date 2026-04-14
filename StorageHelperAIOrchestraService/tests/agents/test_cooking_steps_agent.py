@@ -43,6 +43,22 @@ def agent():
     return CookingStepsAgent()
 
 
+@pytest.fixture(autouse=True)
+def no_howtocook_mcp():
+    """Prevent every test from attempting a live MCP connection.
+
+    _build_howtocook_context returns "" by default (pure-LLM path).
+    Tests that specifically exercise the HowToCook-found path override this
+    with a nested patch.object inside the test body.
+    """
+    with patch.object(
+        CookingStepsAgent,
+        "_build_howtocook_context",
+        new=AsyncMock(return_value=""),
+    ):
+        yield
+
+
 # ---------------------------------------------------------------------------
 # _detect_meal_time (synchronous)
 # ---------------------------------------------------------------------------
@@ -706,6 +722,70 @@ class TestExecuteBatch:
     async def test_batch_empty_dish_list_returns_empty(self, agent):
         results = await agent.execute_batch(dish_names=[], owner_id=1)
         assert results == []
+
+
+# ---------------------------------------------------------------------------
+# HowToCook reference injection
+# ---------------------------------------------------------------------------
+
+class TestHowToCookContext:
+    """Verify that a HowToCook recipe block is injected into the LLM prompt
+    when the MCP service returns a match, and that the pure-LLM path is taken
+    when it does not."""
+
+    @pytest.mark.asyncio
+    async def test_howtocook_reference_injected_into_prompt(self, agent):
+        """When _build_howtocook_context returns a recipe block, it must appear
+        verbatim inside the prompt sent to the LLM."""
+        htc_block = (
+            "REFERENCE RECIPE (from HowToCook):\n"
+            "Ingredients: 鸡肉 300g, 花生 50g\n"
+            "Steps: 1. 热锅冷油 2. 加入鸡肉翻炒"
+        )
+        captured = {}
+
+        async def fake_post(url, headers, json):
+            captured["prompt"] = json["contents"][0]["parts"][0]["text"]
+            return _make_response(_gemini_steps_response(["步骤1", "步骤2"]))
+
+        with patch.object(
+            CookingStepsAgent,
+            "_build_howtocook_context",
+            new=AsyncMock(return_value=htc_block),
+        ):
+            with patch("httpx.AsyncClient") as mock_cls:
+                client = AsyncMock()
+                client.post = fake_post
+                client.__aenter__ = AsyncMock(return_value=client)
+                client.__aexit__ = AsyncMock(return_value=False)
+                mock_cls.return_value = client
+
+                await agent._generate_steps("宫保鸡丁")
+
+        assert htc_block in captured["prompt"], (
+            "HowToCook reference block must be injected verbatim into the LLM prompt"
+        )
+
+    @pytest.mark.asyncio
+    async def test_pure_llm_path_when_howtocook_not_found(self, agent):
+        """When _build_howtocook_context returns '' (no match / service down),
+        _generate_steps must still return a valid result via pure LLM."""
+        # no_howtocook_mcp autouse fixture already patches to return ""
+        steps = ["热锅冷油。", "加入食材翻炒。"]
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status = MagicMock()
+        mock_resp.json.return_value = _gemini_steps_response(steps)
+
+        with patch("httpx.AsyncClient") as mock_cls:
+            client = AsyncMock()
+            client.post = AsyncMock(return_value=mock_resp)
+            client.__aenter__ = AsyncMock(return_value=client)
+            client.__aexit__ = AsyncMock(return_value=False)
+            mock_cls.return_value = client
+
+            result = await agent._generate_steps("某道没有收录的菜")
+
+        assert result["steps"] == steps
 
 
 # ---------------------------------------------------------------------------

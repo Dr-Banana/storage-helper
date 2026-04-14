@@ -139,6 +139,14 @@ class Settings(BaseSettings):
     VISION_AUTO_TRIGGER_ON_LOW_OCR: bool = True  # Auto-trigger vision when OCR confidence is low
     VISION_OCR_CONFIDENCE_THRESHOLD: float = 80  # Trigger vision if OCR confidence below this (0-100, percentage)
     VISION_TIMEOUT: float = 30.0  # Vision API timeout (seconds)
+
+    # HowToCook Recipe Integration (via HowToCook-MCP server)
+    # StreamableHTTP endpoint of the howtocook-mcp service
+    # Local:  http://howtocook-mcp:3000/mcp  (docker-compose service name)
+    # Render: full URL of the deployed howtocook-mcp Render service + /mcp
+    HOWTOCOOK_MCP_URL: str = "http://howtocook-mcp:3000/mcp"
+    # How often the background task refreshes the dish catalog (hours)
+    HOWTOCOOK_SYNC_INTERVAL_HOURS: int = 24
     
     # 允许 Pydantic 读取 .env 文件
     model_config = SettingsConfigDict(env_file=get_env_file(), extra='ignore')

@@ -1,0 +1,22 @@
+services:
+  howtocook-mcp:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: howtocook-mcp-${APP_ENV:-local}
+    ports:
+      - "3010:3000"
+    restart: unless-stopped
+    networks:
+      - storage-network
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/health"]
+      interval: 20s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+networks:
+  storage-network:
+    external: true
+    name: storagehelperdatastorageservice_storage-network-${APP_ENV:-local}
