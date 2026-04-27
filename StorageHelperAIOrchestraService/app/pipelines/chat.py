@@ -413,7 +413,7 @@ Generate a clear, natural response for the user based on the tool result.\
                             "args": part["functionCall"].get("args") or {},
                         }
                     )
-                elif "text" in part:
+                elif "text" in part and not part.get("thought"):
                     text_parts.append(part["text"])
 
             tokens = data.get("usageMetadata", {}).get("candidatesTokenCount", 0)
@@ -481,7 +481,7 @@ Generate a clear, natural response for the user based on the tool result.\
             candidate = (data.get("candidates") or [{}])[0]
             parts = candidate.get("content", {}).get("parts") or []
             tokens = data.get("usageMetadata", {}).get("candidatesTokenCount", 0)
-            return "".join(p.get("text", "") for p in parts if "text" in p), tokens
+            return "".join(p.get("text", "") for p in parts if "text" in p and not p.get("thought")), tokens
 
         except Exception as exc:
             logger.error(
@@ -514,7 +514,7 @@ Generate a clear, natural response for the user based on the tool result.\
             candidate = (data.get("candidates") or [{}])[0]
             parts = candidate.get("content", {}).get("parts") or []
             tokens = data.get("usageMetadata", {}).get("candidatesTokenCount", 0)
-            return "".join(p.get("text", "") for p in parts if "text" in p), tokens
+            return "".join(p.get("text", "") for p in parts if "text" in p and not p.get("thought")), tokens
 
         except Exception as exc:
             logger.error("[TOOL-USE] Plain generate failed: %s", exc, exc_info=True)
@@ -573,7 +573,7 @@ Generate a clear, natural response for the user based on the tool result.\
             candidate = (data.get("candidates") or [{}])[0]
             parts = candidate.get("content", {}).get("parts") or []
             response_text = (
-                "".join(p.get("text", "") for p in parts if "text" in p)
+                "".join(p.get("text", "") for p in parts if "text" in p and not p.get("thought"))
                 or response_text
             )
         except Exception as exc:
