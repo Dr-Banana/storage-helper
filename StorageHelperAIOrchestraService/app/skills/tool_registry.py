@@ -52,10 +52,9 @@ TOOL_DECLARATIONS: List[Dict[str, Any]] = [
     {
         "name": "plan_meal",
         "description": (
-            "Decide WHAT to eat: schedule meals, get dish recommendations, build a meal plan, "
-            "add/modify/remove dishes on specific dates, or generate a shopping list. "
-            "Use when the user is choosing or changing what goes on their calendar "
-            "(e.g. '今晚吃什么', '帮我规划这周', '把口水鸡换成别的', '明天午饭加一道汤'). "
+            "Use when the user wants to CREATE, PLAN, or MODIFY a meal schedule — "
+            "recommending dishes, adding items, removing or swapping dishes, or building a new plan. "
+            "For simply reading what is already scheduled, use view_schedule instead. "
             "NOT for questions about how to cook a dish or what ingredients it needs."
         ),
         "parameters": {
@@ -175,7 +174,11 @@ TOOL_DECLARATIONS: List[Dict[str, Any]] = [
     },
     {
         "name": "view_schedule",
-        "description": "View the user's calendar events for a specific date range.",
+        "description": (
+            "View the user's calendar events and meal plans for a specific date range. "
+            "Use when the user wants to READ what is already scheduled — appointments, meetings, "
+            "or existing meal plans. Not for creating or modifying plans."
+        ),
         "parameters": {
             "type": "object",
             "properties": {
@@ -594,6 +597,7 @@ class ToolExecutor:
                 + json.dumps(schedules, ensure_ascii=False, default=str)
             ),
         }
+
 
 
 # Module-level singleton
