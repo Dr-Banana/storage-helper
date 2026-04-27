@@ -690,6 +690,10 @@ class TestSyncStateReturnsTuple:
 
         fake_storage = MagicMock()
         fake_storage.get_inventory_items = AsyncMock(return_value=[])
+        fake_storage.get_user_subscription = AsyncMock(return_value={"is_active": True})
+        fake_storage.check_usage_limits = AsyncMock(return_value={"allowed": True})
+        fake_storage.increment_meal_plan_session = AsyncMock(return_value=None)
+        fake_storage.add_token_usage = AsyncMock(return_value=None)
 
         # Stub every LLM call that execute() makes so it runs to completion
         with (

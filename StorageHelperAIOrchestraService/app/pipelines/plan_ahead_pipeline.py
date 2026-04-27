@@ -2037,7 +2037,7 @@ class PlanAheadPipeline:
         # ---- Free-tier limit check (new sessions only) ----
         _pre_state = get_plan_state(owner_id)
         _is_new_session = get_phase(_pre_state) == PipelinePhase.IDLE
-        if _is_new_session:
+        if _is_new_session and storage_client is not None:
             _sub = await storage_client.get_user_subscription(owner_id)
             if not _sub.get("is_active", False):
                 _limits = await storage_client.check_usage_limits(owner_id)

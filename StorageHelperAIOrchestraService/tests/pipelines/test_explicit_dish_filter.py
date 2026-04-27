@@ -218,6 +218,10 @@ def _mock_storage(saved_schedules=None):
     storage.get_user_schedules = AsyncMock(return_value=saved_schedules or [])
     storage.create_or_update_meal_plan_schedule = AsyncMock(return_value=99)
     storage.update_user_recent_dishes = AsyncMock(return_value=None)
+    storage.get_user_subscription = AsyncMock(return_value={"is_active": True})
+    storage.check_usage_limits = AsyncMock(return_value={"allowed": True})
+    storage.increment_meal_plan_session = AsyncMock(return_value=None)
+    storage.add_token_usage = AsyncMock(return_value=None)
     return storage
 
 
