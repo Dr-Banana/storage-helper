@@ -647,10 +647,10 @@ async def chat_with_agent(request: ChatRequest):
     try:
         # Convert history to list of dicts for the pipeline
         history_dicts = [
-            {"role": msg.role, "content": msg.content} 
+            {"role": msg.role, "content": msg.content}
             for msg in request.history
         ]
-        
+
         # Run the chat pipeline with context if provided
         result = await chat.chat_pipeline.run(
             user_input=request.message,
@@ -661,16 +661,27 @@ async def chat_with_agent(request: ChatRequest):
             cooking_level=request.cooking_level or "beginner",
             language=request.language or "zh",
         )
-        
+
+        # Track token usage for non-plan interactions (plan_ahead tracks its own)
+        action = result.get("action", "")
+        _tokens = result.get("_tokens", 0)
+        if action not in ("PLAN_AHEAD", "SUGGEST_OPTIONS", "limit_exceeded") and _tokens > 0:
+            asyncio.ensure_future(
+                PipelineStorage().add_token_usage(request.owner_id, _tokens)
+            )
+
         return ChatResponse(
             response=result["response"],
             intent=result["intent"],
             confidence=result["confidence"],
             reasoning=result["reasoning"],
             action=result["action"],
-            action_data=result["action_data"]
+            action_data=result["action_data"],
+            error_code=result.get("error_code"),
+            error_detail=result.get("error_detail"),
+            limit_info=result.get("limit_info"),
         )
-        
+
     except Exception as e:
         logger.error(f"Error in chat endpoint: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Chat failed: {str(e)}")

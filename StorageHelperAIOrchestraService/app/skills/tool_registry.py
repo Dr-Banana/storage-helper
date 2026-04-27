@@ -52,11 +52,11 @@ TOOL_DECLARATIONS: List[Dict[str, Any]] = [
     {
         "name": "plan_meal",
         "description": (
-            "Handle all meal planning: add/modify/remove/view meals on specific dates, "
-            "generate shopping lists, recommend dishes, or plan home cooking with available inventory. "
-            "Use for any message about what to eat, meal scheduling, or food planning — "
-            "including implicit declarations like '明天晚上吃红烧肉' (stating intent to eat something). "
-            "When a meal planning session is active, prefer this tool for any meal-related message."
+            "Decide WHAT to eat: schedule meals, get dish recommendations, build a meal plan, "
+            "add/modify/remove dishes on specific dates, or generate a shopping list. "
+            "Use when the user is choosing or changing what goes on their calendar "
+            "(e.g. '今晚吃什么', '帮我规划这周', '把口水鸡换成别的', '明天午饭加一道汤'). "
+            "NOT for questions about how to cook a dish or what ingredients it needs."
         ),
         "parameters": {
             "type": "object",
@@ -72,11 +72,11 @@ TOOL_DECLARATIONS: List[Dict[str, Any]] = [
     {
         "name": "get_cooking_steps",
         "description": (
-            "Get full step-by-step cooking instructions for a dish. "
-            "Also use when the user wants to save, add, or replace cooking steps in their meal plan "
-            "('把步骤加进去', '保存步骤', 'save the steps', '替换步骤', 'store the recipe'). "
-            "Do NOT use for follow-up questions about a recipe already being discussed — "
-            "respond to those directly."
+            "Answer HOW to cook a dish: fetch recipe steps, ingredients, techniques, or substitutes. "
+            "Use when the user asks about cooking a specific dish — including ingredient questions "
+            "('口水鸡能用老母鸡么', '需要哪些食材', '怎么做', '步骤是什么'). "
+            "Also use when saving/replacing steps in the meal plan. "
+            "For follow-up questions about a recipe already in context, respond directly without this tool."
         ),
         "parameters": {
             "type": "object",

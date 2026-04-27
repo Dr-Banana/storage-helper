@@ -15,6 +15,9 @@ CREATE TABLE "user" (
     display_name    VARCHAR(100) NOT NULL,
     note            TEXT,
     cooking_level   VARCHAR(20) NOT NULL DEFAULT 'beginner',  -- beginner | intermediate | expert
+    is_premium      BOOLEAN NOT NULL DEFAULT FALSE,
+    premium_expiry  TIMESTAMP,
+    premium_source  VARCHAR(50),
     created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
@@ -135,6 +138,24 @@ CREATE TABLE feedback_message (
     created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (document_id) REFERENCES document(id) ON DELETE CASCADE
 );
+
+-- ============================================================
+-- 9. Subscription & usage tracking (freemium / Google Play)
+-- ============================================================
+
+-- For existing databases, run:
+--   ALTER TABLE "user" ADD COLUMN IF NOT EXISTS is_premium BOOLEAN NOT NULL DEFAULT FALSE,
+--     ADD COLUMN IF NOT EXISTS premium_expiry TIMESTAMP, ADD COLUMN IF NOT EXISTS premium_source VARCHAR(50);
+
+CREATE TABLE IF NOT EXISTS daily_usage (
+    id              SERIAL PRIMARY KEY,
+    user_id         INT NOT NULL REFERENCES "user"(id) ON DELETE CASCADE,
+    usage_date      DATE NOT NULL,
+    meal_plan_sessions INT NOT NULL DEFAULT 0,
+    token_count     INT NOT NULL DEFAULT 0,
+    UNIQUE(user_id, usage_date)
+);
+CREATE INDEX IF NOT EXISTS idx_daily_usage_user_date ON daily_usage(user_id, usage_date);
 
 -- ============================================================
 -- END OF SCHEMA

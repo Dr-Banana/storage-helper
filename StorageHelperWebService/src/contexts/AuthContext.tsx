@@ -1,7 +1,16 @@
-import { createContext, useContext, useState, useEffect, ReactNode } from 'react'
+import { createContext, useContext, useState, useEffect, useCallback, ReactNode } from 'react'
 import { setAuthTokenGetter, getApiBaseUrl } from '../api/client'
 import { nativeGoogleSignOut } from '../services/googleAuth'
 import { CookingLevel, UserLanguage } from '../api/services'
+
+export interface DailyUsage {
+  usage_date: string
+  meal_plan_sessions: number
+  token_count: number
+  is_premium_active: boolean
+  sessions_limit: number | null
+  tokens_limit: number | null
+}
 
 interface AuthContextType {
   userId: number | null
@@ -10,6 +19,9 @@ interface AuthContextType {
   authToken: string | null
   cookingLevel: CookingLevel
   language: UserLanguage
+  isPremium: boolean
+  dailyUsage: DailyUsage | null
+  refreshUsage: () => Promise<void>
   login: (userId: number, email: string, displayName: string, token: string) => void
   logout: () => void
   isAuthenticated: boolean
@@ -20,14 +32,11 @@ interface AuthContextType {
 const AuthContext = createContext<AuthContextType | undefined>(undefined)
 
 export const AuthProvider = ({ children }: { children: ReactNode }) => {
-  // Store token in state (more secure than localStorage for credentials)
   const [authToken, setAuthToken] = useState<string | null>(() => {
     return localStorage.getItem('authToken')
   })
 
   const [userId, setUserId] = useState<number | null>(() => {
-    // Only read userId from backend verification, not localStorage
-    // This will be set after token verification
     return null
   })
 
@@ -47,12 +56,41 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
     return (localStorage.getItem('userLanguage') as UserLanguage) || 'zh'
   })
 
-  // Set up auth token getter for API client on mount and whenever token changes
+  const [isPremium, setIsPremium] = useState(false)
+  const [dailyUsage, setDailyUsage] = useState<DailyUsage | null>(null)
+
   useEffect(() => {
     setAuthTokenGetter(() => authToken)
   }, [authToken])
 
-  // Verify token on app load
+  const fetchSubscriptionAndUsage = useCallback(async (uid: number, token: string) => {
+    try {
+      const [subResp, usageResp] = await Promise.all([
+        fetch(`${getApiBaseUrl()}/users/${uid}/subscription`, {
+          headers: { Authorization: `Bearer ${token}` },
+        }),
+        fetch(`${getApiBaseUrl()}/users/${uid}/daily-usage`, {
+          headers: { Authorization: `Bearer ${token}` },
+        }),
+      ])
+      if (subResp.ok) {
+        const sub = await subResp.json()
+        setIsPremium(sub.is_active === true)
+      }
+      if (usageResp.ok) {
+        setDailyUsage(await usageResp.json())
+      }
+    } catch {
+      // Non-fatal: keep defaults
+    }
+  }, [])
+
+  const refreshUsage = useCallback(async () => {
+    if (userId && authToken) {
+      await fetchSubscriptionAndUsage(userId, authToken)
+    }
+  }, [userId, authToken, fetchSubscriptionAndUsage])
+
   useEffect(() => {
     const verifyToken = async () => {
       if (!authToken) {
@@ -62,18 +100,15 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
 
       try {
         const response = await fetch(`${getApiBaseUrl()}/auth/verify`, {
-          headers: {
-            'Authorization': `Bearer ${authToken}`
-          }
+          headers: { Authorization: `Bearer ${authToken}` },
         })
 
         if (response.ok) {
           const data = await response.json()
           setUserId(data.user_id)
-          // Fetch full user profile to get cooking_level
           try {
             const userResp = await fetch(`${getApiBaseUrl()}/users/${data.user_id}`, {
-              headers: { 'Authorization': `Bearer ${authToken}` }
+              headers: { Authorization: `Bearer ${authToken}` },
             })
             if (userResp.ok) {
               const userData = await userResp.json()
@@ -85,10 +120,11 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
               localStorage.setItem('userLanguage', lang)
             }
           } catch {
-            // Non-blocking: use cached value from localStorage
+            // Non-blocking
           }
+          // Fetch subscription & usage after login
+          await fetchSubscriptionAndUsage(data.user_id, authToken)
         } else {
-          // Token invalid, clear it
           localStorage.removeItem('authToken')
           setAuthToken(null)
           setUserId(null)
@@ -100,22 +136,19 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
     }
 
     verifyToken()
-  }, [authToken])
+  }, [authToken, fetchSubscriptionAndUsage])
 
-  // Save credentials when they change
   useEffect(() => {
     if (authToken) {
       localStorage.setItem('authToken', authToken)
     } else {
       localStorage.removeItem('authToken')
     }
-
     if (userEmail) {
       localStorage.setItem('userEmail', userEmail)
     } else {
       localStorage.removeItem('userEmail')
     }
-
     if (userDisplayName) {
       localStorage.setItem('userDisplayName', userDisplayName)
     } else {
@@ -123,18 +156,16 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
     }
   }, [authToken, userEmail, userDisplayName])
 
-  // Sync cookingLevel to localStorage whenever it changes
   useEffect(() => {
     localStorage.setItem('cookingLevel', cookingLevel)
   }, [cookingLevel])
 
-  // Sync language to localStorage whenever it changes
   useEffect(() => {
     localStorage.setItem('userLanguage', language)
   }, [language])
 
-  const login = (userId: number, email: string, displayName: string, token: string) => {
-    setUserId(userId)
+  const login = (uid: number, email: string, displayName: string, token: string) => {
+    setUserId(uid)
     setUserEmail(email)
     setUserDisplayName(displayName)
     setAuthToken(token)
@@ -157,6 +188,8 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
     setAuthToken(null)
     setCookingLevel('beginner')
     setLanguage('zh')
+    setIsPremium(false)
+    setDailyUsage(null)
     localStorage.removeItem('authToken')
     localStorage.removeItem('userEmail')
     localStorage.removeItem('userDisplayName')
@@ -174,6 +207,9 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
         authToken,
         cookingLevel,
         language,
+        isPremium,
+        dailyUsage,
+        refreshUsage,
         login,
         logout,
         isAuthenticated: userId !== null && authToken !== null,
@@ -193,4 +229,3 @@ export const useAuth = () => {
   }
   return context
 }
-

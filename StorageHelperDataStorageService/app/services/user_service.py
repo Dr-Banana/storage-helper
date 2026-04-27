@@ -2,6 +2,8 @@
 User business logic service
 """
 import logging
+from datetime import datetime, timezone
+from typing import Optional
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
 
@@ -166,6 +168,51 @@ class UserService:
             db.rollback()
             raise ValueError(f"Failed to delete user: {str(e)}")
     
+    @staticmethod
+    def get_subscription_status(db: Session, user_id: int) -> dict:
+        """Return subscription status for a user, handling expiry check."""
+        user = UserService.get_user_by_id(db, user_id)
+        if not user:
+            raise ValueError(f"User with ID {user_id} not found")
+
+        now = datetime.now(timezone.utc)
+        is_active = bool(
+            user.is_premium and (
+                user.premium_expiry is None
+                or user.premium_expiry.replace(tzinfo=timezone.utc) > now
+            )
+        )
+        return {
+            "user_id": user_id,
+            "is_premium": user.is_premium,
+            "premium_expiry": user.premium_expiry.isoformat() if user.premium_expiry else None,
+            "premium_source": user.premium_source,
+            "is_active": is_active,
+        }
+
+    @staticmethod
+    def set_subscription(
+        db: Session,
+        user_id: int,
+        is_premium: bool,
+        premium_expiry: Optional[datetime] = None,
+        premium_source: Optional[str] = "manual",
+    ) -> dict:
+        """Set subscription state for a user (admin/manual use)."""
+        user = UserService.get_user_by_id(db, user_id)
+        if not user:
+            raise ValueError(f"User with ID {user_id} not found")
+        try:
+            user.is_premium = is_premium
+            user.premium_expiry = premium_expiry
+            user.premium_source = premium_source if is_premium else None
+            db.commit()
+            db.refresh(user)
+            return UserService.get_subscription_status(db, user_id)
+        except Exception as e:
+            db.rollback()
+            raise ValueError(f"Failed to update subscription: {str(e)}")
+
     @staticmethod
     def erase_all_user_data(db: Session, user_id: int) -> dict:
         """

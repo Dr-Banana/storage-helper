@@ -77,7 +77,7 @@ function SectionActions({ onSave, onCancel }: { onSave: () => void; onCancel: ()
 // ─── ProfilePage ──────────────────────────────────────────────────────────────
 
 const ProfilePage = () => {
-  const { userId, userEmail, userDisplayName, logout, updateCookingLevel, updateLanguage } = useAuth()
+  const { userId, userEmail, userDisplayName, logout, updateCookingLevel, updateLanguage, dailyUsage } = useAuth()
   const navigate = useNavigate()
 
   const [user, setUser] = useState<UserType | null>(null)
@@ -292,6 +292,41 @@ const ProfilePage = () => {
               <SectionActions onSave={saveProfile} onCancel={() => cancelSection(() => setEditingProfile(false))} />
             </div>
           )}
+        </div>
+
+        {/* ── Usage ── */}
+        <div className="bg-white rounded-3xl p-6 sm:p-8 border border-stone-100 shadow-sm shadow-stone-200/50">
+          <h3 className="text-lg font-bold text-stone-800 mb-5">Today's Usage</h3>
+          <div className="p-4 bg-gray-50 rounded-2xl border border-gray-100 space-y-3">
+            <div>
+              <div className="flex items-center justify-between mb-1">
+                <span className="text-xs font-semibold text-gray-600">Meal plans</span>
+                <span className="text-xs font-bold text-gray-700">
+                  {dailyUsage?.meal_plan_sessions ?? 0} / {dailyUsage?.sessions_limit ?? 2}
+                </span>
+              </div>
+              <div className="w-full bg-gray-200 rounded-full h-1.5">
+                <div
+                  className="bg-home-primary-500 h-1.5 rounded-full transition-all"
+                  style={{ width: `${Math.min(100, ((dailyUsage?.meal_plan_sessions ?? 0) / (dailyUsage?.sessions_limit ?? 2)) * 100)}%` }}
+                />
+              </div>
+            </div>
+            <div>
+              <div className="flex items-center justify-between mb-1">
+                <span className="text-xs font-semibold text-gray-600">AI tokens</span>
+                <span className="text-xs font-bold text-gray-700">
+                  {(dailyUsage?.token_count ?? 0).toLocaleString()} / {(dailyUsage?.tokens_limit ?? 20000).toLocaleString()}
+                </span>
+              </div>
+              <div className="w-full bg-gray-200 rounded-full h-1.5">
+                <div
+                  className="bg-blue-400 h-1.5 rounded-full transition-all"
+                  style={{ width: `${Math.min(100, ((dailyUsage?.token_count ?? 0) / (dailyUsage?.tokens_limit ?? 20000)) * 100)}%` }}
+                />
+              </div>
+            </div>
+          </div>
         </div>
 
         {/* ── Kitchen Skill Level ── */}

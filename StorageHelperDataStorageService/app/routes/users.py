@@ -14,8 +14,18 @@ from app.schemas.user import UserCreate, UserUpdate, UserResponse, UserListRespo
 from app.schemas.category import CategoryCreate
 from app.schemas.location import LocationCreate, LocationUpdate
 from pydantic import BaseModel
+from datetime import datetime
+from typing import Optional
+
+from app.services.usage_service import UsageService
 
 router = APIRouter(prefix="/users", tags=["users"])
+
+
+class SubscriptionUpdate(BaseModel):
+    is_premium: bool
+    premium_expiry: Optional[datetime] = None
+    premium_source: Optional[str] = "manual"
 
 
 class EmptyResponse(BaseModel):
@@ -763,9 +773,9 @@ def delete_user_location(
         # Delete the location (safe to delete as no documents use it)
         db.delete(location)
         db.commit()
-        
+
         return None
-        
+
     except HTTPException:
         raise
     except Exception as e:
@@ -774,3 +784,106 @@ def delete_user_location(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to delete user location: {str(e)}"
         )
+
+
+# ============================================================
+# Subscription & usage endpoints
+# ============================================================
+
+@router.get(
+    "/{user_id}/subscription",
+    response_model=dict,
+    summary="Get subscription status",
+    description="Return the current subscription status for a user, including expiry check.",
+)
+def get_subscription(user_id: int, db: Session = Depends(get_db)):
+    try:
+        return UserService.get_subscription_status(db, user_id)
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
+
+
+@router.patch(
+    "/{user_id}/subscription",
+    response_model=dict,
+    summary="Set subscription (admin)",
+    description="Manually mark a user as premium or revert to free. For admin/testing use.",
+)
+def set_subscription(user_id: int, data: SubscriptionUpdate, db: Session = Depends(get_db)):
+    try:
+        return UserService.set_subscription(
+            db,
+            user_id,
+            is_premium=data.is_premium,
+            premium_expiry=data.premium_expiry,
+            premium_source=data.premium_source,
+        )
+    except ValueError as e:
+        code = status.HTTP_404_NOT_FOUND if "not found" in str(e) else status.HTTP_400_BAD_REQUEST
+        raise HTTPException(status_code=code, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
+
+
+@router.get(
+    "/{user_id}/daily-usage",
+    response_model=dict,
+    summary="Get today's usage",
+    description="Return today's meal plan session count and token consumption for a user.",
+)
+def get_daily_usage(user_id: int, db: Session = Depends(get_db)):
+    try:
+        user = UserService.get_user_by_id(db, user_id)
+        if not user:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"User {user_id} not found")
+        sub = UserService.get_subscription_status(db, user_id)
+        usage = UsageService.get_today_usage(db, user_id)
+        limits = UsageService.check_limits(db, user_id, sub["is_active"])
+        return {
+            **usage,
+            "is_premium_active": sub["is_active"],
+            "sessions_limit": limits["sessions_limit"],
+            "tokens_limit": limits["tokens_limit"],
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
+
+
+@router.post(
+    "/{user_id}/daily-usage/increment-session",
+    response_model=dict,
+    summary="Increment session count",
+    description="Increment the meal plan session counter for today (called by AI service).",
+)
+def increment_session(user_id: int, db: Session = Depends(get_db)):
+    try:
+        user = UserService.get_user_by_id(db, user_id)
+        if not user:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"User {user_id} not found")
+        return UsageService.increment_session(db, user_id)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
+
+
+@router.post(
+    "/{user_id}/daily-usage/add-tokens",
+    response_model=dict,
+    summary="Add token usage",
+    description="Add token consumption to today's counter (called by AI service after each LLM call).",
+)
+def add_tokens(user_id: int, token_count: int, db: Session = Depends(get_db)):
+    try:
+        user = UserService.get_user_by_id(db, user_id)
+        if not user:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"User {user_id} not found")
+        return UsageService.add_tokens(db, user_id, token_count)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))

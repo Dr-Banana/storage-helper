@@ -23,7 +23,7 @@ from app.agents.scheduling_agent import (
     compute_shopping_list,
 )
 from app.modules.active_context import get_active_context, update_active_context
-from app.modules.plan_ahead_state import _UNSET, get_phase, get_plan_state, update_plan_state
+from app.modules.plan_ahead_state import PipelinePhase, _UNSET, get_phase, get_plan_state, update_plan_state
 from app.skills.plan_ahead import (
     ClassifyDateConfirmationSkill,
     ClassifyDishIntentSkill,
@@ -2034,6 +2034,51 @@ class PlanAheadPipeline:
           7. _build_context + _call_llm  — single structured LLM call
           8. Post-process + persist      — guardian, filter, save to DB
         """
+        # ---- Free-tier limit check (new sessions only) ----
+        _pre_state = get_plan_state(owner_id)
+        _is_new_session = get_phase(_pre_state) == PipelinePhase.IDLE
+        if _is_new_session:
+            _sub = await storage_client.get_user_subscription(owner_id)
+            if not _sub.get("is_active", False):
+                _limits = await storage_client.check_usage_limits(owner_id)
+                if not _limits.get("allowed", True):
+                    _reason = _limits.get("reason", "daily_session_limit")
+                    if _reason == "daily_token_limit":
+                        _tokens_used = _limits.get("tokens_used", 0)
+                        _tokens_limit = _limits.get("tokens_limit", 20000)
+                        _reason_msg = (
+                            f"You've reached today's AI usage limit "
+                            f"({_tokens_used:,} / {_tokens_limit:,} tokens used). "
+                            "Your limit resets at midnight — come back tomorrow to plan more meals!"
+                        )
+                    else:
+                        _sessions_used = _limits.get("sessions_used", 0)
+                        _sessions_limit = _limits.get("sessions_limit", 2)
+                        _reason_msg = (
+                            f"You've reached today's meal planning limit "
+                            f"({_sessions_used} / {_sessions_limit} sessions used). "
+                            "Your limit resets at midnight — come back tomorrow to plan more meals!"
+                        )
+                    return {
+                        "response": _reason_msg,
+                        "intent": "PLAN_AHEAD",
+                        "confidence": 1.0,
+                        "reasoning": f"Free tier limit reached: {_reason}",
+                        "action": "limit_exceeded",
+                        "action_data": {"limit_info": _limits},
+                        "error_code": "LIMIT_EXCEEDED",
+                        "error_detail": _reason,
+                        "limit_info": _limits,
+                    }
+            # Increment session counter for new sessions (best-effort, don't block on failure)
+            try:
+                await storage_client.increment_meal_plan_session(owner_id)
+            except Exception as _e:
+                logger.warning(f"Failed to increment session count: {_e}")
+            # Track estimated token usage in background (non-blocking)
+            import asyncio as _asyncio
+            _asyncio.ensure_future(storage_client.add_token_usage(owner_id, 5000))
+
         # ---- Step 1: Sync DB state ----
         # old_state = raw DB snapshot; used later for ghost-date filtering,
         # echoed-date stripping (action=add), and draft-base snapshotting.

@@ -680,8 +680,9 @@ interface ChatInterfaceProps {
   onClose: () => void
 }
 
+
 const ChatInterface: React.FC<ChatInterfaceProps> = ({ isOpen, onClose }) => {
-  const { userId, cookingLevel, language } = useAuth()
+  const { userId, cookingLevel, language, dailyUsage, refreshUsage } = useAuth()
   const [messages, setMessages] = useState<Message[]>([
     { role: 'model', content: 'Hi! I\'m your Home AI. How can I help you today?' }
   ])
@@ -775,10 +776,18 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ isOpen, onClose }) => {
           }));
       }
 
-      setMessages(prev => [...prev, { 
+      // Handle free-tier limit hit
+      if ((response as any).error_code === 'LIMIT_EXCEEDED') {
+        await refreshUsage()
+      }
+
+      setMessages(prev => [...prev, {
         role: 'model', content: response.response, intent: response.intent,
         action: response.action, actionData: response.action_data, documents: documents
       }])
+
+      // Refresh usage counters after every chat interaction
+      refreshUsage()
 
       // Update or clear context based on action
       if (response.action === 'SUGGEST_OPTIONS' && response.action_data) {
@@ -925,9 +934,12 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ isOpen, onClose }) => {
     }
   }, [userId, messages, isLoading, activeContext])
 
+  const sessionsUsed = dailyUsage?.meal_plan_sessions ?? 0
+  const sessionsLimit = dailyUsage?.sessions_limit ?? 2
+  const sessionsLeft = Math.max(0, sessionsLimit - sessionsUsed)
+
   return (
     <div className="h-full flex flex-col bg-white overflow-hidden">
-      
       {/* Header */}
       <div className="px-5 py-4 flex items-center justify-between border-b border-gray-100 bg-white/95 backdrop-blur z-10">
         <div className="flex items-center gap-3">
@@ -1052,8 +1064,11 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ isOpen, onClose }) => {
             </div>
           </div>
         </form>
-        <div className="mt-2 flex justify-center">
-            <span className="text-[10px] text-gray-300 font-medium">AI generated content may be inaccurate.</span>
+        <div className="mt-2 flex items-center justify-between px-1">
+          <span className="text-[10px] text-gray-300 font-medium">AI generated content may be inaccurate.</span>
+          <span className={`text-[10px] font-medium ${sessionsLeft === 0 ? 'text-red-400' : 'text-gray-400'}`}>
+            {sessionsLeft}/{sessionsLimit} plans left today
+          </span>
         </div>
       </div>
     </div>

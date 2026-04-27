@@ -41,8 +41,9 @@ You assist with kitchen inventory, meal planning, document organization, and sch
 LANGUAGE: {language_instruction}
 
 Choose the most appropriate tool based on the user's message and context above.
-If the message is general conversation (greeting, thanks, small talk), respond directly \
-without calling any tool.\
+
+Select the best tool based on the user's intent and the context above. \
+Call a tool only when the tool description matches — otherwise respond directly.\
 """
 
     # System prompt for the final response generation call.
@@ -170,17 +171,19 @@ Generate a clear, natural response for the user based on the tool result.\
             system_instruction=tool_system,
         )
         function_calls = selection.get("function_calls") or []
+        _total_tokens = selection.get("tokens", 0)
 
         # ── No tool selected → direct LLM response ────────────────────────
         if not function_calls:
             response_text = selection.get("text") or ""
             if not response_text:
                 # Fallback: make a plain generation call so user always gets a reply
-                response_text = await self._plain_generate(
+                response_text, _plain_tokens = await self._plain_generate(
                     user_input=user_input,
                     history=history,
                     system_instruction=resp_system,
                 )
+                _total_tokens += _plain_tokens
             logger.info("[TOOL-USE] No tool selected; direct response.")
             return {
                 "response": response_text,
@@ -189,6 +192,7 @@ Generate a clear, natural response for the user based on the tool result.\
                 "reasoning": "No tool required; responded directly.",
                 "action": "GENERAL",
                 "action_data": {},
+                "_tokens": _total_tokens,
             }
 
         # ── Step 2: Execute the first selected tool ────────────────────────
@@ -238,17 +242,19 @@ Generate a clear, natural response for the user based on the tool result.\
             result.setdefault("reasoning", f"Tool-use: {fn_name}")
             result.setdefault("action", TOOL_TO_ACTION.get(fn_name, fn_name.upper()))
             result.setdefault("action_data", {})
+            result["_tokens"] = _total_tokens + result.get("_tokens", 0)
             self._log_response(result.get("action", ""), result.get("action_data", {}), result.get("response", ""))
             return result
 
         # ── Step 3: Generate final natural language reply (Gemini call #2) ─
-        response_text = await self._generate_final_response(
+        response_text, _final_tokens = await self._generate_final_response(
             user_input=user_input,
             history=history,
             system_instruction=resp_system,
             function_call=fc,
             tool_result_text=tool_result.get("tool_result", ""),
         )
+        _total_tokens += _final_tokens
 
         final_action = tool_result.get("action") or TOOL_TO_ACTION.get(fn_name, fn_name.upper())
         final_action_data = tool_result.get("action_data") or {}
@@ -260,6 +266,7 @@ Generate a clear, natural response for the user based on the tool result.\
             "reasoning": f"Tool-use: {fn_name}",
             "action": final_action,
             "action_data": final_action_data,
+            "_tokens": _total_tokens,
         }
         self._log_response(final_action, final_action_data, response_text)
         return result
@@ -322,10 +329,20 @@ Generate a clear, natural response for the user based on the tool result.\
             )
         elif meal_plan or phase:
             date_list = list(meal_plan.keys()) or ["(none)"]
+            # Collect all planned dish names for context
+            planned_dishes: List[str] = []
+            for day_meals in meal_plan.values():
+                if isinstance(day_meals, dict):
+                    for dishes in day_meals.values():
+                        if isinstance(dishes, list):
+                            planned_dishes.extend(dishes)
+            dish_hint = f"Planned dishes: {', '.join(planned_dishes)}." if planned_dishes else ""
             parts.append(
-                f"\n[MEAL PLANNING SESSION IN PROGRESS]\n"
-                f"Planned dates: {date_list}\n"
-                "- Prefer plan_meal for any food/meal related message in this session."
+                f"\n[MEAL PLAN EXISTS]\n"
+                f"Planned dates: {date_list}. {dish_hint}\n"
+                "- Use plan_meal to ADD, MODIFY, or REMOVE meals from the plan.\n"
+                "- Use get_cooking_steps if user asks HOW to cook or about ingredients of a planned dish.\n"
+                "- Do NOT call plan_meal just because a planned dish is mentioned."
             )
         if pending_options:
             parts.append(
@@ -399,11 +416,12 @@ Generate a clear, natural response for the user based on the tool result.\
                 elif "text" in part:
                     text_parts.append(part["text"])
 
-            return {"function_calls": function_calls, "text": "".join(text_parts)}
+            tokens = data.get("usageMetadata", {}).get("candidatesTokenCount", 0)
+            return {"function_calls": function_calls, "text": "".join(text_parts), "tokens": tokens}
 
         except Exception as exc:
             logger.error("[TOOL-USE] Tool selection call failed: %s", exc, exc_info=True)
-            return {"function_calls": [], "text": ""}
+            return {"function_calls": [], "text": "", "tokens": 0}
 
     async def _generate_final_response(
         self,
@@ -462,13 +480,14 @@ Generate a clear, natural response for the user based on the tool result.\
 
             candidate = (data.get("candidates") or [{}])[0]
             parts = candidate.get("content", {}).get("parts") or []
-            return "".join(p.get("text", "") for p in parts if "text" in p)
+            tokens = data.get("usageMetadata", {}).get("candidatesTokenCount", 0)
+            return "".join(p.get("text", "") for p in parts if "text" in p), tokens
 
         except Exception as exc:
             logger.error(
                 "[TOOL-USE] Final response generation failed: %s", exc, exc_info=True
             )
-            return "抱歉，我暂时无法生成回复，请稍后重试。"
+            return "抱歉，我暂时无法生成回复，请稍后重试。", 0
 
     async def _plain_generate(
         self,
@@ -494,11 +513,12 @@ Generate a clear, natural response for the user based on the tool result.\
 
             candidate = (data.get("candidates") or [{}])[0]
             parts = candidate.get("content", {}).get("parts") or []
-            return "".join(p.get("text", "") for p in parts if "text" in p)
+            tokens = data.get("usageMetadata", {}).get("candidatesTokenCount", 0)
+            return "".join(p.get("text", "") for p in parts if "text" in p), tokens
 
         except Exception as exc:
             logger.error("[TOOL-USE] Plain generate failed: %s", exc, exc_info=True)
-            return "抱歉，我暂时无法回答这个问题。"
+            return "抱歉，我暂时无法回答这个问题。", 0
 
     # ─────────────────────────────────────────────────────────────────────────
     # Correction mode (frontend signal, not tool-based)

@@ -2016,6 +2016,90 @@ class PipelineStorage:
         """
         return PipelineStorage.get_pipeline_output(pipeline_result)
 
+    # ── Subscription & usage helpers ──────────────────────────────────────────
+
+    def _storage_api_url(self, path: str) -> str:
+        """Build a URL against the DataStorageService base."""
+        base = _get_storage_base_url() or settings.STORAGE_SERVICE_URL.rstrip("/")
+        return f"{base}/api{path}"
+
+    async def get_user_subscription(self, user_id: int) -> Dict[str, Any]:
+        """Fetch subscription status from DataStorageService."""
+        try:
+            url = self._storage_api_url(f"/users/{user_id}/subscription")
+            resp = await self.client.get(url, timeout=5.0)
+            if resp.status_code == 200:
+                return resp.json()
+            logger.warning(f"get_user_subscription: status={resp.status_code}")
+        except Exception as e:
+            logger.error(f"get_user_subscription error: {e}")
+        # Fail open — treat as free user on error
+        return {"user_id": user_id, "is_premium": False, "is_active": False}
+
+    async def check_usage_limits(self, user_id: int) -> Dict[str, Any]:
+        """Fetch today's usage and compute whether the user is within free limits."""
+        try:
+            url = self._storage_api_url(f"/users/{user_id}/daily-usage")
+            resp = await self.client.get(url, timeout=5.0)
+            if resp.status_code == 200:
+                data = resp.json()
+                is_premium = data.get("is_premium_active", False)
+                sessions_used = data.get("meal_plan_sessions", 0)
+                tokens_used = data.get("token_count", 0)
+                sessions_limit = data.get("sessions_limit")
+                tokens_limit = data.get("tokens_limit")
+
+                if is_premium:
+                    return {"allowed": True, "reason": None,
+                            "sessions_used": sessions_used, "sessions_limit": None,
+                            "tokens_used": tokens_used, "tokens_limit": None}
+
+                if sessions_limit is not None and sessions_used >= sessions_limit:
+                    return {"allowed": False, "reason": "daily_session_limit",
+                            "sessions_used": sessions_used, "sessions_limit": sessions_limit,
+                            "tokens_used": tokens_used, "tokens_limit": tokens_limit}
+
+                if tokens_limit is not None and tokens_used >= tokens_limit:
+                    return {"allowed": False, "reason": "daily_token_limit",
+                            "sessions_used": sessions_used, "sessions_limit": sessions_limit,
+                            "tokens_used": tokens_used, "tokens_limit": tokens_limit}
+
+                return {"allowed": True, "reason": None,
+                        "sessions_used": sessions_used, "sessions_limit": sessions_limit,
+                        "tokens_used": tokens_used, "tokens_limit": tokens_limit}
+        except Exception as e:
+            logger.error(f"check_usage_limits error: {e}")
+        # Fail open
+        return {"allowed": True, "reason": None,
+                "sessions_used": 0, "sessions_limit": 2,
+                "tokens_used": 0, "tokens_limit": 20000}
+
+    async def increment_meal_plan_session(self, user_id: int) -> Dict[str, Any]:
+        """Increment today's session counter for a user."""
+        try:
+            url = self._storage_api_url(f"/users/{user_id}/daily-usage/increment-session")
+            resp = await self.client.post(url, timeout=5.0)
+            if resp.status_code == 200:
+                return resp.json()
+            logger.warning(f"increment_meal_plan_session: status={resp.status_code}")
+        except Exception as e:
+            logger.error(f"increment_meal_plan_session error: {e}")
+        return {}
+
+    async def add_token_usage(self, user_id: int, token_count: int) -> Dict[str, Any]:
+        """Record token consumption for a user."""
+        if token_count <= 0:
+            return {}
+        try:
+            url = self._storage_api_url(f"/users/{user_id}/daily-usage/add-tokens")
+            resp = await self.client.post(url, params={"token_count": token_count}, timeout=5.0)
+            if resp.status_code == 200:
+                return resp.json()
+            logger.warning(f"add_token_usage: status={resp.status_code}")
+        except Exception as e:
+            logger.error(f"add_token_usage error: {e}")
+        return {}
+
 
 # Default instance for backward compatibility
 _default_storage = PipelineStorage()

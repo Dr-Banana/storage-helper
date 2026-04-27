@@ -57,6 +57,9 @@ class UserResponse(BaseModel):
     disliked_ingredients: Optional[List[str]] = Field(default_factory=list)
     cuisine_weights: Optional[Dict[str, int]] = Field(default_factory=lambda: {"Chinese": 50, "Western": 20, "Japanese": 15, "Korean": 10, "Other": 5})
     recent_dishes: Optional[List[Dict[str, Any]]] = Field(default_factory=list)
+    is_premium: bool = False
+    premium_expiry: Optional[datetime] = None
+    premium_source: Optional[str] = None
     created_at: datetime
     updated_at: datetime
 

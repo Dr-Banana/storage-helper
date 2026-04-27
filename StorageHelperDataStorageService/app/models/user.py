@@ -39,11 +39,16 @@ class User(Base):
     disliked_ingredients = Column(JSON, nullable=True, server_default="[]")
     cuisine_weights = Column(JSON, nullable=True, server_default='{"Chinese": 50, "Western": 20, "Japanese": 15, "Korean": 10, "Other": 5}')
     recent_dishes = Column(JSON, nullable=True, server_default="[]")
+    # Subscription fields
+    is_premium = Column(Boolean, nullable=False, server_default="false")
+    premium_expiry = Column(DateTime, nullable=True)   # None = no expiry (lifetime), set = expires at
+    premium_source = Column(String(50), nullable=True)  # "manual" | "google_play" | "stripe"
     created_at = Column(DateTime, default=func.now(), nullable=False)
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now(), nullable=False)
 
     # Relationships
     schedules = relationship("Schedule", back_populates="user")
+    daily_usages = relationship("DailyUsage", back_populates="user")
 
     def __repr__(self):
         return f"<User(id={self.id}, google_id='{self.google_id}', display_name='{self.display_name}')>"
