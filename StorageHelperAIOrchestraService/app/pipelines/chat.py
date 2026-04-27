@@ -15,7 +15,7 @@ overrides in the previous chat.py are all replaced by this flow.
 
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
 import httpx
@@ -104,6 +104,14 @@ Generate a clear, natural response for the user based on the tool result.\
         # ── Read current session state ─────────────────────────────────────
         plan_state = get_plan_state(owner_id)
         cooking_context: Optional[Dict] = plan_state.get("cooking_context")
+
+        # ── Hydrate meal plan from DB if in-memory state is empty ──────────
+        # Ensures [MEAL PLAN EXISTS] appears in context so tool selection LLM
+        # can correctly route "今晚吃什么" to view_schedule instead of plan_meal.
+        if not plan_state.get("meal_plan") and not plan_state.get("phase"):
+            _db_meals = await self._fetch_upcoming_meals(owner_id, user_timezone)
+            if _db_meals:
+                plan_state = {**plan_state, "meal_plan": _db_meals}
 
         # ── Build state context for prompts ────────────────────────────────
         state_context = self._build_state_context(
@@ -270,6 +278,40 @@ Generate a clear, natural response for the user based on the tool result.\
         }
         self._log_response(final_action, final_action_data, response_text)
         return result
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Helpers
+    # ─────────────────────────────────────────────────────────────────────────
+
+    async def _fetch_upcoming_meals(
+        self, owner_id: int, user_timezone: Optional[str]
+    ) -> Dict:
+        """Fetch this week's meal plan from DB for state_context hydration."""
+        from app.storage.pipeline_storage import _default_storage
+        try:
+            from zoneinfo import ZoneInfo
+            tz = ZoneInfo(user_timezone) if user_timezone else None
+            today = datetime.now(tz).date() if tz else datetime.utcnow().date()
+        except Exception:
+            today = datetime.utcnow().date()
+        end_date = today + timedelta(days=7)
+        try:
+            schedules = await _default_storage.get_user_schedules(owner_id)
+        except Exception:
+            return {}
+        meal_plan: Dict = {}
+        for s in schedules:
+            if "meal_plan" not in s.get("event_type", ""):
+                continue
+            slots = (s.get("metadata") or {}).get("meal_plan_slots") or {}
+            for date_str, date_slots in slots.items():
+                try:
+                    d = datetime.strptime(date_str, "%Y-%m-%d").date()
+                except Exception:
+                    continue
+                if today <= d <= end_date:
+                    meal_plan[date_str] = date_slots
+        return meal_plan
 
     # ─────────────────────────────────────────────────────────────────────────
     # State context builder
