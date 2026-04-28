@@ -2070,11 +2070,6 @@ class PlanAheadPipeline:
                         "error_detail": _reason,
                         "limit_info": _limits,
                     }
-            # Increment session counter for new sessions (best-effort, don't block on failure)
-            try:
-                await storage_client.increment_meal_plan_session(owner_id)
-            except Exception as _e:
-                logger.warning(f"Failed to increment session count: {_e}")
             # Track estimated token usage in background (non-blocking)
             import asyncio as _asyncio
             _asyncio.ensure_future(storage_client.add_token_usage(owner_id, 5000))
@@ -2629,6 +2624,11 @@ class PlanAheadPipeline:
                 merge=False,
             )
             logger.info(f"[PLAN_AHEAD_PIPELINE] confirm: draft persisted, schedule_id={schedule_id}")
+            if storage_client is not None:
+                try:
+                    await storage_client.increment_meal_plan_session(owner_id)
+                except Exception as _e:
+                    logger.warning(f"Failed to increment session count: {_e}")
 
             # If the meal_planning_queue still has remaining slots (mid-queue checkpoint
             # save), set last_pipeline_action so Phase Q resumes on the next turn, and
