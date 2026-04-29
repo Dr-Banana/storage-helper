@@ -1891,7 +1891,7 @@ const DishReadCard: React.FC<{
             {!hasSteps && stepsGenerating && (
               <span className="flex items-center gap-1 text-[11px] text-stone-400">
                 <Loader2 size={10} className="animate-spin" />
-                步骤生成中
+                Generating steps
               </span>
             )}
             {hasTiming && (
@@ -1979,7 +1979,7 @@ const DishReadCard: React.FC<{
                 /* Loading state */
                 <div className="flex flex-col items-center justify-center gap-2 py-6 text-stone-400">
                   <Loader2 size={22} className="animate-spin text-orange-300" />
-                  <span className="text-xs">正在生成步骤，请稍候…</span>
+                  <span className="text-xs">Generating steps, please wait…</span>
                 </div>
               ) : (
                 <div className="space-y-2">

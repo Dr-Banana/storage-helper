@@ -135,14 +135,14 @@ export default function RecipeDiffCard({ data, onSaved, onDismiss }: RecipeDiffC
       {/* Header */}
       <div className="flex items-center justify-between px-4 py-3 bg-gray-50 border-b border-gray-200">
         <div>
-          <p className="font-semibold text-gray-800">「{data.dish_name}」已有食谱</p>
+          <p className="font-semibold text-gray-800">「{data.dish_name}」already has a recipe</p>
           <p className="text-xs text-gray-500 mt-0.5">
-            已生成新版本 &mdash; 请确认是否覆盖
+            New version generated &mdash; confirm whether to overwrite
           </p>
         </div>
         {hasChanges && (
           <span className="text-xs font-medium px-2 py-0.5 rounded-full bg-yellow-100 text-yellow-700">
-            {changedSteps.length + changedIngs.length} 处变更
+            {changedSteps.length + changedIngs.length} changes
           </span>
         )}
       </div>
@@ -151,7 +151,7 @@ export default function RecipeDiffCard({ data, onSaved, onDismiss }: RecipeDiffC
         {/* Ingredients diff */}
         {ingDiffs.length > 0 && (
           <section>
-            <h4 className="text-xs font-semibold uppercase tracking-wide text-gray-500 mb-2">食材</h4>
+            <h4 className="text-xs font-semibold uppercase tracking-wide text-gray-500 mb-2">Ingredients</h4>
             <div className="space-y-1">
               {visibleIngs.map(ing => {
                 const s = ING_STATUS_STYLES[ing.status]
@@ -178,7 +178,7 @@ export default function RecipeDiffCard({ data, onSaved, onDismiss }: RecipeDiffC
         {/* Steps diff */}
         {stepDiffs.length > 0 && (
           <section>
-            <h4 className="text-xs font-semibold uppercase tracking-wide text-gray-500 mb-2">步骤</h4>
+            <h4 className="text-xs font-semibold uppercase tracking-wide text-gray-500 mb-2">Steps</h4>
             <ol className="space-y-1 list-none">
               {visibleSteps.map(step => (
                 <li key={step.index} className={`rounded px-3 py-1.5 ${STATUS_STYLES[step.status]}`}>
@@ -197,7 +197,7 @@ export default function RecipeDiffCard({ data, onSaved, onDismiss }: RecipeDiffC
             onClick={() => setShowUnchanged(v => !v)}
           >
             {showUnchanged ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
-            {showUnchanged ? '隐藏未变更部分' : '显示所有内容'}
+            {showUnchanged ? 'Hide unchanged' : 'Show all'}
           </button>
         )}
 
@@ -213,7 +213,7 @@ export default function RecipeDiffCard({ data, onSaved, onDismiss }: RecipeDiffC
             className="flex-1 flex items-center justify-center gap-2 rounded-lg bg-indigo-600 hover:bg-indigo-700 disabled:opacity-60 text-white text-sm font-medium py-2 transition-colors"
           >
             {saving ? <Loader2 size={14} className="animate-spin" /> : <CheckCircle size={14} />}
-            保存新版本
+            Save new version
           </button>
           <button
             onClick={onDismiss}
@@ -221,7 +221,7 @@ export default function RecipeDiffCard({ data, onSaved, onDismiss }: RecipeDiffC
             className="flex-1 flex items-center justify-center gap-2 rounded-lg border border-gray-200 hover:bg-gray-50 disabled:opacity-60 text-gray-700 text-sm py-2 transition-colors"
           >
             <XCircle size={14} />
-            保留现有版本
+            Keep existing
           </button>
         </div>
       </div>

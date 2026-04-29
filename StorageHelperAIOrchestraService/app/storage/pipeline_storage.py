@@ -1585,6 +1585,7 @@ class PipelineStorage:
         dish_ingredients: Optional[Dict[str, List[str]]] = None,
         meal_plan_slots: Optional[Dict[str, Dict[str, str]]] = None,
         is_append: bool = False,
+        extra_existing_dish_data: Optional[Dict[str, Any]] = None,
     ) -> Optional[int]:
         """
         Create or update a meal plan draft in schedule. Used during PLAN_AHEAD conversation
@@ -1667,6 +1668,10 @@ class PipelineStorage:
 
                     # Preserve any cooking steps / ingredient quantities already saved for this date.
                     existing_dd = self._extract_existing_dish_data(existing_schedule) if existing_schedule else {}
+                    if extra_existing_dish_data:
+                        for _dn, _dd in extra_existing_dish_data.items():
+                            if _dn not in existing_dd:
+                                existing_dd[_dn] = _dd
 
                     if is_append and existing_schedule:
                         _, _, _, _ex_slots = self._extract_meal_plan_from_schedule(existing_schedule)
@@ -1822,6 +1827,10 @@ class PipelineStorage:
                             break
 
                 existing_dd = self._extract_existing_dish_data(existing_for_date) if existing_for_date else {}
+                if extra_existing_dish_data:
+                    for _dn, _dd in extra_existing_dish_data.items():
+                        if _dn not in existing_dd:
+                            existing_dd[_dn] = _dd
 
                 # When appending (action="add"), merge the new dishes into the
                 # existing slot instead of overwriting it.  Example: existing

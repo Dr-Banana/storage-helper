@@ -1405,3 +1405,128 @@ class TestMoveMealPlanPreservesSource:
         assert "dinner" not in src_slots.get("2026-04-06", {}), (
             "Dinner slot must be removed from source date"
         )
+
+    def test_cooking_steps_carried_to_destination(self):
+        """
+        Regression: cooking steps already saved on the source schedule must be
+        forwarded to persist_meal_plan via extra_existing_dish_data so that
+        CookingStepsAgent does not waste tokens regenerating them.
+        """
+        source_steps = {
+            "清蒸鲈鱼": {"steps": ["准备鲈鱼", "清蒸10分钟"], "ingredients": [{"name": "鲈鱼", "quantity": "500g"}]},
+            "蒜蓉油麦菜": {"steps": ["热锅", "翻炒油麦菜"], "ingredients": [{"name": "油麦菜", "quantity": "300g"}]},
+        }
+        pipeline = self._pipeline()
+        fake_schedule = {"id": 104, "metadata": {}}
+        sc = _make_storage_client_mock()
+        # Source schedule exists and contains cooking steps for the moved dishes.
+        sc.get_user_schedules = AsyncMock(return_value=[fake_schedule])
+        sc._extract_meal_plan_from_schedule = MagicMock(
+            return_value=(
+                {"2026-04-06": "清蒸鲈鱼, 蒜蓉油麦菜, 杂粮饭"},
+                [],
+                {},
+                {"2026-04-06": {"dinner": ["清蒸鲈鱼", "蒜蓉油麦菜", "杂粮饭"]}},
+            )
+        )
+        sc._extract_existing_dish_data = MagicMock(return_value=source_steps)
+
+        persist_calls = []
+
+        async def _run():
+            with patch.object(
+                pipeline.plan_ahead_agent, "sync_meal_plan_from_database",
+                AsyncMock(return_value=self._state_today_dinner()),
+            ), patch.object(
+                pipeline, "_call_llm",
+                AsyncMock(return_value=self._llm_move_to_tomorrow_parsed()),
+            ), patch.object(
+                pipeline.plan_ahead_agent, "persist_meal_plan",
+                AsyncMock(side_effect=lambda **kwargs: persist_calls.append(kwargs) or 104),
+            ), patch.object(
+                pipeline, "_delete_orphaned_schedules",
+                AsyncMock(return_value=None),
+            ):
+                await pipeline.execute(
+                    owner_id=1,
+                    user_input="把今天晚饭移到明天",
+                    history=[],
+                    user_timezone="Asia/Shanghai",
+                    storage_client=sc,
+                )
+
+        asyncio.run(_run())
+
+        # The first persist_meal_plan call is for the destination date.
+        dest_call = next(
+            (c for c in persist_calls if "2026-04-07" in (c.get("meal_plan") or {})),
+            None,
+        )
+        assert dest_call is not None, "persist_meal_plan must be called for destination date"
+        extra = dest_call.get("extra_existing_dish_data") or {}
+        assert "清蒸鲈鱼" in extra, "Cooking steps for 清蒸鲈鱼 must be carried to destination"
+        assert "蒜蓉油麦菜" in extra, "Cooking steps for 蒜蓉油麦菜 must be carried to destination"
+        assert extra["清蒸鲈鱼"]["steps"] == source_steps["清蒸鲈鱼"]["steps"]
+
+    def test_cooking_steps_not_carried_for_regular_modify(self):
+        """
+        For a regular modify (no source_date), extra_existing_dish_data must be
+        None so that no stale steps bleed into unrelated dish updates.
+        """
+        raw = json.dumps({
+            "action": "modify",
+            "target_date": "2026-04-06",
+            "meal_time": "dinner",
+            # No source_date / source_meal_time → not a move
+            "user_message": "好的，已更新。",
+            "meal_entries": [
+                {
+                    "date": "2026-04-06",
+                    "meal_time": "dinner",
+                    "dishes": [
+                        {"name": "清蒸鲈鱼", "ingredients": [{"name": "鲈鱼", "category": "protein"}]},
+                    ],
+                }
+            ],
+        })
+        parsed = PlanAheadAgent(gemini_api_url="http://fake").parse_structured_response(raw)
+
+        pipeline = self._pipeline()
+        sc = _make_storage_client_mock()
+        persist_calls = []
+
+        async def _run():
+            with patch.object(
+                pipeline.plan_ahead_agent, "sync_meal_plan_from_database",
+                AsyncMock(return_value=self._state_today_dinner()),
+            ), patch.object(
+                pipeline, "_call_llm",
+                AsyncMock(return_value=parsed),
+            ), patch.object(
+                pipeline.plan_ahead_agent, "persist_meal_plan",
+                AsyncMock(side_effect=lambda **kwargs: persist_calls.append(kwargs) or 104),
+            ), patch.object(
+                pipeline, "_delete_orphaned_schedules",
+                AsyncMock(return_value=None),
+            ):
+                await pipeline.execute(
+                    owner_id=1,
+                    user_input="修改今天晚饭",
+                    history=[],
+                    user_timezone="Asia/Shanghai",
+                    storage_client=sc,
+                )
+
+        asyncio.run(_run())
+
+        # get_user_schedules must NOT be called for source extraction (no move)
+        sc.get_user_schedules.assert_not_called()
+
+        dest_call = next(
+            (c for c in persist_calls if "2026-04-06" in (c.get("meal_plan") or {})),
+            None,
+        )
+        assert dest_call is not None
+        assert not dest_call.get("extra_existing_dish_data"), (
+            "extra_existing_dish_data must be empty for non-move operations"
+        )

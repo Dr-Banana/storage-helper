@@ -1480,6 +1480,7 @@ class PlanAheadAgent:
         dish_ingredients: Optional[Dict[str, List[str]]] = None,
         meal_plan_slots: Optional[Dict[str, Dict[str, str]]] = None,
         is_append: bool = False,
+        extra_existing_dish_data: Optional[Dict[str, Any]] = None,
     ) -> Optional[int]:
         """
         Persist meal plan to schedule. Returns schedule_id if successful, None otherwise.
@@ -1508,6 +1509,7 @@ class PlanAheadAgent:
                     dish_ingredients=dish_ingredients,
                     meal_plan_slots=meal_plan_slots,
                     is_append=is_append,
+                    extra_existing_dish_data=extra_existing_dish_data,
                 )
                 if schedule_id:
                     logger.info(f"[SCHEDULING AGENT] PlanAheadAgent: Meal plan persisted to schedule id={schedule_id}")

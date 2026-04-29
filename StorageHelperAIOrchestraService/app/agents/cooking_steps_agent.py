@@ -1085,7 +1085,7 @@ class CookingStepsAgent(BaseAgent):
         ))
 
         _level_instructions = {
-            # Entry (入门级): 消除不确定性，追求成功率与速度
+            # Entry: eliminate uncertainty, maximise success rate and speed
             "beginner": (
                 "The user is an ENTRY-LEVEL home cook — prioritise foolproof success, clear structure, and low cognitive load.\n"
                 "FORMAT RULES (the frontend parses these markers — follow them exactly):\n"
@@ -1109,16 +1109,16 @@ class CookingStepsAgent(BaseAgent):
                 "5. AVOID high-skill techniques: no deep-frying, caramelising, flambéing, or anything requiring precise heat mastery.\n"
                 "6. Total 6–8 actual cooking steps (phase header strings and tip strings do NOT count toward this total).\n"
             ),
-            # Intermediate (进阶级): 引入风味开发技巧，追求风味与效率平衡
+            # Intermediate: introduce flavour-development techniques, balance flavour and efficiency
             "intermediate": (
                 "The user is an INTERMEDIATE cook who knows basic techniques — focus on flavour development.\n"
-                "- Introduce techniques like searing (爆香/煎), deglazing (收汁), or emulsifying where relevant, with brief context on why they matter.\n"
+                "- Introduce techniques like searing, deglazing, or emulsifying where relevant, with brief context on why they matter.\n"
                 "- Use sensory and visual doneness cues instead of just timers (e.g. 'cook until the garlic turns lightly golden and fragrant', 'stir-fry until the onions are translucent').\n"
                 "- Provide specific measurements AND timing, but allow some flexibility (e.g. '1–2 tbsp').\n"
                 "- Mention texture goals and flavour-balancing tips (e.g. 'taste and adjust salt/acid balance before plating').\n"
                 "- Include 6–9 steps."
             ),
-            # Expert (专家级): 极简说明，高阶参数，追求精准与艺术
+            # Expert: minimal explanations, high-precision parameters, accuracy over verbosity
             "expert": (
                 "The user is an EXPERT cook — use concise, high-precision professional language.\n"
                 "- Skip explanations of standard techniques (knife skills, mise en place, basic heat control are assumed).\n"
@@ -1132,10 +1132,10 @@ class CookingStepsAgent(BaseAgent):
         level_instr = _level_instructions.get(cooking_level or "beginner", _level_instructions["beginner"])
 
         _lang_instr_map = {
-            "zh": ("Simplified Chinese (简体中文)", "你必须用简体中文写所有步骤。"),
+            "zh": ("Simplified Chinese", "You MUST write all steps and ingredient names in Simplified Chinese. Do NOT use English or any other language."),
             "en": ("English", "You MUST write every single step in English. Do NOT use Chinese or any other language, even if the dish name is Chinese."),
-            "ja": ("Japanese (日本語)", "すべてのステップを日本語で書いてください。"),
-            "ko": ("Korean (한국어)", "모든 단계를 한국어로 작성하세요."),
+            "ja": ("Japanese", "You MUST write all steps and ingredient names in Japanese. Do NOT use English or Chinese."),
+            "ko": ("Korean", "You MUST write all steps and ingredient names in Korean. Do NOT use English or Chinese."),
         }
         _lang_name, _lang_enforce = _lang_instr_map.get(language or "zh", _lang_instr_map["zh"])
 
@@ -1155,8 +1155,8 @@ class CookingStepsAgent(BaseAgent):
             '}\n\n'
             "Requirements:\n"
             "- steps: follow the audience-level formatting rules above.\n"
-            "- ingredients: list EVERY ingredient used, with exact quantities (e.g. {\"name\": \"鸡蛋\", \"quantity\": \"3个\"}).\n"
-            "- NEVER use '适量', 'to taste', or vague amounts in the ingredients list — always give a specific number.\n"
+            "- ingredients: list EVERY ingredient used, with exact quantities (e.g. {\"name\": \"egg\", \"quantity\": \"3 pcs\"}).\n"
+            "- NEVER use 'to taste', 'as needed', or vague amounts in the ingredients list — always give a specific number.\n"
             "- Each step should be a single, actionable sentence.\n"
         )
 

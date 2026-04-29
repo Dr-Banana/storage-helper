@@ -1418,6 +1418,7 @@ class PlanAheadPipeline:
         storage_client: Any,
         user_timezone: Optional[str],
         target_meal_time: Optional[str] = None,
+        extra_existing_dish_data: Optional[Dict[str, Any]] = None,
     ) -> Optional[int]:
         """Persist changes to DB. Returns schedule_id or None."""
         if action == "remove" and target_date:
@@ -1503,6 +1504,7 @@ class PlanAheadPipeline:
             dish_ingredients=persist_ingr,
             meal_plan_slots=persist_slots,
             is_append=(action == "add"),
+            extra_existing_dish_data=extra_existing_dish_data,
         )
         return schedule_id
 
@@ -3199,6 +3201,18 @@ class PlanAheadPipeline:
                 new_dish_ingredients = {k: v for k, v in _old_di.items() if k in _rem_dishes}
                 shopping_list = compute_shopping_list(new_dish_ingredients)
 
+            # For move operations: carry cooking steps from source to destination so
+            # CookingStepsAgent doesn't waste tokens regenerating already-saved steps.
+            # Must be fetched BEFORE _persist(), while the source schedule still exists.
+            _source_dish_data: Dict[str, Any] = {}
+            if source_date and source_meal_time and action == "modify":
+                _mv_schedules = await storage_client.get_user_schedules(owner_id)
+                for _mv_s in _mv_schedules:
+                    _, _, _, _mv_slots = storage_client._extract_meal_plan_from_schedule(_mv_s)
+                    if source_date in _mv_slots and source_meal_time in (_mv_slots.get(source_date) or {}):
+                        _source_dish_data = storage_client._extract_existing_dish_data(_mv_s)
+                        break
+
             new_sid = await self._persist(
                 owner_id=owner_id,
                 action=action,
@@ -3211,6 +3225,7 @@ class PlanAheadPipeline:
                 storage_client=storage_client,
                 user_timezone=user_timezone,
                 target_meal_time=target_meal_time,
+                extra_existing_dish_data=_source_dish_data or None,
             )
             if new_sid:
                 schedule_id = new_sid
