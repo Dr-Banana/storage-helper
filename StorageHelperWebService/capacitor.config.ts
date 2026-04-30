@@ -2,7 +2,7 @@ import { CapacitorConfig } from '@capacitor/cli'
 
 const config: CapacitorConfig = {
   appId: 'com.storagehelper.app',
-  appName: 'Storage Helper',
+  appName: 'TPCrabcake',
   webDir: 'dist',
   plugins: {
     GoogleAuth: {

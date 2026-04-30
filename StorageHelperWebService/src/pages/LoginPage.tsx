@@ -79,7 +79,7 @@ const LoginPage = () => {
               <LogIn className="text-home-primary-600" size={32} />
             </div>
             <h1 className="text-3xl font-bold text-home-text-dark mb-2">
-              Welcome to Storage Helper
+              Welcome to TPCrabcake
             </h1>
             <p className="text-home-text-light">
               Sign in with your Google account to get started

@@ -33,7 +33,7 @@ class ChatPipeline:
     # System prompt for the tool-selection call.
     # Kept short and directive; state context is injected at runtime.
     TOOL_SELECTION_PROMPT = """\
-You are a Home AI Agent named "Storage Helper".
+You are a Home AI Agent named "TPCrabcake".
 You assist with kitchen inventory, meal planning, document organization, and scheduling.
 
 {state_context}
@@ -48,7 +48,7 @@ Call a tool only when the tool description matches — otherwise respond directl
 
     # System prompt for the final response generation call.
     RESPONSE_PROMPT = """\
-You are a helpful Home AI Agent named "Storage Helper".
+You are a helpful Home AI Agent named "TPCrabcake".
 {state_context}
 LANGUAGE: {language_instruction}
 

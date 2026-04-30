@@ -1,7 +1,7 @@
 <?xml version='1.0' encoding='utf-8'?>
 <resources>
-    <string name="app_name">Storage Helper</string>
-    <string name="title_activity_main">Storage Helper</string>
+    <string name="app_name">TPCrabcake</string>
+    <string name="title_activity_main">TPCrabcake</string>
     <string name="package_name">com.storagehelper.app</string>
     <string name="custom_url_scheme">com.storagehelper.app</string>
     <!-- Web Client ID from Google Cloud Console (used for token verification) -->

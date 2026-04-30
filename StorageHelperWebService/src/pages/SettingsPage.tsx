@@ -103,7 +103,7 @@ const SettingsPage = () => {
           </div>
           <div className="space-y-2 text-home-text-light">
             <p>Version: 1.0.0</p>
-            <p>Home Storage Helper - Making life more organized</p>
+            <p>TPCrabcake - Making life more organized</p>
           </div>
         </div>
       </div>
