@@ -35,7 +35,7 @@ const Layout = () => {
   const navigate = useNavigate()
   const [isChatOpen, setIsChatOpen] = useState(false)
 
-  // ── Meal Plan 只读抽屉（与 Chat 面板完全对称的 flex 兄弟模式）──────────────
+  // ── Meal Plan read-only drawer (symmetric flex sibling to Chat panel) ────────
   const [mealDrawerData, setMealDrawerData] = useState<{ schedule: Schedule; date: string } | null>(null);
   const [isMealDrawerOpen, setIsMealDrawerOpen] = useState(false);
   // Keep a ref so the schedule-updated handler always reads the latest value
@@ -59,7 +59,7 @@ const Layout = () => {
     const openHandler = (e: Event) => {
       const detail = (e as CustomEvent<{ schedule: Schedule; date: string }>).detail;
       setMealDrawerData(detail);
-      // 双 rAF 确保 CSS transition 能感知到初始 translate-x-full
+      // Double rAF ensures CSS transition picks up the initial translate-x-full state
       requestAnimationFrame(() => requestAnimationFrame(() => {
         setIsMealDrawerOpen(true);
       }));
@@ -188,7 +188,7 @@ const Layout = () => {
   return (
     <div className="flex flex-col h-screen overflow-x-hidden bg-[#FAF9F6] text-stone-800">
 
-      {/* ── 顶部栏（首页不显示）── */}
+      {/* ── Top bar (hidden on home page) ── */}
       {!isHomePage && (
         <header className="flex-shrink-0 z-30 h-14 flex items-center px-2 bg-[#FAF9F6]/95 backdrop-blur-md border-b border-stone-200/60">
           {!isMainNavPage && (
@@ -206,10 +206,10 @@ const Layout = () => {
         </header>
       )}
 
-      {/* ── 内容行：主区域 + 聊天侧边栏 ── */}
+      {/* ── Content row: main area + chat sidebar ── */}
       <div className="flex flex-1 min-h-0">
 
-        {/* 主内容区 */}
+        {/* Main content area */}
         <main className="flex-1 overflow-y-auto overflow-x-hidden pb-24">
           <div
             key={location.pathname}
@@ -220,9 +220,9 @@ const Layout = () => {
           </div>
         </main>
 
-        {/* Meal Plan 只读抽屉（与 Chat 完全对称）
-            - 移动端：fixed 全屏，从右侧滑入
-            - 桌面端（sm+）：flex 行内列，宽度从 0 过渡到 w-[420px] */}
+        {/* Meal Plan read-only drawer (symmetric to Chat)
+            - Mobile: fixed fullscreen, slides in from right
+            - Desktop (sm+): inline flex column, width transitions 0 → w-[420px] */}
         <div
           className={[
             'fixed inset-0 z-50 flex flex-col overflow-hidden',
@@ -233,7 +233,7 @@ const Layout = () => {
             isMealDrawerOpen ? 'sm:w-[420px]' : 'sm:w-0 sm:border-l-0',
           ].join(' ')}
           onTransitionEnd={(e) => {
-            // 仅在自身 transition 结束且已关闭时卸载内容，避免闪烁
+            // Unmount content only on own transition end when closed, to avoid flicker
             if (e.target === e.currentTarget && !isMealDrawerOpen) {
               setMealDrawerData(null);
             }
@@ -250,16 +250,16 @@ const Layout = () => {
           )}
         </div>
 
-        {/* 聊天侧边栏
-            - 移动端：fixed 全屏覆盖（从右侧滑入）
-            - 桌面端（sm+）：flex 行内列，宽度从 0 过渡到 w-96 */}
+        {/* Chat sidebar
+            - Mobile: fixed fullscreen overlay (slides in from right)
+            - Desktop (sm+): inline flex column, width transitions 0 → w-96 */}
         <div
           className={[
-            // 移动端：fixed 全屏，从右侧滑入/滑出
+            // Mobile: fixed fullscreen, slide in/out from right
             'fixed inset-0 z-50 flex flex-col bg-white',
             'transition-transform duration-300 ease-in-out',
             isChatOpen ? 'translate-x-0' : 'translate-x-full pointer-events-none',
-            // 桌面端覆盖：重置为 flex 行内元素，用宽度动画替代位移
+            // Desktop: reset to inline flex, use width animation instead of transform
             'sm:relative sm:inset-auto sm:z-auto sm:translate-x-0 sm:pointer-events-auto',
             'sm:transition-[width] sm:overflow-hidden sm:border-l sm:border-stone-200',
             isChatOpen ? 'sm:w-96' : 'sm:w-0 sm:border-l-0',
@@ -270,7 +270,7 @@ const Layout = () => {
 
       </div>
 
-      {/* ── 底部导航栏 ── */}
+      {/* ── Bottom nav bar ── */}
       <nav
         className={`fixed bottom-0 left-0 z-30 bg-white border-t border-stone-100 transition-[right] duration-300 ease-in-out ${
           isChatOpen ? 'right-0 sm:right-96' :
@@ -326,7 +326,7 @@ const Layout = () => {
         </div>
       </nav>
 
-      {/* ── AI 助手 FAB（聊天关闭时显示；meal drawer 开启时移动端隐藏、桌面端向左偏移）── */}
+      {/* ── AI Assistant FAB (shown when chat closed; hidden on mobile when meal drawer open, offset left on desktop) ── */}
       {!isChatOpen && (
         <button
           onClick={() => { setIsChatOpen(true); }}
@@ -335,13 +335,13 @@ const Layout = () => {
             'fixed z-40 w-14 h-14 bg-home-primary-600 text-white rounded-full',
             'shadow-lg shadow-home-primary-600/30',
             'items-center justify-center hover:scale-105 hover:bg-home-primary-700',
-            'right-4 sm:right-6', // 默认位置（drawer 开时被 inline style 覆盖）
-            // 移动端 meal drawer 全屏时隐藏；桌面端始终显示
+            'right-4 sm:right-6', // default position (overridden by inline style when drawer is open)
+            // Hidden on mobile when meal drawer is fullscreen; always visible on desktop
             isMealDrawerOpen ? 'hidden sm:flex' : 'flex',
           ].join(' ')}
           style={{
             bottom: 'calc(4rem + env(safe-area-inset-bottom, 0px))',
-            // 桌面端：drawer 开时平滑移到抽屉左侧（420px + 24px gap）
+            // Desktop: smoothly move to left of drawer when open (420px + 24px gap)
             ...(isMealDrawerOpen ? { right: 'calc(420px + 1.5rem)' } : {}),
             transition: 'right 300ms ease-in-out',
           }}

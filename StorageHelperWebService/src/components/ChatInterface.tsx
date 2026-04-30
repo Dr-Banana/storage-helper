@@ -129,11 +129,11 @@ interface DishOption {
 
 // Slot metadata: icon, label, sort priority
 const SLOT_META: Record<string, { icon: string; label: string; order: number }> = {
-  main:   { icon: '🍗', label: '主菜', order: 1 },
-  side:   { icon: '🥬', label: '配菜', order: 2 },
-  soup:   { icon: '🥣', label: '汤品', order: 3 },
-  staple: { icon: '🍜', label: '主食', order: 4 },
-  other:  { icon: '🍽️', label: '其他', order: 5 },
+  main:   { icon: '🍗', label: 'Main',   order: 1 },
+  side:   { icon: '🥬', label: 'Side',   order: 2 },
+  soup:   { icon: '🥣', label: 'Soup',   order: 3 },
+  staple: { icon: '🍜', label: 'Staple', order: 4 },
+  other:  { icon: '🍽️', label: 'Other',  order: 5 },
 }
 
 /** Fallback slot classification when LLM doesn't provide it. */
@@ -238,10 +238,10 @@ const MealActionCard: React.FC<MealActionCardProps> = ({
               <div className="flex items-center gap-1">
                 <button
                   onClick={() => onReplace(name)}
-                  title="直接换掉"
+                  title="Swap dish"
                   className="flex h-6 items-center gap-1 rounded-lg px-1.5 text-xs font-medium text-gray-500 transition-colors hover:bg-gray-100 hover:text-gray-700"
                 >
-                  <Shuffle size={12} /> 换菜
+                  <Shuffle size={12} /> Swap
                 </button>
               </div>
             </div>
@@ -280,14 +280,14 @@ const MealOptionsCard: React.FC<MealOptionsCardProps> = ({ options, onConfirm, o
         return (
           <MealActionCard
             key={opt.option_id}
-            title={opt.label || `方案 ${opt.option_id}`}
-            statusLabel="可选方案"
+            title={opt.label || `Option ${opt.option_id}`}
+            statusLabel="Option"
             statusVariant="option"
             mealPlanSlots={mealSlots}
             dishSlots={opt.dish_slots}
             sortedDates={sortedDates}
             onConfirm={() => onConfirm(opt.option_id, opt.label)}
-            confirmLabel="确认此方案"
+            confirmLabel="Confirm"
             onReplace={(dishName) => onReplace(opt.option_id, opt.label, dishName)}
           />
         )
@@ -309,14 +309,14 @@ const DraftPlanCard: React.FC<DraftPlanCardProps> = ({ actionData, onConfirm, on
   if (!sortedDates.length) return null
   return (
     <MealActionCard
-      title="调整后的方案"
-      statusLabel="待确认"
+      title="Updated Plan"
+      statusLabel="Pending"
       statusVariant="draft"
       mealPlanSlots={mealPlanSlots}
       dishSlots={actionData?.dish_slots}
       sortedDates={sortedDates}
       onConfirm={onConfirm}
-      confirmLabel="确认保存计划"
+      confirmLabel="Save Plan"
       onReplace={onReplace}
     />
   )
@@ -330,15 +330,14 @@ interface MealDateConfirmCardProps {
   onCancel: () => void
 }
 
-const MEAL_LABELS: Record<string, string> = { breakfast: '早餐', lunch: '午餐', dinner: '晚餐' }
+const MEAL_LABELS: Record<string, string> = { breakfast: 'Breakfast', lunch: 'Lunch', dinner: 'Dinner' }
 const MEAL_ORDER = ['breakfast', 'lunch', 'dinner']
 
-function formatDateZh(dateStr: string): string {
+function formatDate(dateStr: string): string {
   try {
     const [y, m, d] = dateStr.split('-').map(Number)
     const dt = new Date(y, m - 1, d)
-    const weekdays = ['周日', '周一', '周二', '周三', '周四', '周五', '周六']
-    return `${m}月${d}日（${weekdays[dt.getDay()]}）`
+    return dt.toLocaleDateString('en-US', { month: 'short', day: 'numeric', weekday: 'short' })
   } catch { return dateStr }
 }
 
@@ -369,9 +368,9 @@ const MealDateConfirmCard: React.FC<MealDateConfirmCardProps> = ({ slots, onConf
         <div className="flex h-6 w-6 shrink-0 items-center justify-center rounded-lg bg-orange-50 text-orange-500">
           <Calendar size={13} />
         </div>
-        <span className="flex-1 text-sm font-bold text-gray-800">确认规划日期与餐次</span>
+        <span className="flex-1 text-sm font-bold text-gray-800">Confirm Dates & Meals</span>
         <span className="rounded-full border border-blue-200 bg-blue-50 px-2 py-0.5 text-[10px] font-semibold text-blue-600">
-          待确认
+          Pending
         </span>
       </div>
 
@@ -381,7 +380,7 @@ const MealDateConfirmCard: React.FC<MealDateConfirmCardProps> = ({ slots, onConf
           return (
             <div key={date} className="flex items-center gap-3 py-2.5">
               <span className="w-28 shrink-0 text-sm font-medium text-gray-700">
-                {formatDateZh(date)}
+                {formatDate(date)}
               </span>
               <div className="flex gap-1.5">
                 {MEAL_ORDER.filter(m => availableMeals.has(m)).map(meal => {
@@ -412,7 +411,7 @@ const MealDateConfirmCard: React.FC<MealDateConfirmCardProps> = ({ slots, onConf
           onClick={onCancel}
           className="flex-1 rounded-xl border border-gray-200 bg-white py-2 text-sm font-semibold text-gray-500 transition-all hover:bg-gray-50 active:scale-[0.98]"
         >
-          取消
+          Cancel
         </button>
         <button
           disabled={selected.size === 0}
@@ -420,7 +419,7 @@ const MealDateConfirmCard: React.FC<MealDateConfirmCardProps> = ({ slots, onConf
           className="flex-[2] flex items-center justify-center gap-2 rounded-xl bg-home-primary-600 py-2 text-sm font-bold text-white shadow-sm transition-all hover:bg-home-primary-700 active:scale-[0.98] disabled:opacity-40 disabled:pointer-events-none"
         >
           <Check size={14} />
-          确认规划
+          Confirm
         </button>
       </div>
     </div>
@@ -857,32 +856,32 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ isOpen, onClose }) => {
     }
   }
 
-  /** 用户点击"确认此方案" — 选中并请求 AI 转为草稿 */
+  /** User clicks "Confirm" — select option and ask AI to convert to draft */
   const handleSelectOption = (optionId: string, label: string) => {
-    handleSend(`选方案${optionId}：${label}`)
+    handleSend(`Select option ${optionId}: ${label}`)
   }
 
-  /** 用户点击 🔄 换一个 — 保留该方案但替换指定菜品 */
+  /** User clicks Swap — keep option but replace specified dish */
   const handleReplaceInOption = (optionId: string, _label: string, dishName: string) => {
-    handleSend(`我想要方案${optionId}，但请把"${dishName}"换成另一道类似的菜，其他菜品保持不变`)
+    handleSend(`I want option ${optionId}, but please replace "${dishName}" with another similar dish, keep everything else the same`)
   }
 
-  /** 草稿方案：用户点击"确认保存计划" */
+  /** Draft plan: user clicks "Save Plan" */
   const handleConfirmDraft = () => {
-    handleSend('确认保存计划')
+    handleSend('Confirm save plan')
   }
 
-  /** 草稿方案：用户点击 换菜 — 直接替换 */
+  /** Draft plan: user clicks Swap — direct replacement */
   const handleReplaceDraftDish = (dishName: string) => {
-    handleSend(`当前方案中，请把"${dishName}"换成另一道类似的菜，其他菜品保持不变`)
+    handleSend(`In the current plan, please replace "${dishName}" with another similar dish, keep everything else the same`)
   }
 
-  /** 餐次确认卡片：用户点击确认/取消 */
+  /** Meal date confirm card: user clicks confirm/cancel */
   const handleConfirmMealDates = (selectedSlots: string[]) => {
     if (selectedSlots.length === 0) {
-      handleSend('取消，不用规划了')
+      handleSend('Cancel, no need to plan')
     } else {
-      handleSend('确认', { confirmed_slots: selectedSlots })
+      handleSend('Confirm', { confirmed_slots: selectedSlots })
     }
   }
 
@@ -966,7 +965,7 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ isOpen, onClose }) => {
         <div className="flex items-center gap-1">
           <button
             onClick={handleClearMessages}
-            title={clearConfirming ? '再次点击确认清除' : '清除对话记录'}
+            title={clearConfirming ? 'Click again to confirm' : 'Clear chat history'}
             className={`flex items-center gap-1 rounded-lg px-2 py-2 transition-all active:scale-95 ${
               clearConfirming
                 ? 'bg-red-500 text-white hover:bg-red-600'
@@ -975,7 +974,7 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ isOpen, onClose }) => {
           >
             <Trash2 size={16} />
             {clearConfirming && (
-              <span className="text-[11px] font-semibold leading-none">确认?</span>
+              <span className="text-[11px] font-semibold leading-none">Sure?</span>
             )}
           </button>
           <button onClick={() => { onClose(); setActiveContext(null); }} className="p-2 text-gray-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-colors">

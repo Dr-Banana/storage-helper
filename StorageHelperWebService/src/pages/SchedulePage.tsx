@@ -435,7 +435,7 @@ const SchedulePage: React.FC = () => {
     return () => window.removeEventListener('schedule-prefetched', handlePrefetch);
   }, []);
 
-  // 监听 Layout 层派发的"抽屉编辑请求"事件，打开编辑 Modal
+  // Listen for the drawer edit-request event dispatched by Layout, open edit modal
   useEffect(() => {
     const handler = (e: Event) => {
       const { schedule, date } = (e as CustomEvent<{ schedule: Schedule; date: string }>).detail;
@@ -879,7 +879,7 @@ const SchedulePage: React.FC = () => {
         </div>
       </div>
 
-      {/* ── 加载提示 ── */}
+      {/* ── Loading indicator ── */}
       {loading && schedules.length === 0 && (
         <div className="flex flex-col items-center justify-center py-20 text-stone-400">
           <div className="animate-spin mb-3">
@@ -889,18 +889,18 @@ const SchedulePage: React.FC = () => {
         </div>
       )}
 
-      {/* ── 错误提示 ── */}
+      {/* ── Error message ── */}
       {error && (
         <div className="mx-4 mt-4 px-4 py-3 bg-red-50 border border-red-200 text-red-700 rounded-xl text-sm">
           {error}
         </div>
       )}
 
-      {/* ── 当日日程卡片流 (仅周视图显示；月视图下点击日期会切回周视图) ── */}
+      {/* ── Daily schedule card list (week view only; clicking a date in month view switches back to week view) ── */}
       {viewMode === 'week' && (
         <div className="px-4 pt-5 pb-24 space-y-4">
 
-          {/* 日期标题 + 新建按钮 */}
+          {/* Date heading + new button */}
         <div className="flex items-center justify-between">
           <h3 className="text-base font-bold text-stone-700 flex items-center gap-2">
             <Sparkles size={16} className="text-amber-500" />
@@ -925,7 +925,7 @@ const SchedulePage: React.FC = () => {
           </button>
         </div>
 
-        {/* 加载中骨架 / 无内容占位 */}
+        {/* Loading skeleton / empty placeholder */}
         {loading && schedules.length > 0 && (
           <div className="opacity-50 pointer-events-none space-y-3">
             {[1, 2].map(i => (
@@ -965,12 +965,12 @@ const SchedulePage: React.FC = () => {
           </div>
         )}
 
-        {/* 日程卡片列表 */}
+        {/* Schedule card list */}
         {viewingDaySchedules.map(schedule => {
           const mpf = getMealPlanFeature(schedule);
           const isMealPlan = !!mpf;
 
-          // 标题：优先用 schedule.title，fallback 拼菜名
+          // Title: prefer schedule.title, fall back to concatenated dish names
           let title = schedule.title;
           let subtitle = new Date(schedule.scheduled_time).toLocaleTimeString('en-US', {
             hour: '2-digit',
@@ -1026,7 +1026,7 @@ const SchedulePage: React.FC = () => {
                 isMealPlan && 'cursor-pointer active:scale-[0.99] transition-transform',
               )}
             >
-              {/* 顶部彩色条 */}
+              {/* Top color bar */}
               <div
                 className={clsx(
                   'h-1.5 bg-gradient-to-r',
@@ -1042,7 +1042,7 @@ const SchedulePage: React.FC = () => {
               >
                 <div className="flex items-start justify-between mb-2">
                   <div className="flex-1 min-w-0">
-                    {/* 标签行 */}
+                    {/* Label row */}
                     <div className="flex items-center gap-1.5 mb-1">
                       <span className="inline-block px-2 py-0.5 rounded-md bg-white/70 text-stone-500 text-[10px] font-bold uppercase tracking-wider border border-stone-100/80">
                         {isMealPlan ? '🍽 Meal Plan' : subtitle}
@@ -1062,7 +1062,7 @@ const SchedulePage: React.FC = () => {
                       </h4>
                     )}
                   </div>
-                  {/* meal plan 卡片的编辑只在抽屉内操作；普通日程保留编辑按钮 */}
+                  {/* Meal plan cards are edited inside the drawer; regular schedules keep the edit button */}
                   {!isMealPlan && (
                     <button
                       onClick={openEdit}
@@ -1073,7 +1073,7 @@ const SchedulePage: React.FC = () => {
                   )}
                 </div>
 
-                {/* 餐食预览：每个时段独立白色块 + 菜品 pill */}
+                {/* Meal preview: each slot in its own white block + dish pills */}
                 {isMealPlan && meals.length > 0 && (
                   <div className="grid grid-cols-1 gap-1.5 mt-3">
                     {meals.map(meal => {
@@ -1101,7 +1101,7 @@ const SchedulePage: React.FC = () => {
                   </div>
                 )}
 
-                {/* 普通日程：描述 */}
+                {/* Regular schedule: description */}
                 {!isMealPlan && schedule.description && (
                   <p className="text-sm text-stone-500 mt-1 line-clamp-2">{schedule.description}</p>
                 )}
@@ -1123,7 +1123,7 @@ const SchedulePage: React.FC = () => {
         onToggle={toggleGroceryItem}
       />
 
-      {/* ── 模态弹窗 ── */}
+      {/* ── Modal ── */}
       {showModal && (
         <ScheduleModal
           schedule={editingSchedule}
@@ -1223,7 +1223,7 @@ const DishEditor: React.FC<{
   onChange: (dish: Dish) => void;
   onRemove: () => void;
 }> = memo(({ dish, onChange, onRemove }) => {
-  // 食材默认折叠，减少表单层级压迫感
+  // Ingredients collapsed by default to reduce form hierarchy visual weight
   const [showIngredients, setShowIngredients] = useState(dish.ingredients.length > 0);
 
   const addIngredient = useCallback(() => {
@@ -1260,7 +1260,7 @@ const DishEditor: React.FC<{
         </button>
       </div>
 
-      {/* 食材折叠面板 */}
+      {/* Ingredients collapsible panel */}
       <button
         type="button"
         onClick={() => setShowIngredients(p => !p)}
@@ -1488,7 +1488,7 @@ const DetailedMealPlanEditor: React.FC<{
 
   return (
     <div className="space-y-4">
-      {/* 添加日期 */}
+      {/* Add date */}
       <div className="bg-stone-50 rounded-xl border border-stone-200 p-3">
         <div className="flex items-center gap-3">
           <div className="flex-1 relative">
@@ -1514,7 +1514,7 @@ const DetailedMealPlanEditor: React.FC<{
         )}
       </div>
 
-      {/* 日计划列表 */}
+      {/* Day plan list */}
       {dayPlans.length === 0 ? (
         <div className="text-center py-10 bg-stone-50 rounded-2xl border border-stone-100">
           <Utensils size={28} className="mx-auto text-stone-300 mb-3" />
@@ -1579,7 +1579,7 @@ const ScheduleModal: React.FC<ScheduleModalProps> = ({
     });
   }, [schedule?.id, schedule?.title]);
 
-  // 新建时默认开启 meal plan 模式，直接进入编辑状态；编辑时保持原值
+  // New schedules default to meal plan mode; editing preserves the existing value
   const [isMealPlanMode, setIsMealPlanMode] = useState(() => schedule ? !!getMealPlanFeature(schedule) : true);
   const [mealPlanFeature, setMealPlanFeature] = useState<MealPlanFeature>(() =>
     getMealPlanFeature(schedule || null) || createEmptyMealPlanFeature(),
@@ -1638,7 +1638,7 @@ const ScheduleModal: React.FC<ScheduleModalProps> = ({
     <div className="fixed inset-0 bg-stone-900/40 flex items-end md:items-center justify-center p-0 md:p-4 z-50">
       <div className="bg-white rounded-t-3xl md:rounded-3xl w-full max-w-2xl max-h-[92vh] overflow-hidden flex flex-col shadow-2xl">
 
-        {/* 弹窗标题栏 */}
+        {/* Modal title bar */}
         <div className="px-6 py-4 border-b border-stone-100 flex items-center justify-between flex-shrink-0">
           <div className="flex items-center gap-3">
             <div className={clsx(
@@ -1666,12 +1666,12 @@ const ScheduleModal: React.FC<ScheduleModalProps> = ({
           </button>
         </div>
 
-        {/* 滚动内容区 */}
+        {/* Scrollable content area */}
         <div className="flex-1 overflow-y-auto custom-scrollbar">
           <form id="schedule-form" onSubmit={handleSubmit} className="p-6">
             <div className="space-y-6">
 
-              {/* 餐食计划开关 */}
+              {/* Meal plan toggle */}
               <div className="flex items-center justify-between">
                 <h3 className="text-sm font-bold text-stone-700 flex items-center gap-2">
                   <ChefHat size={16} className="text-orange-500" />
@@ -1730,7 +1730,7 @@ const ScheduleModal: React.FC<ScheduleModalProps> = ({
           </form>
         </div>
 
-        {/* 底部操作栏 */}
+        {/* Bottom action bar */}
         <div className="px-6 py-4 bg-stone-50 border-t border-stone-100 flex items-center justify-between flex-shrink-0">
           <div className="flex items-center gap-2">
             {schedule && onDelete && (() => {
@@ -2026,8 +2026,8 @@ const DishReadCard: React.FC<{
 });
 
 // ─── MealPlanDetailDrawer ─────────────────────────────────────────────────────
-// 纯内容组件：不管理定位/动画，由 Layout 层的 flex 兄弟容器负责。
-// 渲染为 h-full flex-col，填充 Layout 提供的容器。
+// Pure content component: no positioning/animation management — handled by the Layout flex sibling container.
+// Renders as h-full flex-col, filling the container provided by Layout.
 
 export const MealPlanDetailDrawer: React.FC<{
   schedule: Schedule;
@@ -2057,7 +2057,7 @@ export const MealPlanDetailDrawer: React.FC<{
 
   return (
     <div className="flex flex-col h-full bg-[#FAF9F6]">
-      {/* ── 顶部标题栏（与 Layout header 完全对齐）── */}
+      {/* ── Top title bar (fully aligned with Layout header) ── */}
       <div className="flex-shrink-0 h-14 flex items-center gap-1 px-2 bg-[#FAF9F6]/95 backdrop-blur-md border-b border-stone-200/60">
         <button
           onClick={onClose}
@@ -2079,7 +2079,7 @@ export const MealPlanDetailDrawer: React.FC<{
         </button>
       </div>
 
-      {/* ── 内容滚动区 ── */}
+      {/* ── Scrollable content area ── */}
       <div className="flex-1 overflow-y-auto px-5 pb-5 space-y-7 custom-scrollbar">
         {!dayPlan || sortedMeals.length === 0 ? (
           <div className="text-center py-16 text-stone-400">
