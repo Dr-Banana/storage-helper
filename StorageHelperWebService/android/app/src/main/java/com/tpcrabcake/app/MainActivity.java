@@ -1,4 +1,4 @@
-package com.storagehelper.app;
+package com.tpcrabcake.app;
 
 import com.getcapacitor.BridgeActivity;
 

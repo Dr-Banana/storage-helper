@@ -1,12 +1,10 @@
 import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Upload, FileText, Image, X, CheckCircle, AlertCircle, Eye, Edit2, Loader, Camera } from 'lucide-react'
+import { Upload, FileText, Image, X, CheckCircle, AlertCircle, Eye, Edit2, Loader } from 'lucide-react'
 import { ingestionService, categoryService, locationService, DocumentCategory, StorageLocation, CategoryTypeInfo } from '../api/services'
 import apiClient from '../api/client'
 import { useAuth } from '../contexts/AuthContext'
 import MetadataViewer from '../components/metadata/MetadataViewer'
-import { Camera as CapCamera, CameraResultType, CameraSource } from '@capacitor/camera'
-import { Capacitor } from '@capacitor/core'
 
 const UploadPage = () => {
   const navigate = useNavigate()
@@ -31,7 +29,6 @@ const UploadPage = () => {
   const [categoryTypes, setCategoryTypes] = useState<CategoryTypeInfo[]>([])
   const [expandedPageIndex, setExpandedPageIndex] = useState<number | null>(null)
 
-  const isNativeMobile = Capacitor.isNativePlatform()
 
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files) {
@@ -42,35 +39,6 @@ const UploadPage = () => {
 
   const removeFile = (index: number) => {
     setFiles((prev) => prev.filter((_, i) => i !== index))
-  }
-
-  const handleTakePhoto = async () => {
-    try {
-      const photo = await CapCamera.getPhoto({
-        resultType: CameraResultType.DataUrl,
-        source: CameraSource.Camera,
-        quality: 90,
-        allowEditing: false,
-      })
-
-      if (photo.dataUrl) {
-        const res = await fetch(photo.dataUrl)
-        const blob = await res.blob()
-        const mimeType = blob.type || 'image/jpeg'
-        const ext = mimeType.split('/')[1] || 'jpg'
-        const fileName = `photo_${Date.now()}.${ext}`
-        const file = new File([blob], fileName, { type: mimeType })
-        setFiles((prev) => [...prev, file])
-      }
-    } catch (error: any) {
-      const cancelled =
-        error?.message === 'User cancelled photos app' ||
-        error?.message === 'No image picked'
-      if (!cancelled) {
-        console.error('Camera error:', error)
-        alert('Unable to access camera. Please check camera permissions in Settings.')
-      }
-    }
   }
 
   // Load category config (all available category types) on mount
@@ -365,17 +333,6 @@ const UploadPage = () => {
           Select Files
         </label>
 
-        {/* Camera button — mobile only */}
-        {isNativeMobile && (
-          <button
-            onClick={handleTakePhoto}
-            disabled={uploading}
-            className="w-full flex items-center justify-center gap-3 bg-home-primary-500 hover:bg-home-primary-600 active:bg-home-primary-700 text-white font-semibold py-5 rounded-home mb-4 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-          >
-            <Camera size={28} />
-            <span className="text-lg">Take Photo</span>
-          </button>
-        )}
 
         <div className="border-2 border-dashed border-home-primary-300 rounded-home p-8 text-center hover:border-home-primary-400 transition-colors">
           <input

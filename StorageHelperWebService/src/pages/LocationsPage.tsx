@@ -1,12 +1,10 @@
 import { useState, useEffect, useCallback, memo, useMemo } from 'react'
 import { Link } from 'react-router-dom'
-import { MapPin, FileText, Plus, Edit2, Trash2, X, ChevronRight, Search, Clock, Camera, Tag } from 'lucide-react'
+import { MapPin, FileText, Plus, Edit2, Trash2, X, ChevronRight, Search, Clock, Tag } from 'lucide-react'
 import { locationService, documentService, categoryService, Document, StorageLocation } from '../api/services'
 import { getApiBaseUrl } from '../api/client'
 import { useAuth } from '../contexts/AuthContext'
 import CategoryIcon from '../components/CategoryIcon'
-import { Camera as CapCamera, CameraResultType, CameraSource } from '@capacitor/camera'
-import { Capacitor } from '@capacitor/core'
 
 // Pre-compiled regex — avoids rebuilding on every parseTags call
 const TAG_REGEX = /\[Tags:\s*([^\]]+)\]/i
@@ -256,7 +254,6 @@ const Modal = ({ show, onClose, title, children }: { show: boolean; onClose: () 
 
 const LocationsPage = () => {
   const { userId } = useAuth()
-  const isNativeMobile = Capacitor.isNativePlatform()
   const [locations, setLocations] = useState<StorageLocation[]>([])
   const [loading, setLoading] = useState(true)
   const [showCreateModal, setShowCreateModal] = useState(false)
@@ -391,34 +388,6 @@ const LocationsPage = () => {
         return
       }
       setSelectedFile(file)
-    }
-  }
-
-  const handleTakeLocationPhoto = async () => {
-    try {
-      const photo = await CapCamera.getPhoto({
-        resultType: CameraResultType.DataUrl,
-        source: CameraSource.Camera,
-        quality: 90,
-        allowEditing: false,
-      })
-      if (photo.dataUrl) {
-        const res = await fetch(photo.dataUrl)
-        const blob = await res.blob()
-        const mimeType = blob.type || 'image/jpeg'
-        const ext = mimeType.split('/')[1] || 'jpg'
-        const file = new File([blob], `location_${Date.now()}.${ext}`, { type: mimeType })
-        setSelectedFile(file)
-        setFormError(null)
-      }
-    } catch (error: any) {
-      const cancelled =
-        error?.message === 'User cancelled photos app' ||
-        error?.message === 'No image picked'
-      if (!cancelled) {
-        console.error('Camera error:', error)
-        setFormError('Unable to access camera. Please check camera permissions in Settings.')
-      }
     }
   }
 
@@ -755,17 +724,6 @@ const LocationsPage = () => {
               <label className="block text-sm font-medium text-home-text-dark mb-1">
                 Location Photo (Optional)
               </label>
-              {isNativeMobile && (
-                <button
-                  type="button"
-                  onClick={handleTakeLocationPhoto}
-                  disabled={uploadingImage || submitting}
-                  className="w-full flex items-center justify-center gap-2 bg-home-primary-500 hover:bg-home-primary-600 active:bg-home-primary-700 text-white font-semibold py-3 rounded-lg mb-2 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                >
-                  <Camera size={20} />
-                  Take Photo
-                </button>
-              )}
               <input
                 type="file"
                 accept="image/*"
@@ -865,17 +823,6 @@ const LocationsPage = () => {
               <label className="block text-sm font-medium text-home-text-dark mb-1">
                 Location Photo (Optional)
               </label>
-              {isNativeMobile && (
-                <button
-                  type="button"
-                  onClick={handleTakeLocationPhoto}
-                  disabled={uploadingImage || submitting}
-                  className="w-full flex items-center justify-center gap-2 bg-home-primary-500 hover:bg-home-primary-600 active:bg-home-primary-700 text-white font-semibold py-3 rounded-lg mb-2 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                >
-                  <Camera size={20} />
-                  Take Photo
-                </button>
-              )}
               <input
                 type="file"
                 accept="image/*"
