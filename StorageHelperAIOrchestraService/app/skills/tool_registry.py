@@ -4,6 +4,29 @@ Gemini Function Calling tool registry and executor.
 Replaces the intent classifier + agent factory + manual routing in chat.py.
 Each tool declaration maps to an existing agent/pipeline backend, keeping all
 existing business logic intact while letting the LLM decide what to invoke.
+
+Structural routing constraints
+-------------------------------
+Each declaration may carry an optional ``"routing"`` key — machine-readable
+rules that the Harness RoutingGuide evaluates deterministically before the LLM
+call.  This is the single source of truth for routing logic; adding or changing
+a rule here automatically updates both runtime behaviour and the test suite.
+
+Schema for ``routing``:
+  {
+    "force_when": [          # list of conditions; first match wins
+      {
+        "state_key": str,    # plan_state key that must be truthy
+        "also_requires": {   # optional: additional state key/value checks
+          "<key>": "<value>"
+        },
+        "args": {            # tool args to pass; "$user_input" is substituted
+          "<arg>": "<value or $user_input>"
+        },
+        "reason": str        # logged and surfaced to the caller
+      }
+    ]
+  }
 """
 
 import json
@@ -66,6 +89,35 @@ TOOL_DECLARATIONS: List[Dict[str, Any]] = [
                 },
             },
             "required": ["user_request"],
+        },
+        "routing": {
+            "force_when": [
+                {
+                    "state_key": "pending_planning_queue",
+                    "also_requires": {"last_pipeline_action": "ask_confirm_dates"},
+                    "args": {"user_request": "$user_input"},
+                    "reason": (
+                        "pending date confirmation — any reply must reach plan_meal, "
+                        "even bare affirmations like '好的' or 'ok'"
+                    ),
+                },
+                {
+                    "state_key": "pending_options",
+                    "args": {"user_request": "$user_input"},
+                    "reason": (
+                        "pending option selection — user is choosing between meal options, "
+                        "route to plan_meal so the pipeline can apply the selection from stored state"
+                    ),
+                },
+                {
+                    "state_key": "meal_planning_queue",
+                    "args": {"user_request": "$user_input"},
+                    "reason": (
+                        "active day-by-day planning queue — any user reply continues queue processing, "
+                        "including confirmations, swaps, and proceed signals"
+                    ),
+                },
+            ]
         },
     },
     {
@@ -196,7 +248,16 @@ TOOL_DECLARATIONS: List[Dict[str, Any]] = [
     },
 ]
 
-GEMINI_TOOLS = [{"functionDeclarations": TOOL_DECLARATIONS}]
+# Gemini only accepts name/description/parameters — strip harness-internal fields.
+_GEMINI_ALLOWED_KEYS = {"name", "description", "parameters"}
+GEMINI_TOOLS = [
+    {
+        "functionDeclarations": [
+            {k: v for k, v in decl.items() if k in _GEMINI_ALLOWED_KEYS}
+            for decl in TOOL_DECLARATIONS
+        ]
+    }
+]
 
 # ─── Tool → action field mapping (backward-compat with existing frontend) ─────
 
@@ -371,9 +432,23 @@ class ToolExecutor:
             extracted_items=None,
         )
 
+        # BUT: when there is active planning state (pending_options, queue, draft),
+        # Gemini can hallucinate dish details into user_request based on conversation history.
+        # Using that hallucinated text as pipeline input causes wrong dishes to be generated.
+        # In those cases, use the original user_input which is concise and accurate.
+        from app.modules.plan_ahead_state import get_plan_state as _get_ps
+        _cur_ps = _get_ps(owner_id)
+        _has_active_state = bool(
+            _cur_ps.get("pending_options")
+            or _cur_ps.get("meal_planning_queue")
+            or _cur_ps.get("is_draft")
+            or (_cur_ps.get("pending_planning_queue") and _cur_ps.get("last_pipeline_action") == "ask_confirm_dates")
+        )
+        _pipeline_user_input = kw["user_input"] if _has_active_state else (args.get("user_request") or kw["user_input"])
+
         result = await pipeline.execute(
             owner_id=owner_id,
-            user_input=kw["user_input"],
+            user_input=_pipeline_user_input,
             history=kw.get("history") or [],
             user_timezone=kw.get("user_timezone"),
             storage_client=_default_storage,

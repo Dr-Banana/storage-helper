@@ -216,6 +216,14 @@ class ChatResponse(BaseModel):
     reasoning: Optional[str] = Field(None, description="AI's reasoning for intent classification")
     action: str = Field(..., description="The action to perform (SEARCH, GENERAL, etc.)")
     action_data: Dict[str, Any] = Field(default_factory=dict, description="Metadata for the action")
+    thinking: Optional[str] = Field(
+        None,
+        description=(
+            "Intermediate reasoning or tool-invocation text stripped from the response. "
+            "Frontend should render this in a collapsible 'thinking' section, "
+            "never as the main answer."
+        ),
+    )
     # Free-tier limit enforcement
     error_code: Optional[str] = Field(None, description="'LIMIT_EXCEEDED' when free tier limit is reached")
     error_detail: Optional[str] = Field(None, description="Human-readable reason for the error")

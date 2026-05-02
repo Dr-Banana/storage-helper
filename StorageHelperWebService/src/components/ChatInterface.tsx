@@ -14,6 +14,28 @@ interface Message {
   action?: string
   actionData?: any
   documents?: Document[]
+  thinking?: string
+}
+
+const ThinkingBubble: React.FC<{ thinking: string }> = ({ thinking }) => {
+  const [open, setOpen] = React.useState(false)
+  return (
+    <div className="mb-2">
+      <button
+        onClick={() => setOpen(v => !v)}
+        className="flex items-center gap-1.5 text-xs text-gray-400 hover:text-gray-600 transition-colors"
+      >
+        <BrainCircuit size={12} />
+        <span>{open ? '收起思考过程' : '查看思考过程'}</span>
+        <span className="text-gray-300">{open ? '▲' : '▼'}</span>
+      </button>
+      {open && (
+        <div className="mt-1.5 px-3 py-2 rounded-lg bg-gray-50 border border-gray-100 text-xs text-gray-400 font-mono whitespace-pre-wrap leading-relaxed">
+          {thinking}
+        </div>
+      )}
+    </div>
+  )
 }
 
 interface MealPlanData {
@@ -553,11 +575,14 @@ const MessageItem = memo(({
           {msg.role === 'user' ? (
             <p className="whitespace-pre-wrap">{msg.content}</p>
           ) : (
-            <div className="prose prose-sm max-w-none text-gray-800 prose-headings:text-gray-900 prose-p:my-1 prose-li:my-0 prose-strong:font-semibold">
-              <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                {msg.content}
-              </ReactMarkdown>
-            </div>
+            <>
+              {msg.thinking && <ThinkingBubble thinking={msg.thinking} />}
+              <div className="prose prose-sm max-w-none text-gray-800 prose-headings:text-gray-900 prose-p:my-1 prose-li:my-0 prose-strong:font-semibold">
+                <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                  {msg.content}
+                </ReactMarkdown>
+              </div>
+            </>
           )}
         </div>
         
@@ -782,7 +807,8 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ isOpen, onClose }) => {
 
       setMessages(prev => [...prev, {
         role: 'model', content: response.response, intent: response.intent,
-        action: response.action, actionData: response.action_data, documents: documents
+        action: response.action, actionData: response.action_data, documents: documents,
+        thinking: response.thinking,
       }])
 
       // Refresh usage counters after every chat interaction

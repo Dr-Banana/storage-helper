@@ -537,6 +537,7 @@ export const ingestionService = {
     reasoning?: string;
     action: string;
     action_data: any;
+    thinking?: string;
   }> => {
     const response = await aiOrchestraClient.post('/chat', request)
     return response.data
