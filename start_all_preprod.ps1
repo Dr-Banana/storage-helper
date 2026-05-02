@@ -6,6 +6,7 @@ $BASE_DIR = Split-Path -Parent $MyInvocation.MyCommand.Path
 $AI_SERVICE_DIR = Join-Path $BASE_DIR "StorageHelperAIOrchestraService"
 $DATA_STORAGE_DIR = Join-Path $BASE_DIR "StorageHelperDataStorageService"
 $WEB_SERVICE_DIR = Join-Path $BASE_DIR "StorageHelperWebService"
+$FOODIE_SERVICE_DIR = Join-Path $BASE_DIR "FoodieService"
 
 # Colors
 $RED = "Red"
@@ -111,6 +112,11 @@ if ($localContainers -or $webProcesses) {
         $env:APP_ENV = "local"
         docker-compose down 2>$null | Out-Null
         Pop-Location
+
+        Push-Location $FOODIE_SERVICE_DIR
+        $env:APP_ENV = "local"
+        docker-compose down 2>$null | Out-Null
+        Pop-Location
     }
     
     if ($webProcesses) {
@@ -157,7 +163,7 @@ Write-Host "  [OK] Configuration files ready" -ForegroundColor $GREEN
 Write-Host ""
 
 # Step 1: Start Data Storage Service (PREPROD) using Docker
-Write-Host "[1/3] Starting Data Storage Service (PREPROD)..." -ForegroundColor $BLUE
+Write-Host "[1/4] Starting Data Storage Service (PREPROD)..." -ForegroundColor $BLUE
 
 # Start in foreground first to ensure network is created
 Push-Location $DATA_STORAGE_DIR
@@ -213,8 +219,39 @@ Start-Process powershell -ArgumentList "-NoExit", "-Command", $dataStorageLogsCm
 Write-Host "  [OK] Logs window opened" -ForegroundColor $GREEN
 Write-Host ""
 
-# Step 2: Start AI Orchestration Service (PREPROD) using Docker
-Write-Host "[2/3] Starting AI Orchestration Service (PREPROD)..." -ForegroundColor $BLUE
+# Step 2: Start FoodieService (HowToCook MCP) using Docker
+Write-Host "[2/4] Starting FoodieService (HowToCook MCP)..." -ForegroundColor $BLUE
+
+Push-Location $FOODIE_SERVICE_DIR
+$env:APP_ENV = "preprod"
+
+Write-Host "  Stopping old containers..." -ForegroundColor $YELLOW
+docker-compose down 2>$null | Out-Null
+
+Write-Host "  Building and starting service..." -ForegroundColor $YELLOW
+docker-compose up -d --build 2>&1 | Out-Null
+
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "  [Error] Failed to start FoodieService" -ForegroundColor $RED
+    Pop-Location
+    exit 1
+}
+
+Write-Host "  Waiting for howtocook-mcp to be ready..." -ForegroundColor $YELLOW
+Start-Sleep -Seconds 5
+
+Pop-Location
+Write-Host "  [OK] FoodieService started" -ForegroundColor $GREEN
+Write-Host ""
+
+# Open logs in new window
+$foodieLogsCmd = "cd '$FOODIE_SERVICE_DIR'; `$env:APP_ENV='preprod'; docker-compose logs -f"
+Start-Process powershell -ArgumentList "-NoExit", "-Command", $foodieLogsCmd -WindowStyle Normal
+Write-Host "  [OK] Logs window opened" -ForegroundColor $GREEN
+Write-Host ""
+
+# Step 3: Start AI Orchestration Service (PREPROD) using Docker
+Write-Host "[3/4] Starting AI Orchestration Service (PREPROD)..." -ForegroundColor $BLUE
 
 # Start in foreground
 Push-Location $AI_SERVICE_DIR
@@ -245,8 +282,8 @@ Start-Process powershell -ArgumentList "-NoExit", "-Command", $aiLogsCmd -Window
 Write-Host "  [OK] Logs window opened" -ForegroundColor $GREEN
 Write-Host ""
 
-# Step 3: Start Web Service (same for both LOCAL and PREPROD)
-Write-Host "[3/3] Starting Web Service..." -ForegroundColor $BLUE
+# Step 4: Start Web Service (same for both LOCAL and PREPROD)
+Write-Host "[4/4] Starting Web Service..." -ForegroundColor $BLUE
 
 $webCommand = "cd '$WEB_SERVICE_DIR'; if (-not (Test-Path 'node_modules')) { Write-Host '[Install] Installing dependencies...' -ForegroundColor Cyan; npm install }; Write-Host '[OK] Dependencies installed' -ForegroundColor Green; npm run dev"
 
@@ -266,9 +303,10 @@ Write-Host "  - Storage: Supabase Production Storage" -ForegroundColor $MAGENTA
 Write-Host "  - Backend: Docker containers" -ForegroundColor $MAGENTA
 Write-Host ""
 Write-Host "Service URLs:" -ForegroundColor $YELLOW
-Write-Host "  [AI]  AI Orchestration -> http://localhost:8888" -ForegroundColor $YELLOW
-Write-Host "  [DB]  Data Storage API -> http://localhost:8000 (Swagger: /docs)" -ForegroundColor $YELLOW
-Write-Host "  [WEB] Web Service -> http://localhost:5173" -ForegroundColor $YELLOW
+Write-Host "  [AI]  AI Orchestration  -> http://localhost:8888" -ForegroundColor $YELLOW
+Write-Host "  [DB]  Data Storage API  -> http://localhost:8000 (Swagger: /docs)" -ForegroundColor $YELLOW
+Write-Host "  [MCP] HowToCook MCP     -> http://localhost:3010/health" -ForegroundColor $YELLOW
+Write-Host "  [WEB] Web Service       -> http://localhost:5173" -ForegroundColor $YELLOW
 Write-Host ""
 Write-Host "Tips:" -ForegroundColor $YELLOW
 Write-Host "  - View logs: `$env:APP_ENV='preprod'; docker-compose logs -f" -ForegroundColor $YELLOW

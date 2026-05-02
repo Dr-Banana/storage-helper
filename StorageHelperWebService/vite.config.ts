@@ -17,6 +17,10 @@ export default defineConfig(({ mode }) => {
     },
     server: {
       port: 3000,
+      headers: {
+        'Cross-Origin-Opener-Policy': 'same-origin-allow-popups',
+        'Cross-Origin-Embedder-Policy': 'unsafe-none',
+      },
       proxy: {
         '/api/v1/files/upload-temp': {
           target: 'http://127.0.0.1:3001',
