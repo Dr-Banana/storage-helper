@@ -440,11 +440,9 @@ const MealDateConfirmCard: React.FC<MealDateConfirmCardProps> = ({ slots, onConf
         {sortedDates.map(date => {
           const availableMeals = dateMap.get(date)!
           return (
-            <div key={date} className="flex items-center gap-3 py-2.5">
-              <span className="w-28 shrink-0 text-sm font-medium text-gray-700">
-                {formatDate(date)}
-              </span>
-              <div className="flex gap-1.5">
+            <div key={date} className="py-2.5">
+              <p className="mb-1.5 text-sm font-medium text-gray-700">{formatDate(date)}</p>
+              <div className="flex flex-wrap gap-1.5">
                 {MEAL_ORDER.filter(m => availableMeals.has(m)).map(meal => {
                   const key = `${date}|${meal}`
                   const on = selected.has(key)

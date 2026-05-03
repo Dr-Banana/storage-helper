@@ -638,7 +638,7 @@ class CookingStepsAgent(BaseAgent):
         Phase 2a (scaling) — Python computes exact new quantities; LLM rewrites text only.
         Phase 2b (tweak)   — LLM applies a focused single-ingredient change.
         """
-        lang = language or "zh"
+        lang = language or "en"
         steps_text = _clean_steps_for_llm(current_steps)
         ing_text = ""
         if current_ingredients:
@@ -1049,7 +1049,7 @@ class CookingStepsAgent(BaseAgent):
         # These are injected into the beginner FORMAT RULES so that the LLM's
         # in-context examples match the requested output language and never leak
         # Chinese into English (or other language) responses.
-        _lang = language or "zh"
+        _lang = language or "en"
         _phase_prep, _phase_cook, _phase_serve = {
             "zh": ("🥗 准备阶段", "🍳 开始烹饪", "🥢 享用"),
             "en": ("🥗 Prep",     "🍳 Cook",       "🥢 Serve"),
@@ -1137,7 +1137,7 @@ class CookingStepsAgent(BaseAgent):
             "ja": ("Japanese", "You MUST write all steps and ingredient names in Japanese. Do NOT use English or Chinese."),
             "ko": ("Korean", "You MUST write all steps and ingredient names in Korean. Do NOT use English or Chinese."),
         }
-        _lang_name, _lang_enforce = _lang_instr_map.get(language or "zh", _lang_instr_map["zh"])
+        _lang_name, _lang_enforce = _lang_instr_map.get(language or "en", _lang_instr_map["zh"])
 
         htc_block = f"\n{htc_context}\n" if htc_context else ""
 
@@ -1875,7 +1875,7 @@ class CookingStepsAgent(BaseAgent):
                 "en": "Which dish would you like the cooking steps for?",
                 "ja": "どの料理の作り方を知りたいですか？",
                 "ko": "어떤 요리의 조리법을 알고 싶으신가요?",
-            }.get(language or "zh", "Which dish would you like the cooking steps for?")
+            }.get(language or "en", "Which dish would you like the cooking steps for?")
             return self.format_response(
                 action="COOKING_STEPS",
                 message=_no_dish_msg,
@@ -1952,7 +1952,7 @@ class CookingStepsAgent(BaseAgent):
                 "en": f"Sorry, I couldn't generate cooking steps for {dish_name}. Please try again.",
                 "ja": f"{dish_name}の調理手順を生成できませんでした。後でもう一度お試しください。",
                 "ko": f"{dish_name}의 조리 단계를 생성할 수 없습니다. 나중에 다시 시도해 주세요.",
-            }.get(language or "zh", f"Sorry, I couldn't generate cooking steps for {dish_name}. Please try again.")
+            }.get(language or "en", f"Sorry, I couldn't generate cooking steps for {dish_name}. Please try again.")
             return self.format_response(
                 action="COOKING_STEPS",
                 message=_fail_msg,

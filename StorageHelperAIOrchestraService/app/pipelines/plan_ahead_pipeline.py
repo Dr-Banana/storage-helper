@@ -205,8 +205,10 @@ class PlanAheadPipeline:
         from datetime import date as _d
 
         _day_zh = {0: "周一", 1: "周二", 2: "周三", 3: "周四", 4: "周五", 5: "周六", 6: "周日"}
+        _day_en = {0: "Mon", 1: "Tue", 2: "Wed", 3: "Thu", 4: "Fri", 5: "Sat", 6: "Sun"}
         _meal_zh = {"breakfast": "早餐", "lunch": "午餐", "dinner": "晚餐"}
-        is_zh = (language or "zh") == "zh"
+        _meal_en = {"breakfast": "Breakfast", "lunch": "Lunch", "dinner": "Dinner"}
+        is_zh = (language or "en") == "zh"
 
         # Extract unique dates and meal_times preserving order
         unique_dates: List[str] = list(dict.fromkeys(
@@ -221,10 +223,13 @@ class PlanAheadPipeline:
         all_meal_set = {"breakfast", "lunch", "dinner"}
         is_all_meals = set(unique_meals) >= all_meal_set
 
+        _day_map = _day_zh if is_zh else _day_en
+
         def _fmt(date_str: str):
             try:
                 _dt = _d.fromisoformat(date_str)
-                return f"{_dt.month}月{_dt.day}日", _day_zh.get(_dt.weekday(), "")
+                _short = f"{_dt.month}月{_dt.day}日" if is_zh else date_str
+                return _short, _day_map.get(_dt.weekday(), "")
             except Exception:
                 return date_str, ""
 
@@ -244,7 +249,7 @@ class PlanAheadPipeline:
             )
         # English fallback
         if is_single_day and not is_all_meals:
-            meals_en = " and ".join(unique_meals)
+            meals_en = " and ".join(_meal_en.get(m, m.capitalize()) for m in unique_meals)
             return (
                 f"Planning {meals_en} for {start} ({_s_day}) — is that right? "
                 "Just say 'no, tomorrow' or name a different date to adjust."
@@ -943,19 +948,25 @@ class PlanAheadPipeline:
                 if isinstance(_new_meal_times, list) and not _new_meal_times:
                     _new_meal_times = None
 
-                # If corrected but nothing was extracted, make a second targeted LLM call
-                # to specifically extract what the user wants to change.
+                # If corrected but no dates extracted, use ScheduleRangeDecider
+                # (same LLM date parser used by the chat pipeline hydration).
                 if not new_dates and _new_meal_times is None:
                     logger.info(
-                        "[PLAN_AHEAD_PIPELINE] corrected but empty extraction — "
-                        "running second targeted extraction for %r",
+                        "[PLAN_AHEAD_PIPELINE] corrected but empty dates — "
+                        "delegating to ScheduleRangeDecider for %r",
                         user_input,
                     )
-                    _extract_result = await self._extract_correction_details(
-                        user_input, pending_start, pending_end, today_str
+                    from app.agents.scheduling_agent import ScheduleRangeDecider
+                    _time_range = await ScheduleRangeDecider()._parse_range_llm(
+                        user_input, user_timezone, self.gemini_api_url
                     )
-                    new_dates = _extract_result.get("new_dates") or new_dates
-                    _new_meal_times = _extract_result.get("new_meal_times") or _new_meal_times
+                    if _time_range:
+                        from datetime import date as _d
+                        s, e = _time_range.to_date_range()
+                        new_dates = [
+                            (s + timedelta(days=i)).strftime("%Y-%m-%d")
+                            for i in range((e - s).days + 1)
+                        ]
 
                 logger.info(
                     "[PLAN_AHEAD_PIPELINE] _classify_date_confirmation: intent='corrected',"
@@ -1679,12 +1690,14 @@ class PlanAheadPipeline:
             )
             logger.info("[PLAN_AHEAD_PIPELINE] Phase 1b: user cancelled meal planning.")
             _cur = get_plan_state(owner_id)
-            return self._build_result(
-                response_text="好的，已取消本次规划。之后想规划餐食随时告诉我！",
+            _result = self._build_result(
+                response_text="",
                 meal_plan=_cur.get("meal_plan", {}), meal_plan_slots=_cur.get("meal_plan_slots", {}),
                 dish_ingredients=_cur.get("dish_ingredients", {}), shopping_list=_cur.get("shopping_list", []),
                 schedule_id=_cur.get("schedule_id"), intent_result=intent_result,
             )
+            _result["tool_result"] = "The user cancelled the meal planning session. Acknowledge the cancellation naturally and let them know they can ask again anytime."
+            return _result
 
         if _clf_intent == "confirmed":
             _planning_slots = list(_pending_queue)
@@ -1706,6 +1719,21 @@ class PlanAheadPipeline:
         if _clf_intent == "corrected":
             _corrected_dates = _clf.get("new_dates", [])
             _new_meal_times: Optional[List[str]] = _clf.get("new_meal_times") or None
+            if not _corrected_dates and _new_meal_times is None:
+                from app.agents.scheduling_agent import ScheduleRangeDecider
+                _time_range = await ScheduleRangeDecider()._parse_range_llm(
+                    user_input, user_timezone, self.gemini_api_url
+                )
+                if _time_range:
+                    _s, _e = _time_range.to_date_range()
+                    _corrected_dates = [
+                        (_s + timedelta(days=i)).strftime("%Y-%m-%d")
+                        for i in range((_e - _s).days + 1)
+                    ]
+                    logger.info(
+                        "[PLAN_AHEAD_PIPELINE] Phase 1b: ScheduleRangeDecider extracted corrected dates: %s",
+                        _corrected_dates,
+                    )
             if not _corrected_dates:
                 _corrected_dates = list(dict.fromkeys(
                     s.split("|")[0] for s in _pending_queue if "|" in s
@@ -1732,30 +1760,30 @@ class PlanAheadPipeline:
                 logger.info("[PLAN_AHEAD_PIPELINE] Phase 1b: no-op correction (retry=%d) for %r", _retry, user_input)
                 if _retry >= 2:
                     update_plan_state(owner_id=owner_id, pending_planning_queue=None, last_pipeline_action=None, confirmation_retry_count=None)
-                    _confirm_msg = (
-                        "好像我没能理解您想修改的内容，让我们重新来一次吧！\n"
-                        "您可以告诉我想规划哪几天、哪几餐，我来帮您安排。"
-                    )
                     logger.info("[PLAN_AHEAD_PIPELINE] Phase 1b: 2 no-op corrections → degrading to fresh start.")
+                    _cur = get_plan_state(owner_id)
+                    _result = self._build_result(
+                        response_text="",
+                        meal_plan=_cur.get("meal_plan", {}), meal_plan_slots=_cur.get("meal_plan_slots", {}),
+                        dish_ingredients=_cur.get("dish_ingredients", {}), shopping_list=_cur.get("shopping_list", []),
+                        schedule_id=_cur.get("schedule_id"), intent_result=intent_result,
+                    )
+                    _result["tool_result"] = (
+                        "The user tried to correct the planned dates twice but the intent was unclear. "
+                        "The planning session has been reset. Ask the user to start over by telling you "
+                        "which days and meals they'd like to plan."
+                    )
+                    return _result
                 else:
-                    _pending_meals_str = "、".join(
-                        {"breakfast": "早餐", "lunch": "午餐", "dinner": "晚餐"}.get(m, m)
-                        for m in list(dict.fromkeys(s.split("|")[1] for s in _pending_queue if "|" in s))
-                    ) or "三餐"
                     _pending_start_str = _pending_queue[0].split("|")[0] if _pending_queue else ""
                     _pending_end_str = _pending_queue[-1].split("|")[0] if _pending_queue else ""
-                    _same_day = _pending_start_str == _pending_end_str
+                    _pending_meals = list(dict.fromkeys(s.split("|")[1] for s in _pending_queue if "|" in s))
                     _date_hint = (
-                        f"{_pending_start_str}（{_pending_meals_str}）"
-                        if _same_day
-                        else f"{_pending_start_str} 到 {_pending_end_str}（{_pending_meals_str}）"
+                        f"{_pending_start_str} ({', '.join(_pending_meals) or 'all meals'})"
+                        if _pending_start_str == _pending_end_str
+                        else f"{_pending_start_str} to {_pending_end_str} ({', '.join(_pending_meals) or 'all meals'})"
                     )
-                    _confirm_msg = (
-                        f"我明白您想修改，但还不太确定您想改什么。\n"
-                        f"当前方案是：{_date_hint}\n\n"
-                        "是想改**日期**（比如：从明天开始 / 改成下周）？\n"
-                        "还是想改**餐次**（比如：加上早餐 / 只要晚饭）？"
-                    )
+                    _confirm_msg = self._build_date_confirm_message(_corrected_slots or _pending_queue, language)
                     update_plan_state(owner_id=owner_id, confirmation_retry_count=_retry)
 
             _cur = get_plan_state(owner_id)
@@ -1769,6 +1797,7 @@ class PlanAheadPipeline:
             return self._augment_ask_confirm_result(_result, _slots_for_card)
 
         # "unclear" — attempt date recovery via InitPlanningQueueSkill
+        _unclear_retry = current_state.get("confirmation_retry_count", 0) + 1
         _recovery_result = await InitPlanningQueueSkill(self.gemini_api_url).execute(
             user_input, _now.strftime("%Y-%m-%d (%A)"), today_date=_now.date()
         )
@@ -1786,9 +1815,17 @@ class PlanAheadPipeline:
                 "[PLAN_AHEAD_PIPELINE] Phase 1b: unclear but date recovery succeeded (%d slot(s)).",
                 len(_recovery_queue),
             )
+        elif _unclear_retry >= 2:
+            update_plan_state(
+                owner_id=owner_id,
+                pending_planning_queue=None, last_pipeline_action=None, confirmation_retry_count=None,
+            )
+            logger.info("[PLAN_AHEAD_PIPELINE] Phase 1b: 2 unclear retries → clearing pending, falling through.")
+            return None
         else:
+            update_plan_state(owner_id=owner_id, confirmation_retry_count=_unclear_retry)
             _confirm_msg = self._build_date_confirm_message(_pending_queue, language)
-            logger.info("[PLAN_AHEAD_PIPELINE] Phase 1b: unclear reply, re-asking.")
+            logger.info("[PLAN_AHEAD_PIPELINE] Phase 1b: unclear reply (retry=%d), re-asking.", _unclear_retry)
         _cur = get_plan_state(owner_id)
         _result = self._build_result(
             response_text=_confirm_msg,
@@ -1890,11 +1927,15 @@ class PlanAheadPipeline:
         """
         from app.modules.plan_ahead_state import update_plan_state
 
-        # Skip if we are already in some active phase
+        # Skip if we are already in some active phase.
+        # Only "suggest_options" (pending option selection) and "ask" (pending clarification)
+        # count as blocking active states. Completed actions like "modify"/"recommend"/"confirm"
+        # must not block a fresh planning request.
+        _ACTIVE_BLOCKING_ACTIONS = {"suggest_options", "ask"}
         if (
             current_state.get("pending_planning_queue")
             or is_currently_draft
-            or current_state.get("last_pipeline_action")
+            or current_state.get("last_pipeline_action") in _ACTIVE_BLOCKING_ACTIONS
             or current_state.get("meal_planning_queue")
         ):
             return None
@@ -2296,7 +2337,7 @@ class PlanAheadPipeline:
             _lang_map_local = {
                 "zh": "zh", "en": "en", "ja": "ja", "ko": "ko",
             }
-            _is_zh = (_lang_map_local.get(language or "zh", "zh") == "zh")
+            _is_zh = (_lang_map_local.get(language or "en", "zh") == "zh")
 
             # Extract what we already know from the profile
             _disliked: List[str] = (profile or {}).get("disliked_ingredients") or []
@@ -2651,24 +2692,34 @@ class PlanAheadPipeline:
                     last_pipeline_action="queue_day_complete",
                     merge=False,
                 )
+                _ns_is_zh = (language or "en") == "zh"
                 _next_slot = _remaining_queue[0]
                 if "|" in _next_slot:
                     _ns_date, _ns_meal = _next_slot.split("|", 1)
-                    _ns_meal_zh = {"breakfast": "早餐", "lunch": "午餐", "dinner": "晚餐"}.get(_ns_meal, _ns_meal)
+                    _ns_meal_label = (
+                        {"breakfast": "早餐", "lunch": "午餐", "dinner": "晚餐"}.get(_ns_meal, _ns_meal)
+                        if _ns_is_zh else _ns_meal
+                    )
                     _day_abbrev_map = {0: "Mon", 1: "Tue", 2: "Wed", 3: "Thu", 4: "Fri", 5: "Sat", 6: "Sun"}
                     from datetime import date as _ns_date_cls
                     _ns_abbr = _day_abbrev_map.get(_ns_date_cls.fromisoformat(_ns_date).weekday(), "")
                     _resume_hint = (
                         f"\n\n还有 {len(_remaining_queue)} 餐待规划。"
-                        f"下一餐：{_ns_date}（{_ns_abbr}）{_ns_meal_zh}，回复「继续」→"
+                        f"下一餐：{_ns_date}（{_ns_abbr}）{_ns_meal_label}，回复「继续」→"
+                        if _ns_is_zh else
+                        f"\n\n{len(_remaining_queue)} meal(s) left to plan. "
+                        f"Next: {_ns_date} ({_ns_abbr}) {_ns_meal_label} — reply \"continue\" →"
                     )
                 else:
-                    _resume_hint = f"\n\n还有 {len(_remaining_queue)} 餐待规划，回复「继续」→"
+                    _resume_hint = (
+                        f"\n\n还有 {len(_remaining_queue)} 餐待规划，回复「继续」→"
+                        if _ns_is_zh else
+                        f"\n\n{len(_remaining_queue)} meal(s) left to plan — reply \"continue\" →"
+                    )
                 # Strip any LLM-generated queue-hint line to prevent duplication.
-                # The LLM can see the queue context and sometimes adds its own
-                # "还有 N 餐待规划" line, which would duplicate the one we append.
                 import re as _re
                 user_message = _re.sub(r'\n*还有\s*\d+\s*餐待规划[^\n]*', '', user_message).rstrip()
+                user_message = _re.sub(r'\n*\d+\s*meal\(s\) left to plan[^\n]*', '', user_message).rstrip()
                 user_message = user_message + _resume_hint
                 logger.info(
                     "[PLAN_AHEAD_PIPELINE] confirm: %d queue slot(s) remain — draft reset, queue resumes next turn.",
@@ -3076,22 +3127,29 @@ class PlanAheadPipeline:
             # ---- Queue mode: pop the planned meal slot and append progress info ----
             _day_abbrev = {0: "Mon", 1: "Tue", 2: "Wed", 3: "Thu", 4: "Fri", 5: "Sat", 6: "Sun"}
             _meal_zh_label = {"breakfast": "早餐", "lunch": "午餐", "dinner": "晚餐"}
+            _meal_en_label = {"breakfast": "Breakfast", "lunch": "Lunch", "dinner": "Dinner"}
+            _is_zh_q = (language or "en") == "zh"
             if _queue_target_slot and action == "recommend":
                 _remaining_queue = _meal_queue[1:]
                 _slot_num_done = _meal_total - len(_meal_queue) + 1
                 # Parse current slot for display
                 if "|" in _queue_target_slot:
                     _cur_date_str, _cur_meal = _queue_target_slot.split("|", 1)
-                    _cur_meal_zh = _meal_zh_label.get(_cur_meal, _cur_meal)
+                    _cur_meal_label = (_meal_zh_label.get(_cur_meal, _cur_meal) if _is_zh_q else _meal_en_label.get(_cur_meal, _cur_meal.capitalize()))
                 else:
-                    _cur_date_str, _cur_meal_zh = _queue_target_slot, ""
+                    _cur_date_str, _cur_meal, _cur_meal_label = _queue_target_slot, "", ""
 
                 # Replace LLM's user_message with a single-slot summary so other
                 # already-planned meals for the same date don't bleed into the response.
                 _slot_dishes = (new_meal_plan_slots or {}).get(_cur_date_str, {}).get(_cur_meal, [])
                 if _slot_dishes:
-                    _dish_list = "、".join(_slot_dishes)
-                    user_message = f"好的，已为您规划 {_cur_date_str} {_cur_meal_zh}：{_dish_list}。"
+                    _sep = "、" if _is_zh_q else ", "
+                    _dish_list = _sep.join(_slot_dishes)
+                    user_message = (
+                        f"好的，已为您规划 {_cur_date_str} {_cur_meal_label}：{_dish_list}。"
+                        if _is_zh_q else
+                        f"Here's the plan for {_cur_date_str} {_cur_meal_label}: {_dish_list}."
+                    )
                 if _remaining_queue:
                     update_plan_state(
                         owner_id=owner_id,
@@ -3102,16 +3160,23 @@ class PlanAheadPipeline:
                     _next_slot = _remaining_queue[0]
                     if "|" in _next_slot:
                         _next_date_str, _next_meal = _next_slot.split("|", 1)
-                        _next_meal_zh = _meal_zh_label.get(_next_meal, _next_meal)
+                        _next_meal_label = (_meal_zh_label.get(_next_meal, _next_meal) if _is_zh_q else _meal_en_label.get(_next_meal, _next_meal.capitalize()))
                         _next_abbr = _day_abbrev.get(_qdcls.fromisoformat(_next_date_str).weekday(), "")
-                        _next_label = f"{_next_date_str}（{_next_abbr}）{_next_meal_zh}"
+                        _next_label = (
+                            f"{_next_date_str}（{_next_abbr}）{_next_meal_label}"
+                            if _is_zh_q else
+                            f"{_next_date_str} ({_next_abbr}) {_next_meal_label}"
+                        )
                     else:
                         _next_label = _next_slot
-                    user_message = (
-                        user_message
-                        + f"\n\n---\n✅ 第 {_slot_num_done}/{_meal_total} 餐 — {_cur_date_str} {_cur_meal_zh}已确认。"
+                    _progress_line = (
+                        f"✅ 第 {_slot_num_done}/{_meal_total} 餐 — {_cur_date_str} {_cur_meal_label}已确认。"
                         f"\n下一餐：{_next_label}，回复「继续」→"
+                        if _is_zh_q else
+                        f"✅ Meal {_slot_num_done}/{_meal_total} — {_cur_date_str} {_cur_meal_label} confirmed."
+                        f"\nNext: {_next_label} — reply \"continue\" →"
                     )
+                    user_message = user_message + "\n\n---\n" + _progress_line
                     logger.info(
                         "[PLAN_AHEAD_PIPELINE] Queue: slot %d/%d planned (%s), %d slot(s) remaining.",
                         _slot_num_done, _meal_total, _queue_target_slot, len(_remaining_queue),
@@ -3123,9 +3188,10 @@ class PlanAheadPipeline:
                         meal_planning_total=0,
                         last_pipeline_action=None,
                     )
-                    user_message = (
-                        user_message
-                        + f"\n\n🎉 全部 {_meal_total} 餐规划已完成！回复「确认」将计划保存到日历。"
+                    user_message = user_message + (
+                        f"\n\n🎉 全部 {_meal_total} 餐规划已完成！回复「确认」将计划保存到日历。"
+                        if _is_zh_q else
+                        f"\n\n🎉 All {_meal_total} meals planned! Reply \"confirm\" to save the plan to your calendar."
                     )
                     logger.info(
                         "[PLAN_AHEAD_PIPELINE] Queue: all %d meal slots planned. Queue complete.",

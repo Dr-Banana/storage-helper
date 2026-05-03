@@ -33,6 +33,10 @@ _AFFIRM_RE = re.compile(
     r"就这样|就这个|没错|嗯嗯|嗯哦|嗯啊|嗯对|嗯行|嗯好|嗯是)[！!。.，,\s]*$",
     re.IGNORECASE,
 )
+_CANCEL_RE = re.compile(
+    r"(取消|算了|不用了|不需要了|不要了|不规划了|不想规划|cancel|no need|never mind|stop|quit|exit|放弃|退出)",
+    re.IGNORECASE,
+)
 _NEGATIVE_RE = re.compile(
     r"^(不|不行|不对|不好|不是|不要|算了|取消|cancel|no)[！!。.，,\s]*$",
     re.IGNORECASE,
@@ -66,9 +70,10 @@ You are a classifier for a meal-planning chatbot.
 The chatbot proposed a meal plan (dates + meals) and asked the user to confirm.
 
 Classify the user's reply as one of:
-  "confirmed" — user accepts the proposed plan as-is
-  "corrected" — user wants different dates OR different meal types
-  "unclear"   — cannot determine intent
+  "confirmed"  — user accepts the proposed plan as-is
+  "corrected"  — user wants different dates OR different meal types
+  "cancel"     — user wants to stop/cancel meal planning entirely
+  "unclear"    — cannot determine intent
 
 Output JSON with these fields:
   intent: string  (required)
@@ -79,6 +84,7 @@ Output JSON with these fields:
 
 Rules:
 - Affirmative (好/行/是/对/没问题/可以/当然/开始/嗯/ok/yes/sure/right) → confirmed
+- User explicitly wants to cancel/stop planning (取消/算了/不用了/不需要了/cancel/no need/never mind/stop) → cancel
 - User EXPLICITLY corrects the dates (不对是明天/改成下周/换成周六/etc.) → corrected,
   fill new_start+new_end
 - User changes meal scope (一整天/三餐/一日三餐/全天/只要午餐/etc.) → corrected,
@@ -126,9 +132,9 @@ Return JSON only — no markdown, no extra text.
         if _AFFIRM_RE.match(stripped):
             logger.debug("[%s] L2 fast-path: confirmed for %r", self.SKILL_NAME, stripped[:40])
             return {"intent": "confirmed", "new_dates": [], "new_meal_times": None}
-        if _NEGATIVE_RE.match(stripped):
-            logger.debug("[%s] L2 fast-path: unclear (negative) for %r", self.SKILL_NAME, stripped[:40])
-            return {"intent": "unclear", "new_dates": [], "new_meal_times": None}
+        if _NEGATIVE_RE.match(stripped) or _CANCEL_RE.search(stripped):
+            logger.debug("[%s] L2 fast-path: cancel for %r", self.SKILL_NAME, stripped[:40])
+            return {"intent": "cancel", "new_dates": [], "new_meal_times": None}
 
         # ── Build user message with context ──────────────────────────────────
         pending_start = (pending_queue[0].split("|")[0] if pending_queue else "")
@@ -158,7 +164,7 @@ Return JSON only — no markdown, no extra text.
             return {"intent": "unclear", "new_dates": [], "new_meal_times": None}
 
         intent = str(parsed.get("intent", "unclear")).lower().strip()
-        if intent not in ("confirmed", "corrected", "unclear"):
+        if intent not in ("confirmed", "corrected", "cancel", "unclear"):
             intent = "unclear"
 
         if intent == "corrected":

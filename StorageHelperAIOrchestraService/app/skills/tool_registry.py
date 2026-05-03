@@ -458,8 +458,12 @@ class ToolExecutor:
             language=kw.get("language", "zh"),
             user_profile=user_profile,
         )
-        # PlanAheadPipeline already produces a complete ChatResponse-compatible dict
-        result["_direct_response"] = True
+        # If the pipeline left an empty response with a tool_result summary,
+        # route through the LLM (call #2) so the reply is AI-generated.
+        if not result.get("response", "").strip() and result.get("tool_result"):
+            result["_direct_response"] = False
+        else:
+            result["_direct_response"] = True
         return result
 
     # ── get_cooking_steps ─────────────────────────────────────────────────────

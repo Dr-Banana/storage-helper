@@ -29,7 +29,7 @@ function formFromUser(u: UserType): FormData {
     display_name: u.display_name,
     note: u.note || '',
     cooking_level: u.cooking_level || 'beginner',
-    language: u.language || 'zh',
+    language: u.language || 'en',
     default_servings: u.default_servings ?? 1,
     meat_veg_ratio: u.meat_veg_ratio || '1:1:1',
     include_soup: u.include_soup !== undefined ? u.include_soup : true,
@@ -83,7 +83,7 @@ const ProfilePage = () => {
   const [user, setUser] = useState<UserType | null>(null)
   const [loading, setLoading] = useState(true)
   const [formData, setFormData] = useState<FormData>({
-    display_name: '', note: '', cooking_level: 'beginner', language: 'zh',
+    display_name: '', note: '', cooking_level: 'beginner', language: 'en',
     default_servings: 1, meat_veg_ratio: '1:1:1', include_soup: true, calorie_target: null,
     disliked_ingredients: [],
   })
@@ -386,7 +386,7 @@ const ProfilePage = () => {
 
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
             {(Object.entries(USER_LANGUAGE_LABELS) as [UserLanguage, { label: string; flag: string }][]).map(([code, info]) => {
-              const isSelected = (editingLang ? formData.language : (user.language || 'zh')) === code
+              const isSelected = (editingLang ? formData.language : (user.language || 'en')) === code
               return (
                 <button
                   key={code}

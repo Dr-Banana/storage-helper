@@ -295,7 +295,7 @@ class GenerateMealPlanSkill(LLMSkill):
             "ja": "Japanese (日本語)",
             "ko": "Korean (한국어)",
         }
-        _lang_name = _lang_name_map.get(language or "zh", _lang_name_map["zh"])
+        _lang_name = _lang_name_map.get(language or "en", _lang_name_map["zh"])
         ctx += f"\n\n=== LANGUAGE REQUIREMENT (CRITICAL) ==="
         ctx += (
             f"\nYou MUST use {_lang_name} for ALL text content in your response — this includes:"
@@ -482,16 +482,18 @@ class GenerateMealPlanSkill(LLMSkill):
             _day_labels = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
             from datetime import date as _qdate_cls
             _meal_zh_map = {"breakfast": "早餐", "lunch": "午餐", "dinner": "晚餐"}
+            _meal_en_map = {"breakfast": "Breakfast", "lunch": "Lunch", "dinner": "Dinner"}
 
             if "|" in queue_target_date:
                 _slot_date_str, _slot_meal = queue_target_date.split("|", 1)
                 _qd = _qdate_cls.fromisoformat(_slot_date_str)
                 _qday_name = _day_labels[_qd.weekday()]
                 _meal_zh = _meal_zh_map.get(_slot_meal, _slot_meal)
+                _meal_en_label = _meal_en_map.get(_slot_meal, _slot_meal.capitalize())
                 ctx += (
                     f"\n\n=== QUEUE PLANNING MODE — SINGLE MEAL ==="
                     f"\nYou are planning one meal at a time to keep each response short."
-                    f"\nCURRENT TASK: Plan {_slot_meal} ({_meal_zh}) for {_slot_date_str} ({_qday_name}) ONLY."
+                    f"\nCURRENT TASK: Plan {_meal_en_label} ({_meal_zh}) for {_slot_date_str} ({_qday_name}) ONLY."
                     f"\n• Use action='suggest_options' with EXACTLY 2 compact options for {_slot_meal}."
                     f"\n• Each option: 2-3 dishes suitable for {_slot_meal} (no more)."
                     f"\n• meal_entries MUST only contain date={_slot_date_str}, meal_time={_slot_meal}."

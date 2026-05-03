@@ -659,7 +659,7 @@ async def chat_with_agent(request: ChatRequest):
             context=request.context,
             user_timezone=request.user_timezone,
             cooking_level=request.cooking_level or "beginner",
-            language=request.language or "zh",
+            language=request.language or "en",
         )
 
         # Track token usage for non-plan interactions (plan_ahead tracks its own)
@@ -722,7 +722,7 @@ async def chat_stream(request: ChatRequest):
                     context=request.context,
                     user_timezone=request.user_timezone,
                     cooking_level=request.cooking_level or "beginner",
-                    language=request.language or "zh",
+                    language=request.language or "en",
                     on_thinking_step=on_thinking_step,
                     on_text_chunk=on_text_chunk,
                 )

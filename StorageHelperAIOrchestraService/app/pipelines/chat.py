@@ -161,12 +161,17 @@ or function invocations — those are internal and must never appear in your rep
 
         if _plan_dates:
             plan_state = {**plan_state, "plan_dates": _plan_dates}
-            # Clear stale pending_options only when NOT in an active planning session,
-            # to avoid disrupting mid-flow confirmation steps.
-            if not plan_state.get("meal_plan") and not plan_state.get("phase"):
-                if plan_state.get("pending_options"):
-                    update_plan_state(owner_id, pending_options=None)
-                    plan_state = {**plan_state, "pending_options": None}
+
+        # Clear stale pending_options when NOT in an active planning session.
+        # Done unconditionally (not gated on plan_dates) so that any unrelated
+        # follow-up question doesn't get intercepted by the harness as if the
+        # user were selecting a previously presented option.
+        # Option selection still works: the LLM sees the options in its context
+        # and will call plan_meal naturally when the user picks one.
+        if not plan_state.get("meal_plan") and not plan_state.get("phase"):
+            if plan_state.get("pending_options"):
+                update_plan_state(owner_id, pending_options=None)
+                plan_state = {**plan_state, "pending_options": None}
 
         # ── Build state context for prompts ────────────────────────────────
         state_context = self._build_state_context(

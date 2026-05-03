@@ -115,7 +115,7 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
               const level: CookingLevel = userData.cooking_level || 'beginner'
               setCookingLevel(level)
               localStorage.setItem('cookingLevel', level)
-              const lang: UserLanguage = userData.language || 'zh'
+              const lang: UserLanguage = userData.language || 'en'
               setLanguage(lang)
               localStorage.setItem('userLanguage', lang)
             }
