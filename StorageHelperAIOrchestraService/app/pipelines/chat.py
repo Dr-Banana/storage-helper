@@ -20,7 +20,7 @@ import json
 import logging
 import re
 from datetime import datetime, timedelta
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import httpx
 
@@ -96,6 +96,8 @@ or function invocations — those are internal and must never appear in your rep
         user_timezone: Optional[str] = None,
         cooking_level: str = "beginner",
         language: str = "zh",
+        on_thinking_step: Optional[Callable[[str], None]] = None,
+        on_text_chunk: Optional[Callable[[str], None]] = None,
     ) -> Dict[str, Any]:
         """
         Main chat entry point.  Returns a dict compatible with ChatResponse:
@@ -123,13 +125,48 @@ or function invocations — those are internal and must never appear in your rep
         plan_state = get_plan_state(owner_id)
         cooking_context: Optional[Dict] = plan_state.get("cooking_context")
 
-        # ── Hydrate meal plan from DB if in-memory state is empty ──────────
-        # Ensures [MEAL PLAN EXISTS] appears in context so tool selection LLM
-        # can correctly route "今晚吃什么" to view_schedule instead of plan_meal.
-        if not plan_state.get("meal_plan") and not plan_state.get("phase"):
-            _db_meals = await self._fetch_upcoming_meals(owner_id, user_timezone)
-            if _db_meals:
-                plan_state = {**plan_state, "meal_plan": _db_meals}
+        # ── Hydrate plan dates from DB (query-aware date range) ──────────────
+        # Always runs so the LLM knows which dates have confirmed DB plans, even
+        # while an active planning session (meal_plan / phase) is in progress.
+        # Full dish details are NOT loaded here — view_schedule loads them on demand.
+        from app.agents.scheduling_agent import (
+            ScheduleRangeDecider,
+            SchedulingResponseGenerator,
+            ScheduleSessionContext,
+        )
+        from app.storage.pipeline_storage import PipelineStorage, _default_storage
+
+        _session_ctx = ScheduleSessionContext(
+            current_query=user_input,
+            history=history,
+            user_timezone=user_timezone,
+        )
+        _decider = ScheduleRangeDecider()
+        _time_range = await _decider.decide(_session_ctx, api_url=self.api_url)
+        if _time_range is None:
+            _time_range = _decider._default_range(user_timezone)
+
+        _resp_gen = SchedulingResponseGenerator()
+        _schedules = await _resp_gen.fetch_schedules_in_range(
+            owner_id, _time_range, _default_storage
+        )
+
+        _plan_dates: List[str] = []
+        for _s in _schedules:
+            _, _, _, _slots = PipelineStorage._extract_meal_plan_from_schedule(_s)
+            for _d in _slots:
+                if _d not in _plan_dates:
+                    _plan_dates.append(_d)
+        _plan_dates = sorted(_plan_dates)
+
+        if _plan_dates:
+            plan_state = {**plan_state, "plan_dates": _plan_dates}
+            # Clear stale pending_options only when NOT in an active planning session,
+            # to avoid disrupting mid-flow confirmation steps.
+            if not plan_state.get("meal_plan") and not plan_state.get("phase"):
+                if plan_state.get("pending_options"):
+                    update_plan_state(owner_id, pending_options=None)
+                    plan_state = {**plan_state, "pending_options": None}
 
         # ── Build state context for prompts ────────────────────────────────
         state_context = self._build_state_context(
@@ -149,7 +186,13 @@ or function invocations — those are internal and must never appear in your rep
         )
 
         # ── Pipeline trace — accumulated throughout and returned as thinking ─
-        thinking_steps: List[str] = [self._describe_state(plan_state, cooking_context)]
+        thinking_steps: List[str] = []
+
+        def _emit(step: str) -> None:
+            if step:
+                thinking_steps.append(step)
+                if on_thinking_step:
+                    on_thinking_step(step)
 
         def _finish_thinking(extra: Optional[str] = None) -> str:
             parts = [s for s in thinking_steps if s]
@@ -157,17 +200,16 @@ or function invocations — those are internal and must never appear in your rep
                 parts.append(extra)
             return "\n\n".join(parts)
 
+        _emit(self._describe_state(plan_state, cooking_context, lang=language))
+
         # ── Harness: Guide (feedforward) ──────────────────────────────────
         # Deterministic routing rules run before the LLM.  Any rule match
         # skips the LLM call entirely and goes straight to tool execution.
         guide_result = routing_guide.evaluate(user_input, plan_state)
         if guide_result:
-            label = self._TOOL_LABELS.get(guide_result.tool, guide_result.tool)
-            thinking_steps.append(
-                f"🧭 路由规则触发 → {label}\n"
-                f"   原因：{guide_result.reason}"
-            )
-            thinking_steps.append(self._build_tool_thinking(guide_result.tool, guide_result.args))
+            label = self._tool_label(guide_result.tool, language)
+            _emit(self._t("guide_triggered", language, label=label, reason=guide_result.reason))
+            _emit(self._build_tool_thinking(guide_result.tool, guide_result.args, lang=language))
             tool_result = await tool_executor.execute(
                 guide_result.tool, guide_result.args, owner_id,
                 user_input=user_input, history=history, context=context,
@@ -192,7 +234,7 @@ or function invocations — those are internal and must never appear in your rep
             return result
 
         # ── Step 1: Tool selection (Gemini call #1) ────────────────────────
-        thinking_steps.append("🤖 AI 分析意图中...")
+        _emit(self._t("analyzing", language))
         selection = await self._call_gemini_with_tools(
             user_input=user_input,
             history=history,
@@ -208,7 +250,7 @@ or function invocations — those are internal and must never appear in your rep
         # plain "please wait" response that never delivers.
         if not function_calls and not selection.get("text") and not clarification_hint:
             logger.info("[HARNESS] empty_response — retrying with mode=ANY (forced tool call)")
-            thinking_steps.append("⚠️ AI判断不明确，重新分析...")
+            _emit(self._t("retrying", language))
             _retry = await self._call_gemini_force_tool(
                 user_input=user_input,
                 history=history,
@@ -229,7 +271,7 @@ or function invocations — those are internal and must never appear in your rep
         # failing, generate a clarifying question so the user knows what to do next.
         if clarification_hint:
             logger.info("[HARNESS sensor] Generating clarification for anomaly.")
-            thinking_steps.append(f"⚠️ 传感器异常：{clarification_hint}")
+            _emit(self._t("sensor_anomaly", language, hint=clarification_hint))
             clarify_system = (
                 f"You are a helpful Home AI Agent named 'TPCrabcake'. "
                 f"{language_instruction}\n\n"
@@ -261,14 +303,22 @@ or function invocations — those are internal and must never appear in your rep
             response_text = selection.get("text") or ""
             if not response_text:
                 # Fallback: make a plain generation call so user always gets a reply
-                response_text, _plain_tokens = await self._plain_generate(
-                    user_input=user_input,
-                    history=history,
-                    system_instruction=resp_system,
-                )
+                if on_text_chunk:
+                    response_text, _plain_tokens = await self._plain_generate_streaming(
+                        user_input=user_input,
+                        history=history,
+                        system_instruction=resp_system,
+                        on_text_chunk=on_text_chunk,
+                    )
+                else:
+                    response_text, _plain_tokens = await self._plain_generate(
+                        user_input=user_input,
+                        history=history,
+                        system_instruction=resp_system,
+                    )
                 _total_tokens += _plain_tokens
             logger.info("[TOOL-USE] No tool selected; direct response.")
-            thinking_steps.append("💬 无需工具 → 直接回复")
+            _emit(self._t("direct_reply", language))
             clean, extracted = self._extract_thinking(response_text)
             r: Dict[str, Any] = {
                 "response": clean,
@@ -289,9 +339,9 @@ or function invocations — those are internal and must never appear in your rep
 
         logger.info("[TOOL-USE] Tool selected: %s  args=%s", fn_name, fn_args)
 
-        label = self._TOOL_LABELS.get(fn_name, fn_name)
-        thinking_steps.append(f"🤖 AI 选择工具：{label}（{fn_name}）")
-        thinking_steps.append(self._build_tool_thinking(fn_name, fn_args))
+        label = self._tool_label(fn_name, language)
+        _emit(self._t("tool_selected", language, label=label, name=fn_name))
+        _emit(self._build_tool_thinking(fn_name, fn_args, lang=language))
 
         tool_result = await tool_executor.execute(
             fn_name,
@@ -341,14 +391,36 @@ or function invocations — those are internal and must never appear in your rep
             return result
 
         # ── Step 3: Generate final natural language reply (Gemini call #2) ─
-        thinking_steps.append("📝 生成自然语言回复...")
-        response_text, _final_tokens = await self._generate_final_response(
-            user_input=user_input,
-            history=history,
-            system_instruction=resp_system,
-            function_call=fc,
-            tool_result_text=tool_result.get("tool_result", ""),
-        )
+        _emit(self._t("generating", language))
+        if on_text_chunk:
+            response_text, _final_tokens = await self._generate_final_response_streaming(
+                user_input=user_input,
+                history=history,
+                system_instruction=resp_system,
+                function_call=fc,
+                tool_result_text=tool_result.get("tool_result", ""),
+                on_text_chunk=on_text_chunk,
+            )
+            # Fallback: if streaming returned empty, retry with non-streaming
+            if not response_text.strip():
+                logger.warning("[TOOL-USE] Streaming returned empty; falling back to non-streaming")
+                response_text, _final_tokens = await self._generate_final_response(
+                    user_input=user_input,
+                    history=history,
+                    system_instruction=resp_system,
+                    function_call=fc,
+                    tool_result_text=tool_result.get("tool_result", ""),
+                )
+                if response_text.strip():
+                    on_text_chunk(response_text)
+        else:
+            response_text, _final_tokens = await self._generate_final_response(
+                user_input=user_input,
+                history=history,
+                system_instruction=resp_system,
+                function_call=fc,
+                tool_result_text=tool_result.get("tool_result", ""),
+            )
         _total_tokens += _final_tokens
 
         final_action = tool_result.get("action") or TOOL_TO_ACTION.get(fn_name, fn_name.upper())
@@ -446,6 +518,7 @@ or function invocations — those are internal and must never appear in your rep
                 )
 
         # Active meal planning session
+        plan_dates: List[str] = plan_state.get("plan_dates") or []
         meal_plan = plan_state.get("meal_plan") or {}
         phase = plan_state.get("phase")
         pending_options = plan_state.get("pending_options")
@@ -460,7 +533,6 @@ or function invocations — those are internal and must never appear in your rep
             )
         elif meal_plan or phase:
             date_list = list(meal_plan.keys()) or ["(none)"]
-            # Collect all planned dish names for context
             planned_dishes: List[str] = []
             for day_meals in meal_plan.values():
                 if isinstance(day_meals, dict):
@@ -472,10 +544,19 @@ or function invocations — those are internal and must never appear in your rep
                 f"\n[MEAL PLAN EXISTS]\n"
                 f"Planned dates: {date_list}. {dish_hint}\n"
                 "- Call plan_meal when user wants to CREATE a new plan, ADD dishes, MODIFY or REMOVE meals.\n"
-                "- Call plan_meal when user asks 'what to eat this week/today' or asks to PLAN meals — even if a plan already exists.\n"
-                "- Use view_schedule only when user explicitly asks to SEE or VIEW the current plan.\n"
+                "- Call plan_meal when user asks to PLAN meals — even if a plan already exists.\n"
+                "- Use view_schedule when user asks WHAT is planned, 'what to eat', or wants to SEE the plan.\n"
                 "- Use get_cooking_steps if user asks HOW to cook or about ingredients of a planned dish.\n"
                 "- Do NOT call plan_meal just because a planned dish is mentioned in passing."
+            )
+        elif plan_dates:
+            # Lightweight hydration: only date list available, dish details are in the DB.
+            parts.append(
+                f"\n[MEAL PLAN EXISTS — dates: {', '.join(plan_dates)}]\n"
+                "Dish details are stored in the database and NOT loaded yet.\n"
+                "- Call view_schedule when user asks WHAT is planned, 'what to eat tonight/today/this week'.\n"
+                "- Call plan_meal only when user explicitly wants to CREATE, ADD, or CHANGE meals.\n"
+                "- Do NOT invent or assume dish names — use view_schedule to retrieve them."
             )
         if pending_options:
             parts.append(
@@ -643,6 +724,7 @@ or function invocations — those are internal and must never appear in your rep
             "contents": contents,
             "systemInstruction": {"parts": [{"text": system_instruction}]},
             "generationConfig": {"temperature": 0.7, "maxOutputTokens": 4096},
+            "toolConfig": {"functionCallingConfig": {"mode": "NONE"}},
         }
         try:
             async with httpx.AsyncClient(timeout=20.0) as client:
@@ -695,6 +777,124 @@ or function invocations — those are internal and must never appear in your rep
         except Exception as exc:
             logger.error("[TOOL-USE] Plain generate failed: %s", exc, exc_info=True)
             return "抱歉，我暂时无法回答这个问题。", 0
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Streaming Gemini helpers (character-by-character output)
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def _stream_url(self) -> str:
+        return self.api_url.replace(":generateContent", ":streamGenerateContent")
+
+    async def _consume_gemini_stream(
+        self,
+        payload: Dict[str, Any],
+        on_text_chunk: Callable[[str], None],
+        timeout: float = 30.0,
+    ) -> Tuple[str, int]:
+        """
+        Call streamGenerateContent and invoke on_text_chunk for every text fragment.
+        Returns (full_text, total_tokens).
+
+        Gemini streams a JSON array delivered incrementally; each element is a
+        GenerateContentResponse.  We parse line-by-line, stripping array delimiters.
+        """
+        full_text = ""
+        tokens = 0
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                async with client.stream(
+                    "POST",
+                    self._stream_url(),
+                    headers={"Content-Type": "application/json"},
+                    json=payload,
+                ) as resp:
+                    resp.raise_for_status()
+                    async for raw_line in resp.aiter_lines():
+                        line = raw_line.strip()
+                        if not line or line in ("[", "]"):
+                            continue
+                        if line.startswith(","):
+                            line = line[1:].strip()
+                        if not line:
+                            continue
+                        try:
+                            chunk = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                        candidate = (chunk.get("candidates") or [{}])[0]
+                        finish_reason = candidate.get("finishReason")
+                        parts = candidate.get("content", {}).get("parts") or []
+                        has_text = any("text" in p and not p.get("thought") for p in parts)
+                        has_fn = any("functionCall" in p for p in parts)
+                        if not has_text:
+                            logger.info(
+                                "[STREAM] chunk no text: finishReason=%s has_fn=%s parts=%s",
+                                finish_reason, has_fn, [list(p.keys()) for p in parts],
+                            )
+                        for part in parts:
+                            if "text" in part and not part.get("thought"):
+                                text = part["text"]
+                                full_text += text
+                                on_text_chunk(text)
+                        tokens = chunk.get("usageMetadata", {}).get(
+                            "candidatesTokenCount", tokens
+                        )
+        except Exception as exc:
+            logger.error("[TOOL-USE] Gemini stream failed: %s", exc, exc_info=True)
+            if not full_text:
+                fallback = "抱歉，生成回复时出现问题，请重试。"
+                on_text_chunk(fallback)
+                full_text = fallback
+        return full_text, tokens
+
+    async def _plain_generate_streaming(
+        self,
+        user_input: str,
+        history: List[Dict],
+        system_instruction: str,
+        on_text_chunk: Callable[[str], None],
+    ) -> Tuple[str, int]:
+        payload = {
+            "contents": self._build_contents(history, user_input),
+            "systemInstruction": {"parts": [{"text": system_instruction}]},
+            "generationConfig": {"temperature": 0.7, "maxOutputTokens": 2048},
+        }
+        return await self._consume_gemini_stream(payload, on_text_chunk, timeout=25.0)
+
+    async def _generate_final_response_streaming(
+        self,
+        user_input: str,
+        history: List[Dict],
+        system_instruction: str,
+        function_call: Dict,
+        tool_result_text: str,
+        on_text_chunk: Callable[[str], None],
+    ) -> Tuple[str, int]:
+        contents = self._build_contents(history, user_input)
+        contents.append({
+            "role": "model",
+            "parts": [{"functionCall": {
+                "name": function_call["name"],
+                "args": function_call.get("args") or {},
+            }}],
+        })
+        contents.append({
+            "role": "user",
+            "parts": [{"functionResponse": {
+                "name": function_call["name"],
+                "response": {"result": tool_result_text},
+            }}],
+        })
+        payload = {
+            "contents": contents,
+            "systemInstruction": {"parts": [{"text": system_instruction}]},
+            "generationConfig": {"temperature": 0.7, "maxOutputTokens": 4096},
+            # Explicitly disable tool calls so Gemini outputs text, not a function call.
+            # Without this, the streaming endpoint can return an empty candidates array
+            # when it encounters a functionResponse in the history but no tools are declared.
+            "toolConfig": {"functionCallingConfig": {"mode": "NONE"}},
+        }
+        return await self._consume_gemini_stream(payload, on_text_chunk, timeout=30.0)
 
     # ─────────────────────────────────────────────────────────────────────────
     # Correction mode (frontend signal, not tool-based)
@@ -772,40 +972,108 @@ or function invocations — those are internal and must never appear in your rep
     # Thinking builder + extractor
     # ─────────────────────────────────────────────────────────────────────────
 
-    @staticmethod
-    def _describe_state(plan_state: Dict[str, Any], cooking_context: Optional[Dict] = None) -> str:
-        """Build a brief Chinese state summary for the thinking trace header."""
-        parts: List[str] = ["📊 当前状态："]
-        meal_plan = plan_state.get("meal_plan") or {}
-        if meal_plan:
-            parts.append(f"   · 已有餐单（{len(meal_plan)} 天）")
-        else:
-            parts.append("   · 无餐单记录")
-        if cooking_context and cooking_context.get("dish_name"):
-            parts.append(f"   · 烹饪会话：{cooking_context['dish_name']}")
-        phase = plan_state.get("phase")
-        if phase:
-            parts.append(f"   · 规划阶段：{phase}")
-        if plan_state.get("pending_planning_queue") and plan_state.get("last_pipeline_action") == "ask_confirm_dates":
-            parts.append("   · 等待用户确认日期")
-        return "\n".join(parts)
+    # ── i18n strings for the thinking trace ──────────────────────────────────
+    # Fallback language is "en".
 
-    _TOOL_LABELS: Dict[str, str] = {
-        "plan_meal":               "规划餐食",
-        "view_schedule":           "查询日程",
-        "search_items":            "搜索库存",
-        "update_item":             "更新库存",
-        "get_cooking_steps":       "获取烹饪步骤",
-        "modify_recipe_ingredient":"修改食材用量",
-        "plan_eat_out":            "规划外出就餐",
-        "manage_schedule":         "管理日程",
+    _TOOL_LABELS_I18N: Dict[str, Dict[str, str]] = {
+        "zh": {
+            "plan_meal":                "规划餐食",
+            "view_schedule":            "查询日程",
+            "search_items":             "搜索库存",
+            "update_item":              "更新库存",
+            "get_cooking_steps":        "获取烹饪步骤",
+            "modify_recipe_ingredient": "修改食材用量",
+            "plan_eat_out":             "规划外出就餐",
+            "manage_schedule":          "管理日程",
+        },
+        "en": {
+            "plan_meal":                "Plan meal",
+            "view_schedule":            "View schedule",
+            "search_items":             "Search inventory",
+            "update_item":              "Update item",
+            "get_cooking_steps":        "Get cooking steps",
+            "modify_recipe_ingredient": "Modify ingredient",
+            "plan_eat_out":             "Plan eat out",
+            "manage_schedule":          "Manage schedule",
+        },
+        "ja": {
+            "plan_meal":                "食事プラン",
+            "view_schedule":            "スケジュール確認",
+            "search_items":             "在庫検索",
+            "update_item":              "アイテム更新",
+            "get_cooking_steps":        "調理手順取得",
+            "modify_recipe_ingredient": "食材変更",
+            "plan_eat_out":             "外食プラン",
+            "manage_schedule":          "スケジュール管理",
+        },
+    }
+
+    _THINKING_I18N: Dict[str, Dict[str, str]] = {
+        "state_header":      {"zh": "📊 Current state:",          "en": "📊 Current state:",          "ja": "📊 現在の状態:"},
+        "no_meal_plan":      {"zh": "   · No meal plan",                          "en": "   · No meal plan",                          "ja": "   · 食事プランなし"},
+        "meal_plan_n_days":  {"zh": "   · Meal plan ({n} days, loaded)",          "en": "   · Meal plan ({n} days, loaded)",          "ja": "   · 食事プランあり ({n} 日, 読込済)"},
+        "plan_dates_exist":  {"zh": "   · Plan dates ({n}): {dates}",             "en": "   · Plan dates ({n}): {dates}",             "ja": "   · プラン日程 ({n} 日): {dates}"},
+        "cooking_session":   {"zh": "   · Cooking: {dish}",       "en": "   · Cooking: {dish}",       "ja": "   · 料理中: {dish}"},
+        "planning_phase":    {"zh": "   · Phase: {phase}",        "en": "   · Phase: {phase}",        "ja": "   · フェーズ: {phase}"},
+        "awaiting_confirm":  {"zh": "   · Awaiting confirmation", "en": "   · Awaiting confirmation", "ja": "   · 確認待ち"},
+        "guide_triggered":   {
+            "zh": "🧭 Routing rule matched → {label}\n   Reason: {reason}",
+            "en": "🧭 Routing rule matched → {label}\n   Reason: {reason}",
+            "ja": "🧭 ルーティング規則 → {label}\n   理由: {reason}",
+        },
+        "tool_call_header":  {"zh": "🔧 Calling tool: {label}",   "en": "🔧 Calling tool: {label}",   "ja": "🔧 ツール呼び出し: {label}"},
+        "analyzing":         {"zh": "🤖 Analyzing intent...",      "en": "🤖 Analyzing intent...",      "ja": "🤖 意図を分析中..."},
+        "retrying":          {"zh": "⚠️ Ambiguous intent, retrying...", "en": "⚠️ Ambiguous intent, retrying...", "ja": "⚠️ 意図不明確、再試行中..."},
+        "sensor_anomaly":    {"zh": "⚠️ Sensor anomaly: {hint}",  "en": "⚠️ Sensor anomaly: {hint}",  "ja": "⚠️ センサー異常: {hint}"},
+        "direct_reply":      {"zh": "💬 No tool → direct reply",   "en": "💬 No tool → direct reply",   "ja": "💬 ツール不要 → 直接返答"},
+        "tool_selected":     {
+            "zh": "🤖 Tool selected: {label} ({name})",
+            "en": "🤖 Tool selected: {label} ({name})",
+            "ja": "🤖 ツール選択: {label} ({name})",
+        },
+        "generating":        {"zh": "📝 Generating response...",   "en": "📝 Generating response...",   "ja": "📝 応答を生成中..."},
     }
 
     @classmethod
-    def _build_tool_thinking(cls, tool_name: str, tool_args: Dict[str, Any]) -> str:
-        """Build a human-readable summary of the tool call for display as thinking."""
-        label = cls._TOOL_LABELS.get(tool_name, tool_name)
-        lines = [f"🔧 调用工具：{label}"]
+    def _t(cls, key: str, lang: str, **kwargs: Any) -> str:
+        """Look up a thinking-trace string and format it."""
+        lang_map = cls._THINKING_I18N.get(key, {})
+        template = lang_map.get(lang) or lang_map.get("en", key)
+        return template.format(**kwargs) if kwargs else template
+
+    @classmethod
+    def _tool_label(cls, tool_name: str, lang: str) -> str:
+        return cls._TOOL_LABELS_I18N.get(lang, cls._TOOL_LABELS_I18N["en"]).get(tool_name, tool_name)
+
+    @classmethod
+    def _describe_state(
+        cls,
+        plan_state: Dict[str, Any],
+        cooking_context: Optional[Dict] = None,
+        lang: str = "en",
+    ) -> str:
+        parts: List[str] = [cls._t("state_header", lang)]
+        meal_plan = plan_state.get("meal_plan") or {}
+        plan_dates: List[str] = plan_state.get("plan_dates") or []
+        if meal_plan:
+            parts.append(cls._t("meal_plan_n_days", lang, n=len(meal_plan)))
+        elif plan_dates:
+            parts.append(cls._t("plan_dates_exist", lang, n=len(plan_dates), dates=", ".join(plan_dates)))
+        else:
+            parts.append(cls._t("no_meal_plan", lang))
+        if cooking_context and cooking_context.get("dish_name"):
+            parts.append(cls._t("cooking_session", lang, dish=cooking_context["dish_name"]))
+        phase = plan_state.get("phase")
+        if phase:
+            parts.append(cls._t("planning_phase", lang, phase=phase))
+        if plan_state.get("pending_planning_queue") and plan_state.get("last_pipeline_action") == "ask_confirm_dates":
+            parts.append(cls._t("awaiting_confirm", lang))
+        return "\n".join(parts)
+
+    @classmethod
+    def _build_tool_thinking(cls, tool_name: str, tool_args: Dict[str, Any], lang: str = "en") -> str:
+        label = cls._tool_label(tool_name, lang)
+        lines = [cls._t("tool_call_header", lang, label=label)]
         for k, v in tool_args.items():
             if v is not None and v != "":
                 lines.append(f"   · {k}: {v}")

@@ -299,25 +299,53 @@ class ScheduleRangeDecider:
         now = self._now_tz(timezone)
         now_str = now.strftime("%Y-%m-%d %H:%M %Z") if now.tzinfo else now.strftime("%Y-%m-%d %H:%M UTC")
         tz_label = timezone or "UTC"
-        today_str = now.strftime("%Y-%m-%d")
+        today = now.date()
+
+        # Pre-compute named dates in Python so the LLM never has to reason about
+        # weekday arithmetic.  Monday=0, Sunday=6.
+        weekday = today.weekday()
+        # Start of current week (Monday) and previous week
+        this_monday = today - timedelta(days=weekday)
+        last_monday = this_monday - timedelta(days=7)
+        next_monday = this_monday + timedelta(days=7)
+
+        day_names = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+
+        def _fmt(d: "date") -> str:
+            return d.strftime("%Y-%m-%d")
+
+        # Build "last <weekday>" and "this <weekday>" and "next <weekday>" lookup rows
+        ref_rows = [f"today        = {_fmt(today)} ({day_names[weekday]})"]
+        ref_rows.append(f"yesterday    = {_fmt(today - timedelta(days=1))}")
+        ref_rows.append(f"tomorrow     = {_fmt(today + timedelta(days=1))}")
+        for i, name in enumerate(day_names):
+            this_d = this_monday + timedelta(days=i)
+            last_d = last_monday + timedelta(days=i)
+            next_d = next_monday + timedelta(days=i)
+            ref_rows.append(f"last {name:<9} = {_fmt(last_d)}")
+            ref_rows.append(f"this {name:<9} = {_fmt(this_d)}")
+            ref_rows.append(f"next {name:<9} = {_fmt(next_d)}")
+        ref_rows.append(f"this week    = {_fmt(this_monday)} to {_fmt(this_monday + timedelta(days=6))}")
+        ref_rows.append(f"last week    = {_fmt(last_monday)} to {_fmt(last_monday + timedelta(days=6))}")
+        ref_rows.append(f"next week    = {_fmt(next_monday)} to {_fmt(next_monday + timedelta(days=6))}")
+        date_ref = "\n".join(ref_rows)
+
         prompt = f"""You are a schedule assistant's data-fetching planner.
 
 Current time (user timezone): {now_str} (timezone: {tz_label})
-Today: {today_str}
+
+DATE REFERENCE (computed, treat as ground truth):
+{date_ref}
+
 User query: "{query}"
 
 Task: Determine the MINIMUM date range of schedule data that must be loaded to fully answer this query.
+Use the DATE REFERENCE above to resolve any relative date expressions (today, yesterday, last Friday, next week, etc.).
 
-Think step by step:
-1. Identify every date or period the user references (source dates, destination dates, comparison dates, etc.).
-2. The range must cover ALL of them — not just the final destination.
-3. Examples:
-   - "What's my plan today?" → only today needs data → start=today, end=tomorrow
-   - "Move today's breakfast to tomorrow" → need today's data (source) AND tomorrow's data (destination) → start=today, end=day-after-tomorrow
-   - "Reschedule Monday's dinner to Wednesday" → need Monday AND Wednesday → start=that Monday, end=day-after-that-Wednesday
-   - "Show next week" → start=next Monday, end=next Sunday+1
-4. "This week" = Mon–Sun of current week. "Next week" = Mon–Sun of next week.
-5. start is inclusive, end is exclusive (the day AFTER the last needed date).
+Rules:
+1. Identify every date or period the user references.
+2. The range must cover ALL referenced dates.
+3. start is inclusive, end is exclusive (the day AFTER the last needed date).
 
 Output ONLY valid JSON with no explanation: {{"start": "YYYY-MM-DD", "end": "YYYY-MM-DD"}}
 

@@ -522,9 +522,9 @@ export const ingestionService = {
    * @param request - Chat request with message, history, and owner_id
    * @returns Chat response with AI message and detected intent
    */
-  chat: async (request: { 
-    message: string; 
-    history: { role: string; content: string }[]; 
+  chat: async (request: {
+    message: string;
+    history: { role: string; content: string }[];
     owner_id: number;
     context?: any;
     user_timezone?: string;
@@ -541,6 +541,54 @@ export const ingestionService = {
   }> => {
     const response = await aiOrchestraClient.post('/chat', request)
     return response.data
+  },
+
+  chatStream: async function* (request: {
+    message: string;
+    history: { role: string; content: string }[];
+    owner_id: number;
+    context?: any;
+    user_timezone?: string;
+    cooking_level?: CookingLevel;
+    language?: UserLanguage;
+  }): AsyncGenerator<
+    | { type: 'thinking'; step: string }
+    | { type: 'text_chunk'; chunk: string }
+    | { type: 'result'; data: { response: string; intent: string; confidence: number; reasoning?: string; action: string; action_data: any; thinking?: string; error_code?: string; error_detail?: string; limit_info?: any } }
+    | { type: 'error'; message: string }
+  > {
+    const baseUrl = AI_ORCHESTRA_BASE_URL
+    const token = localStorage.getItem('authToken')
+    const res = await fetch(`${baseUrl}/chat/stream`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      },
+      body: JSON.stringify(request),
+    })
+    if (!res.ok) throw new Error(`Chat stream request failed: ${res.status}`)
+    if (!res.body) throw new Error('No response body from chat stream')
+
+    const reader = res.body.getReader()
+    const decoder = new TextDecoder()
+    let buffer = ''
+
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      buffer += decoder.decode(value, { stream: true })
+      const chunks = buffer.split('\n\n')
+      buffer = chunks.pop() ?? ''
+      for (const chunk of chunks) {
+        const line = chunk.trim()
+        if (line.startsWith('data: ')) {
+          try {
+            yield JSON.parse(line.slice(6))
+          } catch { /* skip malformed */ }
+        }
+      }
+    }
   },
 
   /**

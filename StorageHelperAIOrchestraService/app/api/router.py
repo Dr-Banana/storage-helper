@@ -685,3 +685,77 @@ async def chat_with_agent(request: ChatRequest):
     except Exception as e:
         logger.error(f"Error in chat endpoint: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Chat failed: {str(e)}")
+
+
+@api_router.post("/chat/stream")
+async def chat_stream(request: ChatRequest):
+    """
+    [Chat Agent — SSE Stream]
+    Same as /chat but streams thinking steps and response text as Server-Sent Events.
+
+    Event types:
+      {"type": "thinking",   "step": "<text>"}   — one per pipeline decision step
+      {"type": "text_chunk", "chunk": "<text>"}  — incremental LLM response characters
+      {"type": "result",     "data": {...}}       — final ChatResponse-compatible payload
+      {"type": "error",      "message": "<text>"} — on failure
+    """
+    history_dicts = [
+        {"role": msg.role, "content": msg.content}
+        for msg in request.history
+    ]
+
+    async def event_generator():
+        queue: asyncio.Queue = asyncio.Queue()
+
+        def on_thinking_step(step: str) -> None:
+            queue.put_nowait({"type": "thinking", "step": step})
+
+        def on_text_chunk(chunk: str) -> None:
+            queue.put_nowait({"type": "text_chunk", "chunk": chunk})
+
+        async def run_pipeline():
+            try:
+                result = await chat.chat_pipeline.run(
+                    user_input=request.message,
+                    owner_id=request.owner_id,
+                    history=history_dicts,
+                    context=request.context,
+                    user_timezone=request.user_timezone,
+                    cooking_level=request.cooking_level or "beginner",
+                    language=request.language or "zh",
+                    on_thinking_step=on_thinking_step,
+                    on_text_chunk=on_text_chunk,
+                )
+                await queue.put({"type": "result", "data": result})
+            except Exception as exc:
+                logger.error(f"Chat stream pipeline failed: {exc}", exc_info=True)
+                await queue.put({"type": "error", "message": str(exc)})
+            finally:
+                await queue.put(None)
+
+        pipeline_task = asyncio.create_task(run_pipeline())
+
+        try:
+            while True:
+                msg = await queue.get()
+                if msg is None:
+                    break
+                yield f"data: {json.dumps(msg, ensure_ascii=False)}\n\n"
+                await asyncio.sleep(0.02)
+        finally:
+            if not pipeline_task.done():
+                pipeline_task.cancel()
+                try:
+                    await pipeline_task
+                except asyncio.CancelledError:
+                    pass
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )

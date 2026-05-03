@@ -17,22 +17,62 @@ interface Message {
   thinking?: string
 }
 
+// Delays give each bar a different phase so the wave travels left→right.
+const WAVE_DELAYS = ['0s', '0.15s', '0.3s', '0.15s', '0s']
+
+const ThinkingWaveBars: React.FC<{ active?: boolean }> = ({ active = true }) => (
+  <div className="flex items-center gap-[3px]">
+    {WAVE_DELAYS.map((delay, i) =>
+      active ? (
+        <div
+          key={i}
+          className="thinking-wave-bar bg-home-primary-400"
+          style={{ animationDelay: delay }}
+        />
+      ) : (
+        // Static frozen bars at varying heights for the collapsed state
+        <div
+          key={i}
+          className="w-[3px] rounded-sm bg-gray-300"
+          style={{ height: [6, 10, 14, 10, 6][i] }}
+        />
+      )
+    )}
+  </div>
+)
+
 const ThinkingBubble: React.FC<{ thinking: string }> = ({ thinking }) => {
   const [open, setOpen] = React.useState(false)
   return (
     <div className="mb-2">
       <button
         onClick={() => setOpen(v => !v)}
-        className="flex items-center gap-1.5 text-xs text-gray-400 hover:text-gray-600 transition-colors"
+        className="flex items-center gap-2 group"
       >
-        <BrainCircuit size={12} />
-        <span>{open ? '收起思考过程' : '查看思考过程'}</span>
-        <span className="text-gray-300">{open ? '▲' : '▼'}</span>
+        <ThinkingWaveBars active={false} />
+        <span className="text-[10px] text-gray-400 group-hover:text-gray-500 transition-colors">
+          {open ? 'Collapse' : 'Thinking'}
+        </span>
       </button>
       {open && (
-        <div className="mt-1.5 px-3 py-2 rounded-lg bg-gray-50 border border-gray-100 text-xs text-gray-400 font-mono whitespace-pre-wrap leading-relaxed">
+        <div className="mt-2 px-3 py-2 rounded-lg bg-gray-50 border border-gray-100 text-xs text-gray-400 font-mono whitespace-pre-wrap leading-relaxed animate-fade-in">
           {thinking}
         </div>
+      )}
+    </div>
+  )
+}
+
+const LiveThinkingPanel: React.FC<{ steps: string[] }> = ({ steps }) => {
+  const latest = steps[steps.length - 1]
+  const label = latest ? latest.split('\n')[0].replace(/^[^\s]+\s/, '') : ''
+  return (
+    <div className="flex items-center gap-2.5 py-0.5">
+      <ThinkingWaveBars active />
+      {label && (
+        <span className="text-[10px] text-gray-400 font-mono truncate max-w-[160px] animate-fade-in">
+          {label}
+        </span>
       )}
     </div>
   )
@@ -711,6 +751,8 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ isOpen, onClose }) => {
     { role: 'model', content: 'Hi! I\'m your Home AI. How can I help you today?' }
   ])
   const [isLoading, setIsLoading] = useState(false)
+  const [liveThinkingSteps, setLiveThinkingSteps] = useState<string[]>([])
+  const [streamingText, setStreamingText] = useState('')
   const [input, setInput] = useState('')
   const [activeContext, setActiveContext] = useState<any>(null)
   // Indices of ASK_OVERWRITE messages whose diff card has been acted on (saved or dismissed).
@@ -764,19 +806,33 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ isOpen, onClose }) => {
     if (!overrideInput) setInput('')
     setMessages(prev => [...prev, { role: 'user', content: messageToSend }])
     setIsLoading(true)
+    setLiveThinkingSteps([])
 
     try {
       const history = messages.map(msg => ({ role: msg.role, content: msg.content }))
       const userTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone
-      const response = await ingestionService.chat({
+
+      let response: Awaited<ReturnType<typeof ingestionService.chat>> | null = null
+      for await (const event of ingestionService.chatStream({
         message: messageToSend,
-        history: history,
+        history,
         owner_id: userId,
         context: contextToSend,
         user_timezone: userTimezone,
         cooking_level: cookingLevel,
-        language: language,
-      })
+        language,
+      })) {
+        if (event.type === 'thinking') {
+          setLiveThinkingSteps(prev => [...prev, event.step])
+        } else if (event.type === 'text_chunk') {
+          setStreamingText(prev => prev + event.chunk)
+        } else if (event.type === 'result') {
+          response = event.data
+        } else if (event.type === 'error') {
+          throw new Error(event.message)
+        }
+      }
+      if (!response) throw new Error('No result received from stream')
 
       let documents: Document[] = []
       if ((response.action === 'SEARCH' || response.action === 'UPDATE') && response.action_data?.document_ids) {
@@ -879,6 +935,8 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ isOpen, onClose }) => {
       setMessages(prev => [...prev, { role: 'model', content: 'I encountered a slight hiccup. Let me try again!' }])
     } finally {
       setIsLoading(false)
+      setLiveThinkingSteps([])
+      setStreamingText('')
     }
   }
 
@@ -1035,15 +1093,19 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ isOpen, onClose }) => {
         ))}
         
         {isLoading && (
-          <div className="flex gap-4">
-             <div className="w-8 h-8 rounded-full bg-white border border-gray-100 flex items-center justify-center text-home-primary-600">
-                <Sparkles size={14} />
-             </div>
-             <div className="bg-white px-4 py-3 rounded-2xl rounded-tl-none border border-gray-100 shadow-sm flex items-center gap-1.5">
-               <span className="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
-               <span className="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
-               <span className="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
-             </div>
+          <div className="flex gap-4 animate-slide-up">
+            <div className="w-8 h-8 rounded-full bg-white border border-gray-100 flex items-center justify-center text-home-primary-600 flex-shrink-0">
+              <Sparkles size={14} />
+            </div>
+            <div className="bg-white px-5 py-3.5 rounded-2xl rounded-tl-none border border-gray-100 shadow-sm text-sm leading-relaxed max-w-[85%]">
+              {streamingText ? (
+                <div className="prose prose-sm max-w-none text-gray-800 prose-headings:text-gray-900 prose-p:my-1 prose-li:my-0 prose-strong:font-semibold">
+                  <ReactMarkdown remarkPlugins={[remarkGfm]}>{streamingText}</ReactMarkdown>
+                </div>
+              ) : (
+                <LiveThinkingPanel steps={liveThinkingSteps} />
+              )}
+            </div>
           </div>
         )}
         <div ref={messagesEndRef} />

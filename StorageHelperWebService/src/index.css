@@ -115,6 +115,19 @@
   .animate-fade-in {
     animation: fadeIn 0.25s ease-out forwards;
   }
+
+  @keyframes thinking-wave {
+    0%, 100% { transform: scaleY(0.25); opacity: 0.35; }
+    50%       { transform: scaleY(1);    opacity: 1;    }
+  }
+
+  .thinking-wave-bar {
+    width: 3px;
+    height: 14px;
+    border-radius: 2px;
+    transform-origin: center;
+    animation: thinking-wave 1.1s ease-in-out infinite;
+  }
 }
 
 /* ── 隐藏滚动条但保留功能 ── */
