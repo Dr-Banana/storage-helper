@@ -907,6 +907,7 @@ class GenerateMealPlanSkill(LLMSkill):
             },
         }
 
+        self._last_tokens = 0
         last_error: Optional[Exception] = None
         for attempt in range(1, max_attempts + 1):
             try:
@@ -918,6 +919,7 @@ class GenerateMealPlanSkill(LLMSkill):
                     )
                     resp.raise_for_status()
                     result = resp.json()
+                    self._last_tokens += result.get("usageMetadata", {}).get("candidatesTokenCount", 0)
 
                 if "error" in result:
                     logger.error("[%s] Gemini API error: %s", self.SKILL_NAME, result["error"])
@@ -955,6 +957,7 @@ class GenerateMealPlanSkill(LLMSkill):
 
                 if attempt > 1:
                     logger.info("[%s] succeeded on attempt %d", self.SKILL_NAME, attempt)
+                parsed["_tokens"] = self._last_tokens
                 return parsed
 
             except httpx.TimeoutException as e:

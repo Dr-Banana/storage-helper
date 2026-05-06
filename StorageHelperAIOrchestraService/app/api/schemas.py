@@ -224,6 +224,8 @@ class ChatResponse(BaseModel):
             "never as the main answer."
         ),
     )
+    # Token usage for this request
+    token_usage: Optional[int] = Field(None, description="Number of LLM tokens consumed by this request")
     # Free-tier limit enforcement
     error_code: Optional[str] = Field(None, description="'LIMIT_EXCEEDED' when free tier limit is reached")
     error_detail: Optional[str] = Field(None, description="Human-readable reason for the error")

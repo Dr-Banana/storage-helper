@@ -662,10 +662,8 @@ async def chat_with_agent(request: ChatRequest):
             language=request.language or "en",
         )
 
-        # Track token usage for non-plan interactions (plan_ahead tracks its own)
-        action = result.get("action", "")
         _tokens = result.get("_tokens", 0)
-        if action not in ("PLAN_AHEAD", "SUGGEST_OPTIONS", "limit_exceeded") and _tokens > 0:
+        if _tokens > 0 and result.get("action") != "limit_exceeded":
             asyncio.ensure_future(
                 PipelineStorage().add_token_usage(request.owner_id, _tokens)
             )
@@ -677,6 +675,7 @@ async def chat_with_agent(request: ChatRequest):
             reasoning=result["reasoning"],
             action=result["action"],
             action_data=result["action_data"],
+            token_usage=_tokens or None,
             error_code=result.get("error_code"),
             error_detail=result.get("error_detail"),
             limit_info=result.get("limit_info"),
@@ -694,10 +693,10 @@ async def chat_stream(request: ChatRequest):
     Same as /chat but streams thinking steps and response text as Server-Sent Events.
 
     Event types:
-      {"type": "thinking",   "step": "<text>"}   — one per pipeline decision step
-      {"type": "text_chunk", "chunk": "<text>"}  — incremental LLM response characters
-      {"type": "result",     "data": {...}}       — final ChatResponse-compatible payload
-      {"type": "error",      "message": "<text>"} — on failure
+      {"type": "thinking",   "step": "<text>"}          — one per pipeline decision step
+      {"type": "text_chunk", "chunk": "<text>"}         — incremental LLM response characters
+      {"type": "result",     "data": {...}}              — final ChatResponse-compatible payload; includes token_usage field
+      {"type": "error",      "message": "<text>"}       — on failure
     """
     history_dicts = [
         {"role": msg.role, "content": msg.content}
@@ -726,6 +725,12 @@ async def chat_stream(request: ChatRequest):
                     on_thinking_step=on_thinking_step,
                     on_text_chunk=on_text_chunk,
                 )
+                _tokens = result.get("_tokens", 0)
+                if _tokens > 0 and result.get("action") != "limit_exceeded":
+                    asyncio.ensure_future(
+                        PipelineStorage().add_token_usage(request.owner_id, _tokens)
+                    )
+                result["token_usage"] = _tokens or None
                 await queue.put({"type": "result", "data": result})
             except Exception as exc:
                 logger.error(f"Chat stream pipeline failed: {exc}", exc_info=True)

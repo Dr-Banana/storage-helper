@@ -2113,9 +2113,6 @@ class PlanAheadPipeline:
                         "error_detail": _reason,
                         "limit_info": _limits,
                     }
-            # Track estimated token usage in background (non-blocking)
-            import asyncio as _asyncio
-            _asyncio.ensure_future(storage_client.add_token_usage(owner_id, 5000))
 
         # ---- Step 1: Sync DB state ----
         # old_state = raw DB snapshot; used later for ghost-date filtering,
@@ -2124,11 +2121,13 @@ class PlanAheadPipeline:
         inventory_items = await self._fetch_inventory(owner_id)
         is_currently_draft = current_state.get("is_draft", False)
 
+        _total_tokens: int = 0
+
         # ---- Layer 0: LLM dish-intent early classification ----
         # Skill-based: prompt lives in ClassifyDishIntentSkill.SKILL_PROMPT (skills/plan_ahead/).
-        _dish_clf = await ClassifyDishIntentSkill(self.gemini_api_url).execute(
-            user_input, history or []
-        )
+        _dish_sk = ClassifyDishIntentSkill(self.gemini_api_url)
+        _dish_clf = await _dish_sk.execute(user_input, history or [])
+        _total_tokens += _dish_sk._last_tokens
         _is_explicit_dish = _dish_clf.get("is_explicit", False)
         if _is_explicit_dish:
             logger.info(
@@ -2142,12 +2141,14 @@ class PlanAheadPipeline:
         # context is built.  Passing is_draft lets the skill detect swap signals in draft
         # mode and pre-route to "modify" instead of the incorrect "add" path.
         _phase_str = get_phase(current_state).value
-        _action_clf = await ClassifyMealActionSkill(self.gemini_api_url).execute(
+        _action_sk = ClassifyMealActionSkill(self.gemini_api_url)
+        _action_clf = await _action_sk.execute(
             user_input, history or [],
             is_explicit_dish=_is_explicit_dish,
             pipeline_phase=_phase_str,
             is_draft=current_state.get("is_draft", False),
         )
+        _total_tokens += _action_sk._last_tokens
         _prerouted_action: Optional[str] = _action_clf.get("action")
         logger.info(
             "[PLAN_AHEAD_PIPELINE] Layer 0b (ClassifyMealActionSkill): action=%s reason=%r",
@@ -2158,9 +2159,9 @@ class PlanAheadPipeline:
         # Runs only when the user may be referring to ingredients they have on hand.
         # Active context is union-merged so multi-turn conversations accumulate facts.
         _today_str = self._now_in_timezone(user_timezone).date().isoformat()
-        _extracted = await ExtractIngredientsSkill(self.gemini_api_url).execute(
-            user_input, today_date=_today_str,
-        )
+        _extract_sk = ExtractIngredientsSkill(self.gemini_api_url)
+        _extracted = await _extract_sk.execute(user_input, today_date=_today_str)
+        _total_tokens += _extract_sk._last_tokens
         _ext_ingredients: List[str] = _extracted.get("ingredients", [])
         _ext_target_date: Optional[str] = _extracted.get("target_date")
         _ext_meal_type: Optional[str] = _extracted.get("target_meal_type")
@@ -2283,6 +2284,8 @@ class PlanAheadPipeline:
             system_context, history, user_input,
             refresh_count=_current_refresh_count,
         )
+        if parsed:
+            _total_tokens += parsed.pop("_tokens", 0)
         if not parsed:
             fallback_msg = "Sorry, I was unable to process your request. Please try again."
             return self._build_result(
@@ -3416,7 +3419,7 @@ class PlanAheadPipeline:
 
         logger.info(
             f"[PLAN_AHEAD_PIPELINE] Completed: action={action}, "
-            f"dates={list(new_meal_plan.keys())}, schedule_id={schedule_id}"
+            f"dates={list(new_meal_plan.keys())}, schedule_id={schedule_id}, tokens={_total_tokens}"
         )
         return self._build_result(
             response_text=user_message,
@@ -3427,6 +3430,7 @@ class PlanAheadPipeline:
             schedule_id=schedule_id,
             is_draft=False,
             intent_result=intent_result,
+            _tokens=_total_tokens,
         )
 
     @staticmethod
@@ -3441,6 +3445,7 @@ class PlanAheadPipeline:
         is_draft: bool = False,
         dish_options: Optional[List] = None,
         dish_slots: Optional[Dict] = None,
+        _tokens: int = 0,
     ) -> Dict[str, Any]:
         """Build chat.py-compatible response dict."""
         try:
@@ -3474,4 +3479,5 @@ class PlanAheadPipeline:
             "reasoning": reasoning,
             "action": action_str,
             "action_data": action_data,
+            "_tokens": _tokens,
         }

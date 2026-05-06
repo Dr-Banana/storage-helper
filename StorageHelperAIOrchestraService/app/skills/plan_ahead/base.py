@@ -50,6 +50,7 @@ class LLMSkill(ABC):
 
     def __init__(self, gemini_api_url: str) -> None:
         self.gemini_api_url = gemini_api_url
+        self._last_tokens: int = 0
 
     # ------------------------------------------------------------------
     # Public interface
@@ -109,6 +110,7 @@ class LLMSkill(ABC):
                 )
                 resp.raise_for_status()
                 data = resp.json()
+                self._last_tokens = data.get("usageMetadata", {}).get("totalTokenCount", 0)
 
             candidates = data.get("candidates") or []
             if not candidates:

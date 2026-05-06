@@ -526,16 +526,14 @@ or function invocations — those are internal and must never appear in your rep
         plan_dates: List[str] = plan_state.get("plan_dates") or []
         meal_plan = plan_state.get("meal_plan") or {}
         phase = plan_state.get("phase")
-        pending_options = plan_state.get("pending_options")
-        pending_queue = plan_state.get("pending_planning_queue")
-        last_action = plan_state.get("last_pipeline_action")
-        if pending_queue and last_action == "ask_confirm_dates":
-            parts.append(
-                "\n[MEAL DATE CONFIRMATION PENDING]\n"
-                "The user is responding to a proposed meal plan date/meal confirmation prompt.\n"
-                "ALWAYS call plan_meal — even for very short replies like '好的', '确认', '对', "
-                "'yes', 'ok', '可以', '取消', 'cancel'."
-            )
+
+        # Routing hints derived from TOOL_DECLARATIONS — single source of truth.
+        # primary_hints replace the [MEAL PLAN EXISTS] block (critical continuation states).
+        # secondary_hints append after it (informational warnings).
+        primary_hints, secondary_hints = self._active_routing_hints(plan_state)
+
+        if primary_hints:
+            parts.extend(primary_hints)
         elif meal_plan or phase:
             date_list = list(meal_plan.keys()) or ["(none)"]
             planned_dishes: List[str] = []
@@ -548,8 +546,8 @@ or function invocations — those are internal and must never appear in your rep
             parts.append(
                 f"\n[MEAL PLAN EXISTS]\n"
                 f"Planned dates: {date_list}. {dish_hint}\n"
-                "- Call plan_meal when user wants to CREATE a new plan, ADD dishes, MODIFY or REMOVE meals.\n"
-                "- Call plan_meal when user asks to PLAN meals — even if a plan already exists.\n"
+                "- Call plan_meal when user wants to CREATE a new plan, ADD dishes, or swap/change meal content.\n"
+                "- Call manage_schedule(delete) when user wants to CANCEL or DELETE the meal plan entirely.\n"
                 "- Use view_schedule when user asks WHAT is planned, 'what to eat', or wants to SEE the plan.\n"
                 "- Use get_cooking_steps if user asks HOW to cook or about ingredients of a planned dish.\n"
                 "- Do NOT call plan_meal just because a planned dish is mentioned in passing."
@@ -560,14 +558,14 @@ or function invocations — those are internal and must never appear in your rep
                 f"\n[MEAL PLAN EXISTS — dates: {', '.join(plan_dates)}]\n"
                 "Dish details are stored in the database and NOT loaded yet.\n"
                 "- Call view_schedule when user asks WHAT is planned, 'what to eat tonight/today/this week'.\n"
-                "- Call plan_meal only when user explicitly wants to CREATE, ADD, or CHANGE meals.\n"
+                "- Call plan_meal only when user explicitly wants to CREATE, ADD, or CHANGE meal content.\n"
+                "- Call manage_schedule(delete) when user wants to CANCEL or DELETE the plan.\n"
                 "- Do NOT invent or assume dish names — use view_schedule to retrieve them."
             )
-        if pending_options:
-            parts.append(
-                "  ⚠ PENDING OPTIONS: User has not yet chosen between meal plan options. "
-                "Call plan_meal if user selects or comments on an option."
-            )
+
+        # Secondary hints only when no critical state is active
+        if not primary_hints:
+            parts.extend(secondary_hints)
 
         # Frontend context signals
         if context:
@@ -578,6 +576,57 @@ or function invocations — those are internal and must never appear in your rep
                 )
 
         return "\n".join(parts)
+
+    @staticmethod
+    def _active_routing_hints(
+        plan_state: Dict[str, Any],
+    ) -> "Tuple[List[str], List[str]]":
+        """
+        Read TOOL_DECLARATIONS routing conditions and collect context_hint strings
+        whose state conditions are currently satisfied.
+
+        Scans two condition lists per tool declaration:
+          force_when — hard-enforced by harness; hints here are backup for edge cases
+          hint_when  — soft guidance only; LLM is still free to pick a different tool
+
+        Returns (primary_hints, secondary_hints):
+          primary   — context_primary=True; replace the [MEAL PLAN EXISTS] section.
+          secondary — all other active hints; append after it.
+
+        To add a new hint: add context_hint to the relevant condition in
+        TOOL_DECLARATIONS. No edits to this method needed.
+        """
+        from app.skills.tool_registry import TOOL_DECLARATIONS
+        primary: List[str] = []
+        secondary: List[str] = []
+        seen: set = set()
+
+        def _collect(cond: Dict) -> None:
+            hint = cond.get("context_hint")
+            if not hint or hint in seen:
+                return
+            sk = cond.get("state_key")
+            if sk and not plan_state.get(sk):
+                return
+            if any(
+                plan_state.get(k) != v
+                for k, v in (cond.get("also_requires") or {}).items()
+            ):
+                return
+            seen.add(hint)
+            if cond.get("context_primary"):
+                primary.append(hint)
+            else:
+                secondary.append(hint)
+
+        for decl in TOOL_DECLARATIONS:
+            routing = decl.get("routing") or {}
+            for cond in routing.get("force_when", []):
+                _collect(cond)
+            for cond in routing.get("hint_when", []):
+                _collect(cond)
+
+        return primary, secondary
 
     # ─────────────────────────────────────────────────────────────────────────
     # Gemini helpers
@@ -622,7 +671,7 @@ or function invocations — those are internal and must never appear in your rep
 
             candidate = (data.get("candidates") or [{}])[0]
             parts = candidate.get("content", {}).get("parts") or []
-            tokens = data.get("usageMetadata", {}).get("candidatesTokenCount", 0)
+            tokens = data.get("usageMetadata", {}).get("totalTokenCount", 0)
 
             # ── Harness: Sensor (feedback) ─────────────────────────────────
             # Validates the LLM response, auto-corrects anomalies, and logs
@@ -672,7 +721,7 @@ or function invocations — those are internal and must never appear in your rep
 
             candidate = (data.get("candidates") or [{}])[0]
             parts = candidate.get("content", {}).get("parts") or []
-            tokens = data.get("usageMetadata", {}).get("candidatesTokenCount", 0)
+            tokens = data.get("usageMetadata", {}).get("totalTokenCount", 0)
 
             sensor = response_sensor.inspect(parts, user_input, tokens)
             return {
@@ -743,7 +792,7 @@ or function invocations — those are internal and must never appear in your rep
 
             candidate = (data.get("candidates") or [{}])[0]
             parts = candidate.get("content", {}).get("parts") or []
-            tokens = data.get("usageMetadata", {}).get("candidatesTokenCount", 0)
+            tokens = data.get("usageMetadata", {}).get("totalTokenCount", 0)
             return "".join(p.get("text", "") for p in parts if "text" in p and not p.get("thought")), tokens
 
         except Exception as exc:
@@ -776,7 +825,7 @@ or function invocations — those are internal and must never appear in your rep
 
             candidate = (data.get("candidates") or [{}])[0]
             parts = candidate.get("content", {}).get("parts") or []
-            tokens = data.get("usageMetadata", {}).get("candidatesTokenCount", 0)
+            tokens = data.get("usageMetadata", {}).get("totalTokenCount", 0)
             return "".join(p.get("text", "") for p in parts if "text" in p and not p.get("thought")), tokens
 
         except Exception as exc:
@@ -842,7 +891,7 @@ or function invocations — those are internal and must never appear in your rep
                                 full_text += text
                                 on_text_chunk(text)
                         tokens = chunk.get("usageMetadata", {}).get(
-                            "candidatesTokenCount", tokens
+                            "totalTokenCount", tokens
                         )
         except Exception as exc:
             logger.error("[TOOL-USE] Gemini stream failed: %s", exc, exc_info=True)

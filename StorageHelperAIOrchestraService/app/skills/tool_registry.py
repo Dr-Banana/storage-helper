@@ -75,9 +75,10 @@ TOOL_DECLARATIONS: List[Dict[str, Any]] = [
     {
         "name": "plan_meal",
         "description": (
-            "Use when the user wants to CREATE, PLAN, or MODIFY a meal schedule — "
-            "recommending dishes, adding items, removing or swapping dishes, or building a new plan. "
+            "Use when the user wants to CREATE, PLAN, or MODIFY the CONTENT of a meal schedule — "
+            "recommending dishes, adding items, removing or swapping dishes within a plan, or building a new plan. "
             "For simply reading what is already scheduled, use view_schedule instead. "
+            "For CANCELLING or DELETING an existing plan/event, use manage_schedule instead. "
             "NOT for questions about how to cook a dish or what ingredients it needs."
         ),
         "parameters": {
@@ -91,33 +92,46 @@ TOOL_DECLARATIONS: List[Dict[str, Any]] = [
             "required": ["user_request"],
         },
         "routing": {
-            "force_when": [
+            # force_when is intentionally empty.
+            #
+            # Hard routing was removed because it caused worse bugs than it
+            # prevented: a misrouted query (e.g. "我明天中午有计划么" during an
+            # active queue) always fails, whereas an occasional LLM routing miss
+            # is recoverable. The hint_when prompts below give the LLM enough
+            # context to route correctly without bypassing its judgment entirely.
+            #
+            # If production data shows the LLM consistently misroutes a specific
+            # state, add a targeted force_when condition back here with the
+            # narrowest possible conditions to avoid over-catching unrelated intents.
+            "force_when": [],
+            "hint_when": [
                 {
                     "state_key": "pending_planning_queue",
                     "also_requires": {"last_pipeline_action": "ask_confirm_dates"},
-                    "args": {"user_request": "$user_input"},
-                    "reason": (
-                        "pending date confirmation — any reply must reach plan_meal, "
-                        "even bare affirmations like '好的' or 'ok'"
+                    "context_hint": (
+                        "\n[MEAL DATE CONFIRMATION PENDING]\n"
+                        "The user is responding to a date/meal confirmation prompt.\n"
+                        "ALWAYS call plan_meal — even for very short replies like "
+                        "'好的', '确认', '对', 'yes', 'ok', '可以', '取消', 'cancel'."
                     ),
+                    "context_primary": True,
                 },
                 {
                     "state_key": "pending_options",
-                    "args": {"user_request": "$user_input"},
-                    "reason": (
-                        "pending option selection — user is choosing between meal options, "
-                        "route to plan_meal so the pipeline can apply the selection from stored state"
+                    "context_hint": (
+                        "  ⚠ PENDING OPTIONS: User has not yet chosen between meal plan options. "
+                        "Call plan_meal if user selects or comments on an option."
                     ),
                 },
                 {
                     "state_key": "meal_planning_queue",
-                    "args": {"user_request": "$user_input"},
-                    "reason": (
-                        "active day-by-day planning queue — any user reply continues queue processing, "
-                        "including confirmations, swaps, and proceed signals"
+                    "context_hint": (
+                        "  ⚠ ACTIVE PLANNING QUEUE: A day-by-day meal planning session is in progress. "
+                        "Call plan_meal to continue planning (swaps, confirmations, skips). "
+                        "Use view_schedule if the user is asking about existing plans."
                     ),
                 },
-            ]
+            ],
         },
     },
     {
@@ -185,8 +199,9 @@ TOOL_DECLARATIONS: List[Dict[str, Any]] = [
     {
         "name": "manage_schedule",
         "description": (
-            "Add, delete, or modify a calendar event (non-meal). "
-            "Use when the user wants to schedule a meeting, appointment, or any timed event. "
+            "Add, delete, or modify any scheduled event — including calendar meetings, appointments, "
+            "and meal plans. Use when the user wants to CANCEL, DELETE, or RESCHEDULE something. "
+            "For creating or modifying the content of a meal plan (choosing dishes), use plan_meal instead. "
             "Extract start_time and end_time directly from the user's message — "
             "e.g. '明天下午2点到4点的会议' → start_time='YYYY-MM-DDT14:00:00', end_time='YYYY-MM-DDT16:00:00'."
         ),
@@ -208,7 +223,7 @@ TOOL_DECLARATIONS: List[Dict[str, Any]] = [
                     "description": "End datetime YYYY-MM-DDTHH:MM:SS. Omit if not specified by user.",
                 },
                 "description": {"type": "string", "description": "Optional event description"},
-                "event_type": {"type": "string", "description": "Type of event (e.g. meeting, appointment)"},
+                "event_type": {"type": "string", "description": "Type of event (e.g. meeting, appointment, meal_plan)"},
                 "schedule_id": {
                     "type": "integer",
                     "description": "ID of schedule to delete/modify (required if known)",
@@ -217,8 +232,19 @@ TOOL_DECLARATIONS: List[Dict[str, Any]] = [
                     "type": "string",
                     "description": (
                         "Natural language reference to an existing event when ID is unknown, "
-                        "e.g. 'the meeting on Monday', 'the Tuesday appointment'"
+                        "e.g. 'the meeting on Monday', 'the meal plan for today'"
                     ),
+                },
+                "target_date": {
+                    "type": "string",
+                    "description": (
+                        "Target date YYYY-MM-DD for meal plan operations. "
+                        "Use when cancelling or modifying a meal plan for a specific date."
+                    ),
+                },
+                "meal_type": {
+                    "type": "string",
+                    "description": "Optional: 'breakfast', 'lunch', or 'dinner'. Only for meal plan operations.",
                 },
             },
             "required": ["operation"],
@@ -468,12 +494,27 @@ class ToolExecutor:
 
     # ── get_cooking_steps ─────────────────────────────────────────────────────
 
+    # Language-aware intro templates — used for direct response (no 2nd LLM call)
+    _COOKING_INTRO: Dict[str, str] = {
+        "zh": "好的！以下是「{dish}」的烹饪步骤：",
+        "en": "Here are the cooking steps for {dish}:",
+        "ja": "「{dish}」の作り方です：",
+        "ko": "「{dish}」 조리법입니다:",
+    }
+    _COOKING_FAIL: Dict[str, str] = {
+        "zh": "抱歉，暂时无法获取「{dish}」的烹饪步骤，请稍后再试。",
+        "en": "Sorry, I couldn't get the cooking steps for {dish}. Please try again.",
+        "ja": "「{dish}」の調理手順を取得できませんでした。後でもう一度お試しください。",
+        "ko": "「{dish}」의 조리 단계를 가져올 수 없습니다. 나중에 다시 시도해 주세요.",
+    }
+
     async def _get_cooking_steps(self, args: Dict, owner_id: int, **kw) -> Dict:
         from app.agents.cooking_steps_agent import CookingStepsAgent
         from app.modules.plan_ahead_state import get_plan_state
 
         dish_name: str = args.get("dish_name") or ""
         save_to_plan: bool = bool(args.get("save_to_plan", False))
+        language: str = kw.get("language", "zh")
 
         # Build context for the agent
         ctx: Dict[str, Any] = dict(kw.get("context") or {})
@@ -495,7 +536,7 @@ class ToolExecutor:
             context=ctx,
             history=kw.get("history"),
             cooking_level=kw.get("cooking_level", "beginner"),
-            language=kw.get("language", "zh"),
+            language=language,
         )
 
         agent_action = result.get("action", "COOKING_STEPS")
@@ -512,8 +553,19 @@ class ToolExecutor:
         # Surface ASK_OVERWRITE to the frontend (recipe conflict)
         final_action = "ASK_OVERWRITE" if agent_action == "ASK_OVERWRITE" else "COOKING_STEPS"
 
+        # Build response directly — skips the second LLM call.
+        # Includes the full formatted steps so the chat bubble shows them
+        # even when the frontend has no separate cooking-steps card renderer.
+        if r_data.get("needs_dish_name") or not steps:
+            response = result.get("message") or self._COOKING_FAIL.get(
+                language, self._COOKING_FAIL["en"]
+            ).format(dish=d_name or dish_name)
+        else:
+            response = self._format_steps_response(d_name, steps, language)
+
         return {
-            "_direct_response": False,
+            "_direct_response": True,
+            "response": response,
             "action": final_action,
             "action_data": action_data,
             "tool_result": self._format_cooking_steps(d_name, steps),
@@ -530,6 +582,11 @@ class ToolExecutor:
         for i, step in enumerate(steps, 1):
             lines.append(f"Step {i}: {step}")
         return "\n".join(lines)
+
+    def _format_steps_response(self, dish_name: str, steps: List[str], language: str) -> str:
+        """Combine the intro with the LLM-formatted steps as-is."""
+        intro = self._COOKING_INTRO.get(language, self._COOKING_INTRO["en"]).format(dish=dish_name)
+        return intro + "\n\n" + "\n".join(steps)
 
     # ── modify_recipe_ingredient ──────────────────────────────────────────────
 
@@ -582,12 +639,27 @@ class ToolExecutor:
         op: str = args.get("operation", "add")
         schedule_id: Optional[int] = args.get("schedule_id")
         schedule_reference: Optional[str] = args.get("schedule_reference")
+        target_date: Optional[str] = args.get("target_date")
+        meal_type: Optional[str] = args.get("meal_type")
 
-        # Resolve ID from natural language reference when needed
-        if op in ("delete", "modify") and schedule_id is None and schedule_reference:
+        # Resolve ID: try explicit reference, then date-based meal plan lookup
+        if op in ("delete", "modify") and schedule_id is None:
             schedule_id = await self._resolve_schedule_id(
-                schedule_reference, owner_id, _default_storage
+                reference=schedule_reference or "",
+                owner_id=owner_id,
+                storage_client=_default_storage,
+                target_date=target_date,
             )
+            if schedule_id is None:
+                ref_desc = target_date or schedule_reference or "unknown"
+                tool_result = f"No schedule found matching '{ref_desc}'. Nothing was {op}d."
+                logger.info("[TOOL manage_schedule] no schedule found for ref=%s date=%s", schedule_reference, target_date)
+                return {
+                    "_direct_response": False,
+                    "action": "MANAGE_SCHEDULE",
+                    "action_data": {"ok": False, "target_date": target_date, "meal_type": meal_type},
+                    "tool_result": tool_result,
+                }
 
         def _parse_dt(s: Optional[str]) -> Optional[datetime]:
             if not s:
@@ -611,15 +683,16 @@ class ToolExecutor:
         )
         ok = apply_result.get("ok", False)
         sid = apply_result.get("schedule_id")
+        op_label = f"meal plan for {target_date}" if target_date else f"schedule {sid}"
         tool_result = (
-            f"Schedule {op} succeeded. schedule_id={sid}"
+            f"{op_label} {op} succeeded."
             if ok
-            else f"Schedule {op} failed: {apply_result.get('error')}"
+            else f"{op_label} {op} failed: {apply_result.get('error')}"
         )
         return {
             "_direct_response": False,
             "action": "MANAGE_SCHEDULE",
-            "action_data": apply_result,
+            "action_data": {**apply_result, "target_date": target_date, "meal_type": meal_type},
             "tool_result": tool_result,
         }
 
@@ -628,17 +701,41 @@ class ToolExecutor:
         reference: str,
         owner_id: int,
         storage_client: Any,
+        target_date: Optional[str] = None,
     ) -> Optional[int]:
-        """Simple title-match resolver for natural language schedule references."""
+        """Resolve a schedule ID from a natural language reference or a date-based meal plan lookup."""
         try:
             schedules = await storage_client.get_user_schedules(owner_id)
         except Exception:
             return None
-        ref_lower = reference.lower()
-        for s in schedules:
-            title = (s.get("title") or "").lower()
-            if title and (title in ref_lower or ref_lower in title):
-                return s.get("id")
+
+        # Title match — works for meetings/appointments
+        if reference:
+            ref_lower = reference.lower()
+            for s in schedules:
+                title = (s.get("title") or "").lower()
+                if title and (title in ref_lower or ref_lower in title):
+                    return s.get("id")
+
+        # Date-based match — find a meal plan schedule covering target_date
+        if target_date:
+            for s in schedules:
+                if "meal_plan" not in (s.get("event_type") or ""):
+                    continue
+                meta = s.get("metadata") or {}
+                # New format: metadata.meal_plan_slots = { "YYYY-MM-DD": { "lunch": [...] } }
+                if target_date in (meta.get("meal_plan_slots") or {}):
+                    return s.get("id")
+                # Old format: metadata.meal_plan = { "YYYY-MM-DD": "dish, dish" }
+                if target_date in (meta.get("meal_plan") or {}):
+                    return s.get("id")
+                # Features format: metadata.features[].plans[].date
+                for feat in (meta.get("features") or []):
+                    if feat.get("type") == "meal_plan":
+                        for plan in (feat.get("plans") or []):
+                            if plan.get("date") == target_date:
+                                return s.get("id")
+
         return None
 
     # ── view_schedule ─────────────────────────────────────────────────────────
