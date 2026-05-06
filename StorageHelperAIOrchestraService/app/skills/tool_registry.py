@@ -92,18 +92,24 @@ TOOL_DECLARATIONS: List[Dict[str, Any]] = [
             "required": ["user_request"],
         },
         "routing": {
-            # force_when is intentionally empty.
-            #
-            # Hard routing was removed because it caused worse bugs than it
-            # prevented: a misrouted query (e.g. "我明天中午有计划么" during an
-            # active queue) always fails, whereas an occasional LLM routing miss
-            # is recoverable. The hint_when prompts below give the LLM enough
-            # context to route correctly without bypassing its judgment entirely.
-            #
-            # If production data shows the LLM consistently misroutes a specific
-            # state, add a targeted force_when condition back here with the
-            # narrowest possible conditions to avoid over-catching unrelated intents.
-            "force_when": [],
+            "force_when": [
+                {
+                    "state_key": "pending_planning_queue",
+                    "also_requires": {"last_pipeline_action": "ask_confirm_dates"},
+                    "args": {"user_request": "$user_input"},
+                    "reason": "User is responding to a date-confirmation prompt — any reply goes to plan_meal.",
+                },
+                {
+                    "state_key": "pending_options",
+                    "args": {"user_request": "$user_input"},
+                    "reason": "User is choosing between pending meal plan options — always route to plan_meal.",
+                },
+                {
+                    "state_key": "meal_planning_queue",
+                    "args": {"user_request": "$user_input"},
+                    "reason": "Active day-by-day planning queue in progress — continue via plan_meal.",
+                },
+            ],
             "hint_when": [
                 {
                     "state_key": "pending_planning_queue",
