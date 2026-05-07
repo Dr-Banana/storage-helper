@@ -26,6 +26,36 @@ const getMealPlanFeature = (schedule: Schedule): MealPlanFeature | null => {
   return features.find(f => f.type === 'meal_plan') ?? null
 }
 
+// Representative hour for each meal type — used to find the nearest one
+const MEAL_HOURS: Record<string, number> = {
+  breakfast: 8,
+  lunch: 12,
+  snack: 15,
+  dinner: 18,
+}
+
+const MEAL_LABELS: Record<string, string> = {
+  breakfast: "Today's Breakfast",
+  lunch: "Today's Lunch",
+  snack: "Today's Snack",
+  dinner: "Tonight's Dinner",
+}
+
+const MEAL_AI_PROMPTS: Record<string, string> = {
+  breakfast: "What can I make for breakfast today with what I have?",
+  lunch: "What can I cook for lunch today with what I have?",
+  snack: "What's a good snack I can make with what I have?",
+  dinner: "What can I cook for dinner tonight with what I have?",
+}
+
+const defaultMealType = (): string => {
+  const h = new Date().getHours()
+  if (h < 10) return 'breakfast'
+  if (h < 14) return 'lunch'
+  if (h < 17) return 'snack'
+  return 'dinner'
+}
+
 // ─── Time Context Hook ────────────────────────────────────────────────────────
 
 const useTimeContext = (displayName: string | null) => {
@@ -68,7 +98,8 @@ const HomePage = () => {
 
   // ── Fetch today's schedules ───────────────────────────────────────────────
   useEffect(() => {
-    const fetchToday = async () => {
+    const fetchToday = async (silent = false) => {
+      if (!silent) setLoadingSchedules(true)
       try {
         const today = new Date()
         const start = new Date(today.getFullYear(), today.getMonth(), today.getDate(), 0, 0, 0)
@@ -78,24 +109,46 @@ const HomePage = () => {
       } catch {
         // non-critical widget — fail silently
       } finally {
-        setLoadingSchedules(false)
+        if (!silent) setLoadingSchedules(false)
       }
     }
+
     fetchToday()
+
+    const handleUpdate = () => fetchToday(true)
+    window.addEventListener('schedule-updated', handleUpdate)
+    window.addEventListener('schedule-manually-edited', handleUpdate)
+    return () => {
+      window.removeEventListener('schedule-updated', handleUpdate)
+      window.removeEventListener('schedule-manually-edited', handleUpdate)
+    }
   }, [])
 
-  // ── Derive tonight's dinner ───────────────────────────────────────────────
-  const tonightDinner = useMemo(() => {
+  // ── Derive nearest meal based on current time ─────────────────────────────
+  const nearestMeal = useMemo(() => {
     const todayKey = toDateKey(new Date())
+    const currentHour = new Date().getHours() + new Date().getMinutes() / 60
+
+    const allMeals: Meal[] = []
     for (const schedule of todaySchedules) {
       const mpf = getMealPlanFeature(schedule)
       if (!mpf) continue
       const dayPlan = mpf.plans.find(p => p.date === todayKey)
       if (!dayPlan) continue
-      const dinner = dayPlan.meals.find(m => m.mealTime === 'dinner')
-      if (dinner && dinner.dishes.length > 0) return dinner.dishes
+      for (const meal of dayPlan.meals) {
+        if (meal.dishes.length > 0) allMeals.push(meal)
+      }
     }
-    return null
+
+    if (allMeals.length === 0) return { dishes: null, mealType: defaultMealType() }
+
+    const nearest = allMeals.reduce((best, meal) => {
+      const bestDiff = Math.abs(currentHour - (MEAL_HOURS[best.mealTime] ?? 18))
+      const thisDiff = Math.abs(currentHour - (MEAL_HOURS[meal.mealTime] ?? 18))
+      return thisDiff < bestDiff ? meal : best
+    })
+
+    return { dishes: nearest.dishes, mealType: nearest.mealTime }
   }, [todaySchedules])
 
   // ── Handlers ─────────────────────────────────────────────────────────────
@@ -169,8 +222,8 @@ const HomePage = () => {
 
           <div>
 
-            {/* Dinner Plan card */}
-            {tonightDinner ? (
+            {/* Nearest meal card */}
+            {nearestMeal.dishes ? (
               <Link
                 to="/schedule"
                 className="bg-white p-5 rounded-2xl border border-stone-100 shadow-sm hover:border-orange-200 hover:shadow-md transition-all group flex flex-col"
@@ -178,9 +231,11 @@ const HomePage = () => {
                 <div className="w-10 h-10 bg-orange-50 text-orange-500 rounded-xl flex items-center justify-center mb-4 flex-shrink-0">
                   <ChefHat size={20} />
                 </div>
-                <p className="text-xs font-bold text-stone-400 uppercase tracking-wide mb-1">Tonight's Dinner</p>
+                <p className="text-xs font-bold text-stone-400 uppercase tracking-wide mb-1">
+                  {MEAL_LABELS[nearestMeal.mealType]}
+                </p>
                 <p className="text-base font-bold text-stone-900 line-clamp-2 flex-1 leading-snug">
-                  {tonightDinner.map(d => d.name).join(' · ')}
+                  {nearestMeal.dishes.map(d => d.name).join(' · ')}
                 </p>
                 <div className="mt-4 text-xs font-bold text-orange-500 flex items-center gap-1 group-hover:gap-2 transition-all">
                   View plan <ArrowRight size={12} />
@@ -188,13 +243,15 @@ const HomePage = () => {
               </Link>
             ) : (
               <button
-                onClick={() => askAI('What can I cook for dinner tonight with what I have?')}
+                onClick={() => askAI(MEAL_AI_PROMPTS[nearestMeal.mealType])}
                 className="bg-white p-5 rounded-2xl border border-dashed border-stone-200 hover:border-orange-300 hover:bg-orange-50/30 transition-all group flex flex-col text-left"
               >
                 <div className="w-10 h-10 bg-stone-50 text-stone-400 rounded-xl flex items-center justify-center mb-4 flex-shrink-0 group-hover:bg-orange-50 group-hover:text-orange-400 transition-colors">
                   <ChefHat size={20} />
                 </div>
-                <p className="text-xs font-bold text-stone-400 uppercase tracking-wide mb-1">Tonight's Dinner</p>
+                <p className="text-xs font-bold text-stone-400 uppercase tracking-wide mb-1">
+                  {MEAL_LABELS[nearestMeal.mealType]}
+                </p>
                 <p className="text-sm text-stone-400 flex-1 leading-relaxed">
                   {loadingSchedules ? 'Checking your plan…' : 'Nothing planned yet. Want me to suggest something?'}
                 </p>
