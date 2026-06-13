@@ -18,7 +18,7 @@ api_router = APIRouter()
 _agents: Dict[int, MealPlanningAgent] = {}
 
 
-def _get_agent(owner_id: int, auth_token: str, cooking_level: str) -> MealPlanningAgent:
+def _get_agent(owner_id: int, auth_token: str, cooking_level: str, language: Optional[str] = None) -> MealPlanningAgent:
     if owner_id not in _agents:
         _agents[owner_id] = MealPlanningAgent(
             gemini_api_url=(
@@ -27,7 +27,10 @@ def _get_agent(owner_id: int, auth_token: str, cooking_level: str) -> MealPlanni
             ),
             auth_token=auth_token,
             cooking_level=cooking_level,
+            language=language,
         )
+    else:
+        _agents[owner_id].language = language
     return _agents[owner_id]
 
 
@@ -47,7 +50,7 @@ async def chat(
 ):
     """Chat with MealPlanningAgent."""
     auth_token = _extract_token(authorization)
-    agent = _get_agent(request.owner_id, auth_token, request.cooking_level or "beginner")
+    agent = _get_agent(request.owner_id, auth_token, request.cooking_level or "beginner", request.language)
 
     history = [{"role": m.role, "content": m.content} for m in request.history]
     reply = await agent.run(
@@ -72,16 +75,15 @@ async def chat_stream(
       {"type": "error",      "message": "<text>"}
     """
     auth_token = _extract_token(authorization)
-    agent = _get_agent(request.owner_id, auth_token, request.cooking_level or "beginner")
+    agent = _get_agent(request.owner_id, auth_token, request.cooking_level or "beginner", request.language)
     history = [{"role": m.role, "content": m.content} for m in request.history]
 
     async def event_generator():
         queue: asyncio.Queue = asyncio.Queue()
 
         def on_text(text: str) -> None:
-            # Stream word-by-word for a natural feel
-            for word in text.split(" "):
-                queue.put_nowait({"type": "text_chunk", "chunk": word + " "})
+            for ch in text:
+                queue.put_nowait({"type": "text_chunk", "chunk": ch})
 
         async def run():
             try:

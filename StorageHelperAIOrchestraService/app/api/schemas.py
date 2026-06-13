@@ -13,6 +13,7 @@ class ChatRequest(BaseModel):
     owner_id: int = Field(..., description="User ID")
     cooking_level: Optional[str] = Field("beginner", description="beginner | intermediate | advanced")
     user_timezone: Optional[str] = Field(None, description="IANA timezone, e.g. Asia/Shanghai")
+    language: Optional[str] = Field(None, description="BCP-47 language tag, e.g. zh-CN, en-US")
 
 
 class ChatResponse(BaseModel):

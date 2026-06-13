@@ -26,6 +26,39 @@ logger = logging.getLogger(__name__)
 
 _SKILLS_DIR = Path(__file__).parent.parent / "skills" / "meal_planning"
 
+# Hardcoded UI strings keyed by language prefix (e.g. "zh" matches "zh-CN", "zh-TW").
+# Add more languages here as needed.
+_STRINGS: Dict[str, Dict[str, str]] = {
+    "zh": {
+        "saved": "已保存！{meal_label}（{date}）：{dish_names}。\n\n如需修改请告诉我。",
+        "save_failed": "食谱已生成，但保存失败，请稍后重试。",
+        "ask_intent": "您当前的{meal_label}计划（{date}）包含：**{names}**。\n\n请问您是想**添加新菜**，还是**修改已有菜品**？",
+        "ask_intent_no_plan": "您想对餐饮计划做什么修改？",
+        "classify_fallback": "您想吃什么？欢迎告诉我口味或食材偏好。",
+        "generate_failed": "生成步骤时出错，要重试吗？",
+        "gather_fallback": "请问是哪天哪顿饭？",
+    },
+}
+
+
+def _str(lang: Optional[str], key: str, **kwargs: str) -> str:
+    """Return a localized string, falling back to English if lang not in _STRINGS."""
+    prefix = (lang or "").split("-")[0].lower()
+    template = _STRINGS.get(prefix, {}).get(key)
+    if template:
+        return template.format(**kwargs)
+    # English fallbacks
+    _en = {
+        "saved": "All saved! {meal_label} on {date}: {dish_names}.\n\nLet me know if you'd like to make any changes.",
+        "save_failed": "Steps are ready, but saving failed. Please try again later.",
+        "ask_intent": "Your current {meal_label} plan on {date} includes: **{names}**.\n\nWould you like to **add a new dish**, or **modify one of the existing dishes**?",
+        "ask_intent_no_plan": "What would you like to change about your meal plan?",
+        "classify_fallback": "What would you like to eat? Feel free to share any preferences or ingredients.",
+        "generate_failed": "Something went wrong while generating the steps. Want to try again?",
+        "gather_fallback": "Which day and meal are you planning for?",
+    }
+    return _en[key].format(**kwargs)
+
 
 class Phase(str, Enum):
     GATHER_CONTEXT = "gather_context"
@@ -55,10 +88,11 @@ class MealPlanningAgent:
     One instance per user session. Call run() once per conversation turn.
     """
 
-    def __init__(self, gemini_api_url: str, auth_token: str, cooking_level: str = "beginner"):
+    def __init__(self, gemini_api_url: str, auth_token: str, cooking_level: str = "beginner", language: Optional[str] = None):
         self.gemini_api_url = gemini_api_url
         self.auth_token = auth_token
         self.cooking_level = cooking_level
+        self.language = language
         self._state = PlanState()
 
     # ── Public ────────────────────────────────────────────────────────────────
@@ -134,10 +168,11 @@ class MealPlanningAgent:
             user_message=augmented,
             history=history,
             gemini_api_url=self.gemini_api_url,
+            language=self.language,
         )
 
         if not result:
-            return "I didn't quite catch that — which day and meal are you planning for?"
+            return _str(self.language, "gather_fallback")
 
         ctx = result.get("context") or {}
         self._state.date = ctx.get("date")
@@ -149,7 +184,7 @@ class MealPlanningAgent:
             # run classify_dishes immediately instead of asking again.
             return await self._step_classify_dishes(user_input, history)
 
-        return result.get("question") or "Which day and meal are you planning for?"
+        return result.get("question") or _str(self.language, "gather_fallback")
 
     def _step_ask_intent(self) -> str:
         """Show the current saved plan and ask the user what they want to do with it."""
@@ -159,11 +194,8 @@ class MealPlanningAgent:
             names = ", ".join(d["name"] for d in existing)
             meal_label = (self._state.meal_type or "meal").capitalize()
             date = self._state.date or ""
-            return (
-                f"Your current {meal_label} plan on {date} includes: **{names}**.\n\n"
-                "Would you like to **add a new dish**, or **modify one of the existing dishes**?"
-            )
-        return "What would you like to change about your meal plan?"
+            return _str(self.language, "ask_intent", meal_label=meal_label, date=date, names=names)
+        return _str(self.language, "ask_intent_no_plan")
 
     async def _step_classify_dishes(
         self, user_input: str, history: List[Dict[str, str]]
@@ -186,20 +218,21 @@ class MealPlanningAgent:
             user_message=augmented,
             history=history,
             gemini_api_url=self.gemini_api_url,
+            language=self.language,
         )
 
         if not result:
-            return "What would you like to eat? Feel free to share any preferences or ingredients."
+            return _str(self.language, "classify_fallback")
 
         stage = result.get("stage")
         dishes = result.get("dishes") or []
 
         if stage == "collecting":
-            return result.get("question") or "Any flavor preferences or ingredients you have in mind?"
+            return result.get("question") or _str(self.language, "classify_fallback")
 
         if stage == "suggesting":
             self._state.dishes = dishes
-            return result.get("suggestion_text") or "Here are some suggestions — what do you think?"
+            return result.get("suggestion_text") or _str(self.language, "classify_fallback")
 
         if stage == "confirmed":
             action = result.get("action", "add")
@@ -216,7 +249,7 @@ class MealPlanningAgent:
             self._state.phase = Phase.GENERATE_STEPS
             return await self._step_generate_steps()
 
-        return "What would you like to eat? Any requirements are welcome."
+        return _str(self.language, "classify_fallback")
 
     async def _step_generate_steps(self) -> str:
         msg = json.dumps(
@@ -228,10 +261,11 @@ class MealPlanningAgent:
             user_message=msg,
             history=None,
             gemini_api_url=self.gemini_api_url,
+            language=self.language,
         )
 
         if not result or not result.get("dishes"):
-            return "Something went wrong while generating the steps. Want to try again?"
+            return _str(self.language, "generate_failed")
 
         self._state.dishes_with_steps = result["dishes"]
         self._state.phase = Phase.SAVE
@@ -276,10 +310,7 @@ class MealPlanningAgent:
             self._state.phase = Phase.DONE
             dish_names = ", ".join(d["name"] for d in dishes)
             meal_label = meal_type.capitalize() if meal_type else "Meal"
-            return (
-                f"All saved! {meal_label} on {date}: {dish_names}.\n\n"
-                "Let me know if you'd like to make any changes."
-            )
+            return _str(self.language, "saved", meal_label=meal_label, date=date, dish_names=dish_names)
 
         self._state.phase = Phase.DONE
-        return "Steps are ready, but saving failed. Please try again later."
+        return _str(self.language, "save_failed")

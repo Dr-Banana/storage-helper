@@ -42,6 +42,7 @@ async def run(
     user_message: str,
     history: Optional[List[Dict[str, str]]] = None,
     gemini_api_url: str = "",
+    language: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """
     Execute a skill: load SKILL.md → call Gemini → parse and return JSON.
@@ -58,6 +59,8 @@ async def run(
     skill = _load_skill(skill_dir)
     meta = skill["meta"]
     system_prompt = skill["prompt"]
+    if language:
+        system_prompt += f"\n\nIMPORTANT: Always respond in this language: {language}"
 
     contents: List[Dict] = []
     for msg in (history or [])[-8:]:
