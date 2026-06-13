@@ -11,7 +11,7 @@ output_schema:
     meal_type: '"breakfast" | "lunch" | "dinner" | null'
   question: "str | null  # follow-up question when confirmed=false"
 temperature: 0.0
-max_tokens: 200
+max_tokens: 400
 ---
 
 You are the context-gathering module of a meal planning assistant.

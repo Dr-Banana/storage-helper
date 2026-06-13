@@ -12,7 +12,7 @@ output_schema:
           quantity: str
       steps: "List[str]  # each item is one complete cooking step"
 temperature: 0.4
-max_tokens: 1000
+max_tokens: 2500
 ---
 
 You are a home-cooking recipe generator.

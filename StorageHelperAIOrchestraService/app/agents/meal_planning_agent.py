@@ -14,6 +14,7 @@ DB operations → schedule_commands (hardcoded HTTP calls)
 import json
 import logging
 from dataclasses import dataclass, field
+from datetime import datetime
 from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
@@ -32,6 +33,7 @@ class Phase(str, Enum):
     GENERATE_STEPS = "generate_steps"
     SAVE = "save"
     DONE = "done"
+    CLARIFY_INTENT = "clarify_intent"  # ask user: add new dish or modify existing?
 
 
 @dataclass
@@ -65,24 +67,47 @@ class MealPlanningAgent:
         self,
         user_input: str,
         history: List[Dict[str, str]],
+        user_timezone: Optional[str] = None,
         on_text: Optional[Callable[[str], None]] = None,
     ) -> str:
         """
         Process one turn of user input and return the assistant reply.
         on_text: optional streaming callback, called with each text chunk.
         """
+        # Auto-reset if the saved plan date is in the past (new day, new session)
+        try:
+            from zoneinfo import ZoneInfo
+            _tz = ZoneInfo(user_timezone) if user_timezone else None
+        except Exception:
+            _tz = None
+        _today = datetime.now(_tz).strftime("%Y-%m-%d")
+        if (
+            self._state.phase in (Phase.DONE, Phase.CLARIFY_INTENT)
+            and self._state.date
+            and self._state.date < _today
+        ):
+            logger.info(
+                "[MealPlanningAgent] saved date %s is before today %s — resetting session",
+                self._state.date,
+                _today,
+            )
+            self.reset()
+
         phase = self._state.phase
 
         if phase == Phase.GATHER_CONTEXT:
-            reply = await self._step_gather_context(user_input, history)
+            reply = await self._step_gather_context(user_input, history, user_timezone)
         elif phase == Phase.CLASSIFY_DISHES:
             reply = await self._step_classify_dishes(user_input, history)
         elif phase == Phase.GENERATE_STEPS:
             reply = await self._step_generate_steps()
         elif phase == Phase.SAVE:
             reply = await self._step_save()
+        elif phase == Phase.CLARIFY_INTENT:
+            reply = await self._step_classify_dishes(user_input, history)
         else:
-            reply = "Your plan is already saved! Let me know if you'd like to make any changes."
+            # DONE phase: show current plan and ask whether to add or modify
+            reply = self._step_ask_intent()
 
         if on_text:
             on_text(reply)
@@ -95,11 +120,18 @@ class MealPlanningAgent:
     # ── Steps ─────────────────────────────────────────────────────────────────
 
     async def _step_gather_context(
-        self, user_input: str, history: List[Dict[str, str]]
+        self, user_input: str, history: List[Dict[str, str]], user_timezone: Optional[str] = None
     ) -> str:
+        try:
+            from zoneinfo import ZoneInfo
+            tz = ZoneInfo(user_timezone) if user_timezone else None
+        except Exception:
+            tz = None
+        today = datetime.now(tz).strftime("%Y-%m-%d")
+        augmented = f"[Today's date: {today}]\n{user_input}"
         result = await skill_runner.run(
             skill_dir=_SKILLS_DIR / "gather_context",
-            user_message=user_input,
+            user_message=augmented,
             history=history,
             gemini_api_url=self.gemini_api_url,
         )
@@ -113,17 +145,45 @@ class MealPlanningAgent:
 
         if result.get("confirmed"):
             self._state.phase = Phase.CLASSIFY_DISHES
-            meal_label = self._state.meal_type.capitalize() if self._state.meal_type else "meal"
-            return f"Got it — {meal_label} on {self._state.date}! What would you like to eat? Any preferences or ingredients you want to use?"
+            # User may have already mentioned what they want in the same message —
+            # run classify_dishes immediately instead of asking again.
+            return await self._step_classify_dishes(user_input, history)
 
         return result.get("question") or "Which day and meal are you planning for?"
+
+    def _step_ask_intent(self) -> str:
+        """Show the current saved plan and ask the user what they want to do with it."""
+        existing = self._state.dishes_with_steps or self._state.dishes
+        self._state.phase = Phase.CLARIFY_INTENT
+        if existing:
+            names = ", ".join(d["name"] for d in existing)
+            meal_label = (self._state.meal_type or "meal").capitalize()
+            date = self._state.date or ""
+            return (
+                f"Your current {meal_label} plan on {date} includes: **{names}**.\n\n"
+                "Would you like to **add a new dish**, or **modify one of the existing dishes**?"
+            )
+        return "What would you like to change about your meal plan?"
 
     async def _step_classify_dishes(
         self, user_input: str, history: List[Dict[str, str]]
     ) -> str:
+        # Only inject saved-plan context when modifying an already-saved plan.
+        # During the initial planning flow (no saved_schedule_id), skip the prefix
+        # so the skill can naturally track collecting → suggesting → confirmed.
+        if self._state.saved_schedule_id:
+            existing = self._state.dishes_with_steps or self._state.dishes
+            if existing:
+                names = ", ".join(d["name"] for d in existing)
+                augmented = f"[Already in plan: {names}]\n{user_input}"
+            else:
+                augmented = user_input
+        else:
+            augmented = user_input
+
         result = await skill_runner.run(
             skill_dir=_SKILLS_DIR / "classify_dishes",
-            user_message=user_input,
+            user_message=augmented,
             history=history,
             gemini_api_url=self.gemini_api_url,
         )
@@ -142,10 +202,19 @@ class MealPlanningAgent:
             return result.get("suggestion_text") or "Here are some suggestions — what do you think?"
 
         if stage == "confirmed":
+            action = result.get("action", "add")
+            replaces = result.get("replaces")
+
+            if action == "replace" and replaces:
+                # Remove the dish being replaced from the current plan
+                existing = self._state.dishes_with_steps or self._state.dishes
+                kept = [d for d in existing if d["name"].lower() != replaces.lower()]
+                self._state.dishes_with_steps = kept
+                self._state.dishes = kept
+
             self._state.dishes = dishes
             self._state.phase = Phase.GENERATE_STEPS
-            dish_names = ", ".join(d["name"] for d in dishes)
-            return f"Perfect — {dish_names} it is! Generating cooking steps now…"
+            return await self._step_generate_steps()
 
         return "What would you like to eat? Any requirements are welcome."
 
@@ -172,7 +241,7 @@ class MealPlanningAgent:
     async def _step_save(self) -> str:
         date = self._state.date
         meal_type = self._state.meal_type
-        dishes = self._state.dishes_with_steps
+        new_dishes = self._state.dishes_with_steps
 
         existing = await schedule_commands.fetch_existing(
             date=date,
@@ -181,12 +250,20 @@ class MealPlanningAgent:
         )
 
         if existing:
+            # Merge: keep old dishes, append new ones not already present by name
+            old_dishes = schedule_commands.extract_dishes_from_record(existing)
+            existing_names = {d["name"].lower() for d in old_dishes}
+            dishes = old_dishes + [d for d in new_dishes if d["name"].lower() not in existing_names]
+            self._state.dishes_with_steps = dishes
             record = await schedule_commands.update_plan(
                 schedule_id=existing["id"],
+                date=date,
+                meal_type=meal_type,
                 dishes=dishes,
                 auth_token=self.auth_token,
             )
         else:
+            dishes = new_dishes
             record = await schedule_commands.save_plan(
                 date=date,
                 meal_type=meal_type,

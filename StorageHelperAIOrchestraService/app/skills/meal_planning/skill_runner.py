@@ -24,8 +24,14 @@ def _load_skill(skill_dir: Path) -> Dict[str, Any]:
 
     m = _FRONTMATTER_RE.match(text)
     if m:
-        import yaml
-        meta = yaml.safe_load(m.group(1)) or {}
+        for line in m.group(1).splitlines():
+            if ":" in line and not line.startswith(" "):
+                key, _, val = line.partition(":")
+                val = val.strip()
+                if val.replace(".", "", 1).isdigit():
+                    meta[key.strip()] = float(val) if "." in val else int(val)
+                else:
+                    meta[key.strip()] = val
         prompt = text[m.end():]
 
     return {"meta": meta, "prompt": prompt.strip()}
@@ -90,12 +96,22 @@ async def run(
             logger.warning("[skill:%s] empty response", skill_name)
             return None
 
+        # Try direct parse first, then fall back to extracting the first {...} block.
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError:
+            pass
+
         match = re.search(r"\{.*\}", raw, re.DOTALL)
         if not match:
             logger.warning("[skill:%s] no JSON in response: %r", skill_name, raw[:120])
             return None
 
-        return json.loads(match.group(0))
+        try:
+            return json.loads(match.group(0))
+        except json.JSONDecodeError as exc:
+            logger.warning("[skill:%s] JSON parse failed: %s | raw: %r", skill_name, exc, raw[:120])
+            return None
 
     except Exception as exc:
         logger.warning("[skill:%s] failed: %s", skill_name, exc)

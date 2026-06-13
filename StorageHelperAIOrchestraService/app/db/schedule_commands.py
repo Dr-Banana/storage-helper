@@ -5,6 +5,8 @@ Not routed through LLM decisions. The agent calls these directly
 once it has determined the correct operation.
 """
 import logging
+import uuid
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 import httpx
@@ -17,17 +19,78 @@ _MEAL_TIME_TO_HOUR = {"breakfast": 8, "lunch": 12, "dinner": 18}
 
 
 def _base_url() -> str:
-    url = settings.STORAGE_SERVICE_URL.rstrip("/")
-    for suffix in ("/internal", "/api/v1"):
-        if url.endswith(suffix):
-            url = url[: -len(suffix)]
-    return url
+    from urllib.parse import urlparse
+    p = urlparse(settings.STORAGE_SERVICE_URL)
+    return f"{p.scheme}://{p.netloc}"
 
 
 def _scheduled_time(date: str, meal_type: str) -> str:
     """'2026-06-11' + 'dinner'  →  '2026-06-11T18:00:00'"""
     hour = _MEAL_TIME_TO_HOUR.get(meal_type, 12)
     return f"{date}T{hour:02d}:00:00"
+
+
+def _build_metadata(date: str, meal_type: str, dishes: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Build metadata in the MealPlanFeature format the frontend expects."""
+    now = datetime.now(timezone.utc).isoformat()
+    dish_objects = [
+        {
+            "id": f"dish_{uuid.uuid4().hex[:8]}",
+            "name": d["name"],
+            "ingredients": [
+                {"name": ing["name"], "quantity": ing.get("quantity", "")}
+                for ing in d.get("ingredients", [])
+            ],
+            "cookingSteps": d.get("steps", []),
+        }
+        for d in dishes
+    ]
+    return {
+        "features": [
+            {
+                "type": "meal_plan",
+                "id": f"mp_{uuid.uuid4().hex[:8]}",
+                "created_at": now,
+                "updated_at": now,
+                "plans": [
+                    {
+                        "date": date,
+                        "meals": [
+                            {
+                                "id": f"meal_{uuid.uuid4().hex[:8]}",
+                                "mealTime": meal_type,
+                                "dishes": dish_objects,
+                            }
+                        ],
+                    }
+                ],
+            }
+        ]
+    }
+
+
+def extract_dishes_from_record(record: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Extract the dish list from a saved schedule record's metadata."""
+    try:
+        features = (record.get("metadata") or {}).get("features") or []
+        for feature in features:
+            if feature.get("type") == "meal_plan":
+                for plan in feature.get("plans") or []:
+                    for meal in plan.get("meals") or []:
+                        dishes = []
+                        for d in meal.get("dishes") or []:
+                            dishes.append({
+                                "name": d.get("name", ""),
+                                "ingredients": [
+                                    {"name": i["name"], "quantity": i.get("quantity", "")}
+                                    for i in d.get("ingredients") or []
+                                ],
+                                "steps": d.get("cookingSteps") or [],
+                            })
+                        return dishes
+    except Exception:
+        pass
+    return []
 
 
 async def save_plan(
@@ -44,17 +107,14 @@ async def save_plan(
     """
     payload = {
         "title": f"{meal_type.capitalize()} — {', '.join(d['name'] for d in dishes)}",
-        "event_type": "meal",
+        "event_type": "meal_plan",
         "scheduled_time": _scheduled_time(date, meal_type),
-        "metadata": {
-            "meal_type": meal_type,
-            "dishes": dishes,
-        },
+        "metadata": _build_metadata(date, meal_type, dishes),
     }
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
             resp = await client.post(
-                f"{_base_url()}/internal/schedule",
+                f"{_base_url()}/api/schedule",
                 headers={
                     "Content-Type": "application/json",
                     "Authorization": f"Bearer {auth_token}",
@@ -72,18 +132,21 @@ async def save_plan(
 
 async def update_plan(
     schedule_id: int,
+    date: str,
+    meal_type: str,
     dishes: List[Dict[str, Any]],
     auth_token: str,
 ) -> Optional[Dict[str, Any]]:
     """Update dishes and steps on an existing schedule record."""
     payload = {
-        "metadata": {"dishes": dishes},
-        "title": f"Updated — {', '.join(d['name'] for d in dishes)}",
+        "title": f"{meal_type.capitalize()} — {', '.join(d['name'] for d in dishes)}",
+        "event_type": "meal_plan",
+        "metadata": _build_metadata(date, meal_type, dishes),
     }
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
             resp = await client.put(
-                f"{_base_url()}/internal/schedule/{schedule_id}",
+                f"{_base_url()}/api/schedule/{schedule_id}",
                 headers={
                     "Content-Type": "application/json",
                     "Authorization": f"Bearer {auth_token}",
@@ -105,7 +168,7 @@ async def delete_plan(
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
             resp = await client.delete(
-                f"{_base_url()}/internal/schedule/{schedule_id}",
+                f"{_base_url()}/api/schedule/{schedule_id}",
                 headers={"Authorization": f"Bearer {auth_token}"},
             )
             resp.raise_for_status()
@@ -130,7 +193,7 @@ async def fetch_existing(
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
             resp = await client.get(
-                f"{_base_url()}/internal/schedule/range",
+                f"{_base_url()}/api/schedule/range",
                 headers={"Authorization": f"Bearer {auth_token}"},
                 params={"start_time": start, "end_time": end},
             )
@@ -138,9 +201,17 @@ async def fetch_existing(
             records = resp.json()
 
         for r in records:
-            meta = r.get("metadata") or {}
-            if meta.get("meal_type") == meal_type:
-                return r
+            # meal_type is stored inside features[].plans[].meals[].mealTime
+            try:
+                features = (r.get("metadata") or {}).get("features") or []
+                for feat in features:
+                    if feat.get("type") == "meal_plan":
+                        for plan in feat.get("plans") or []:
+                            for meal in plan.get("meals") or []:
+                                if meal.get("mealTime") == meal_type:
+                                    return r
+            except Exception:
+                pass
         return None
     except Exception as exc:
         logger.error("[schedule_commands] fetch_existing failed: %s", exc)
