@@ -24,10 +24,17 @@ def _base_url() -> str:
     return f"{p.scheme}://{p.netloc}"
 
 
-def _scheduled_time(date: str, meal_type: str) -> str:
-    """'2026-06-11' + 'dinner'  →  '2026-06-11T18:00:00'"""
+def _scheduled_time(date: str, meal_type: str, user_timezone: Optional[str] = None) -> str:
+    """'2026-06-11' + 'dinner' + 'Asia/Shanghai' → '2026-06-11T18:00:00+08:00'"""
+    from zoneinfo import ZoneInfo
     hour = _MEAL_TIME_TO_HOUR.get(meal_type, 12)
-    return f"{date}T{hour:02d}:00:00"
+    try:
+        tz = ZoneInfo(user_timezone) if user_timezone else timezone.utc
+    except Exception:
+        tz = timezone.utc
+    from datetime import datetime as _dt
+    local_dt = _dt(int(date[:4]), int(date[5:7]), int(date[8:10]), hour, 0, 0, tzinfo=tz)
+    return local_dt.isoformat()
 
 
 def _build_metadata(date: str, meal_type: str, dishes: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -98,6 +105,7 @@ async def save_plan(
     meal_type: str,
     dishes: List[Dict[str, Any]],
     auth_token: str,
+    user_timezone: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """
     Create a schedule record with the dish list and cooking steps.
@@ -108,7 +116,7 @@ async def save_plan(
     payload = {
         "title": f"{meal_type.capitalize()} — {', '.join(d['name'] for d in dishes)}",
         "event_type": "meal_plan",
-        "scheduled_time": _scheduled_time(date, meal_type),
+        "scheduled_time": _scheduled_time(date, meal_type, user_timezone),
         "metadata": _build_metadata(date, meal_type, dishes),
     }
     try:
@@ -123,7 +131,7 @@ async def save_plan(
             )
             resp.raise_for_status()
             result = resp.json()
-            logger.info("[schedule_commands] saved plan id=%s", result.get("id"))
+            logger.info("[schedule_commands] saved plan id=%s scheduled_time=%s", result.get("id"), payload.get("scheduled_time"))
             return result
     except Exception as exc:
         logger.error("[schedule_commands] save_plan failed: %s", exc)
@@ -136,6 +144,7 @@ async def update_plan(
     meal_type: str,
     dishes: List[Dict[str, Any]],
     auth_token: str,
+    user_timezone: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """Update dishes and steps on an existing schedule record."""
     payload = {
@@ -179,6 +188,57 @@ async def delete_plan(
         return False
 
 
+async def fetch_upcoming(
+    auth_token: str,
+    from_date: str,
+    days: int = 7,
+) -> List[Dict[str, Any]]:
+    """
+    Fetch all meal_plan records from from_date for the next `days` days.
+    Returns a list of (date, meal_type, dish_names) summaries.
+    """
+    from datetime import date as _date, timedelta
+    start = f"{from_date}T00:00:00"
+    end_d = (_date.fromisoformat(from_date) + timedelta(days=days)).isoformat()
+    end = f"{end_d}T23:59:59"
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(
+                f"{_base_url()}/api/schedule/range",
+                headers={"Authorization": f"Bearer {auth_token}"},
+                params={"start_time": start, "end_time": end},
+            )
+            resp.raise_for_status()
+            records = resp.json()
+
+        summaries = []
+        for r in records:
+            try:
+                features = (r.get("metadata") or {}).get("features") or []
+                for feat in features:
+                    if feat.get("type") != "meal_plan":
+                        continue
+                    for plan in feat.get("plans") or []:
+                        plan_date = plan.get("date", "")
+                        for meal in plan.get("meals") or []:
+                            meal_type = meal.get("mealTime", "")
+                            dish_names = [d["name"] for d in meal.get("dishes") or []]
+                            if dish_names:
+                                summaries.append({
+                                    "date": plan_date,
+                                    "meal_type": meal_type,
+                                    "dishes": dish_names,
+                                })
+            except Exception:
+                pass
+        summaries.sort(key=lambda x: (x["date"], x["meal_type"]))
+        logger.info("[fetch_upcoming] from=%s days=%s → %d record(s)", from_date, days, len(summaries))
+        return summaries
+    except Exception as exc:
+        logger.error("[schedule_commands] fetch_upcoming failed: %s", exc)
+        return []
+
+
 async def fetch_existing(
     date: str,
     meal_type: str,
@@ -200,6 +260,11 @@ async def fetch_existing(
             resp.raise_for_status()
             records = resp.json()
 
+        logger.info(
+            "[fetch_existing] GET %s/api/schedule/range params=%s → %d record(s) raw=%s",
+            _base_url(), {"start_time": start, "end_time": end}, len(records),
+            str(records)[:300],
+        )
         for r in records:
             # meal_type is stored inside features[].plans[].meals[].mealTime
             try:
@@ -207,11 +272,15 @@ async def fetch_existing(
                 for feat in features:
                     if feat.get("type") == "meal_plan":
                         for plan in feat.get("plans") or []:
+                            if plan.get("date") != date:
+                                continue
                             for meal in plan.get("meals") or []:
                                 if meal.get("mealTime") == meal_type:
+                                    logger.info("[fetch_existing] matched record id=%s", r.get("id"))
                                     return r
             except Exception:
                 pass
+        logger.info("[fetch_existing] no match found for date=%s meal_type=%s", date, meal_type)
         return None
     except Exception as exc:
         logger.error("[schedule_commands] fetch_existing failed: %s", exc)

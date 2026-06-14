@@ -100,7 +100,7 @@ class ScheduleService:
         meal_plan_schedules = db.query(Schedule).filter(
             and_(
                 Schedule.user_id == user_id,
-                Schedule.event_type.in_(['meal_plan_draft', 'shopping_list']),
+                Schedule.event_type.in_(['meal_plan_draft', 'meal_plan', 'shopping_list']),
                 Schedule.extra_data.isnot(None)
             )
         ).all()

@@ -1,99 +1,157 @@
 """
-MealPlanningAgent — single entry point, state-machine-driven meal planning conversation.
+MealPlanningAgent — Python openclaw-style agent loop.
 
-Flow:
-  GATHER_CONTEXT  → confirm date + meal type
-  CLASSIFY_DISHES → understand what to eat, propose options, wait for confirmation
-  GENERATE_STEPS  → generate step-by-step cooking instructions for each dish
-  SAVE            → write to DB (create or overwrite existing record)
-  DONE            → conversation complete
+Each turn:
+  1. Build Gemini context from frontend history + user message
+  2. Loop: call Gemini → if tool call, execute → repeat until text response
+  3. Return final text
 
-LLM judgment  → skill_runner (reads SKILL.md)
-DB operations → schedule_commands (hardcoded HTTP calls)
+Tools (wrapping schedule_commands):
+  fetch_meal_plan   — read plans from DB
+  save_meal_plan    — create or update a plan
+  delete_meal_plan  — remove a plan
+
+The agent is stateless: no session state is kept between turns.
+All context comes from the frontend history passed on each request.
 """
 import json
 import logging
-from dataclasses import dataclass, field
 from datetime import datetime
-from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
+import httpx
+
+from app.core.config import settings
 from app.db import schedule_commands
-from app.skills.meal_planning import skill_runner
 
 logger = logging.getLogger(__name__)
 
-_SKILLS_DIR = Path(__file__).parent.parent / "skills" / "meal_planning"
+_SKILL_MD = (Path(__file__).parent.parent / "skills" / "meal_planning" / "SKILL.md").read_text(encoding="utf-8")
 
-# Hardcoded UI strings keyed by language prefix (e.g. "zh" matches "zh-CN", "zh-TW").
-# Add more languages here as needed.
-_STRINGS: Dict[str, Dict[str, str]] = {
-    "zh": {
-        "saved": "已保存！{meal_label}（{date}）：{dish_names}。\n\n如需修改请告诉我。",
-        "save_failed": "食谱已生成，但保存失败，请稍后重试。",
-        "ask_intent": "您当前的{meal_label}计划（{date}）包含：**{names}**。\n\n请问您是想**添加新菜**，还是**修改已有菜品**？",
-        "ask_intent_no_plan": "您想对餐饮计划做什么修改？",
-        "classify_fallback": "您想吃什么？欢迎告诉我口味或食材偏好。",
-        "generate_failed": "生成步骤时出错，要重试吗？",
-        "gather_fallback": "请问是哪天哪顿饭？",
-    },
-}
+# Strip YAML frontmatter, keep only the prompt body
+def _load_system_prompt() -> str:
+    lines = _SKILL_MD.splitlines()
+    if lines[0].strip() == "---":
+        try:
+            end = lines.index("---", 1)
+            return "\n".join(lines[end + 1:]).strip()
+        except ValueError:
+            pass
+    return _SKILL_MD.strip()
 
+_SYSTEM_PROMPT = _load_system_prompt()
 
-def _str(lang: Optional[str], key: str, **kwargs: str) -> str:
-    """Return a localized string, falling back to English if lang not in _STRINGS."""
-    prefix = (lang or "").split("-")[0].lower()
-    template = _STRINGS.get(prefix, {}).get(key)
-    if template:
-        return template.format(**kwargs)
-    # English fallbacks
-    _en = {
-        "saved": "All saved! {meal_label} on {date}: {dish_names}.\n\nLet me know if you'd like to make any changes.",
-        "save_failed": "Steps are ready, but saving failed. Please try again later.",
-        "ask_intent": "Your current {meal_label} plan on {date} includes: **{names}**.\n\nWould you like to **add a new dish**, or **modify one of the existing dishes**?",
-        "ask_intent_no_plan": "What would you like to change about your meal plan?",
-        "classify_fallback": "What would you like to eat? Feel free to share any preferences or ingredients.",
-        "generate_failed": "Something went wrong while generating the steps. Want to try again?",
-        "gather_fallback": "Which day and meal are you planning for?",
+# ── Tool declarations ──────────────────────────────────────────────────────────
+
+_TOOLS = [
+    {
+        "functionDeclarations": [
+            {
+                "name": "fetch_meal_plan",
+                "description": (
+                    "Look up what is planned for a given date. "
+                    "Call this before modifying a plan to see what dishes are already there. "
+                    "Omit meal_type to get all meals for the day."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "date": {
+                            "type": "string",
+                            "description": "Date in YYYY-MM-DD format",
+                        },
+                        "meal_type": {
+                            "type": "string",
+                            "enum": ["breakfast", "lunch", "dinner"],
+                            "description": "Specific meal type. Omit to get all meals for the day.",
+                        },
+                    },
+                    "required": ["date"],
+                },
+            },
+            {
+                "name": "save_meal_plan",
+                "description": (
+                    "Save or replace a meal plan. "
+                    "Provide the COMPLETE final dish list — including dishes to keep from the existing plan. "
+                    "Every dish must include full ingredients and cooking steps."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "date": {"type": "string", "description": "Date in YYYY-MM-DD format"},
+                        "meal_type": {
+                            "type": "string",
+                            "enum": ["breakfast", "lunch", "dinner"],
+                        },
+                        "dishes": {
+                            "type": "array",
+                            "description": (
+                                "Complete list of dishes for this meal. "
+                                "For dishes being kept unchanged, provide only {\"name\": \"...\"}. "
+                                "For new or modified dishes, provide full ingredients and steps."
+                            ),
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "name": {"type": "string"},
+                                    "ingredients": {
+                                        "type": "array",
+                                        "items": {
+                                            "type": "object",
+                                            "properties": {
+                                                "name": {"type": "string"},
+                                                "quantity": {"type": "string"},
+                                            },
+                                            "required": ["name", "quantity"],
+                                        },
+                                    },
+                                    "steps": {
+                                        "type": "array",
+                                        "items": {"type": "string"},
+                                        "description": "Step-by-step cooking instructions",
+                                    },
+                                },
+                                "required": ["name"],
+                            },
+                        },
+                    },
+                    "required": ["date", "meal_type", "dishes"],
+                },
+            },
+            {
+                "name": "delete_meal_plan",
+                "description": "Delete the entire meal plan for a specific date and meal type.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "date": {"type": "string", "description": "Date in YYYY-MM-DD format"},
+                        "meal_type": {
+                            "type": "string",
+                            "enum": ["breakfast", "lunch", "dinner"],
+                        },
+                    },
+                    "required": ["date", "meal_type"],
+                },
+            },
+        ]
     }
-    return _en[key].format(**kwargs)
-
-
-class Phase(str, Enum):
-    GATHER_CONTEXT = "gather_context"
-    CLASSIFY_DISHES = "classify_dishes"
-    GENERATE_STEPS = "generate_steps"
-    SAVE = "save"
-    DONE = "done"
-    CLARIFY_INTENT = "clarify_intent"  # ask user: add new dish or modify existing?
-
-
-@dataclass
-class PlanState:
-    phase: Phase = Phase.GATHER_CONTEXT
-    # Results from gather_context
-    date: Optional[str] = None
-    meal_type: Optional[str] = None
-    # Results from classify_dishes
-    dishes: List[Dict[str, Any]] = field(default_factory=list)
-    # Results from generate_cooking_steps (dishes with ingredients + steps)
-    dishes_with_steps: List[Dict[str, Any]] = field(default_factory=list)
-    # DB schedule_id once saved (used for update / delete)
-    saved_schedule_id: Optional[int] = None
+]
 
 
 class MealPlanningAgent:
-    """
-    One instance per user session. Call run() once per conversation turn.
-    """
-
-    def __init__(self, gemini_api_url: str, auth_token: str, cooking_level: str = "beginner", language: Optional[str] = None):
-        self.gemini_api_url = gemini_api_url
+    def __init__(
+        self,
+        auth_token: str,
+        cooking_level: str = "beginner",
+        language: Optional[str] = None,
+        user_timezone: Optional[str] = None,
+    ):
         self.auth_token = auth_token
         self.cooking_level = cooking_level
         self.language = language
-        self._state = PlanState()
+        self.user_timezone = user_timezone
 
     # ── Public ────────────────────────────────────────────────────────────────
 
@@ -104,213 +162,197 @@ class MealPlanningAgent:
         user_timezone: Optional[str] = None,
         on_text: Optional[Callable[[str], None]] = None,
     ) -> str:
-        """
-        Process one turn of user input and return the assistant reply.
-        on_text: optional streaming callback, called with each text chunk.
-        """
-        # Auto-reset if the saved plan date is in the past (new day, new session)
         try:
             from zoneinfo import ZoneInfo
             _tz = ZoneInfo(user_timezone) if user_timezone else None
         except Exception:
             _tz = None
-        _today = datetime.now(_tz).strftime("%Y-%m-%d")
-        if (
-            self._state.phase in (Phase.DONE, Phase.CLARIFY_INTENT)
-            and self._state.date
-            and self._state.date < _today
-        ):
-            logger.info(
-                "[MealPlanningAgent] saved date %s is before today %s — resetting session",
-                self._state.date,
-                _today,
-            )
-            self.reset()
+        today = datetime.now(_tz).strftime("%Y-%m-%d")
 
-        phase = self._state.phase
+        system_prompt = (
+            f"{_SYSTEM_PROMPT}\n\n"
+            f"Cooking level for this user: {self.cooking_level}."
+        )
 
-        if phase == Phase.GATHER_CONTEXT:
-            reply = await self._step_gather_context(user_input, history, user_timezone)
-        elif phase == Phase.CLASSIFY_DISHES:
-            reply = await self._step_classify_dishes(user_input, history)
-        elif phase == Phase.GENERATE_STEPS:
-            reply = await self._step_generate_steps()
-        elif phase == Phase.SAVE:
-            reply = await self._step_save()
-        elif phase == Phase.CLARIFY_INTENT:
-            reply = await self._step_classify_dishes(user_input, history)
-        else:
-            # DONE phase: show current plan and ask whether to add or modify
-            reply = self._step_ask_intent()
+        # Build Gemini contents from frontend history
+        contents = self._build_contents(history, user_input, today)
 
-        if on_text:
-            on_text(reply)
-        return reply
+        # Agent loop — max 10 rounds to prevent infinite loops
+        for _ in range(10):
+            response = await self._call_gemini(contents, system_prompt)
+            candidate = (response.get("candidates") or [{}])[0]
+            parts = (candidate.get("content") or {}).get("parts") or []
+
+            finish_reason = candidate.get("finishReason", "")
+            tool_calls = [p["functionCall"] for p in parts if "functionCall" in p]
+
+            if not tool_calls:
+                text = "".join(p.get("text", "") for p in parts if "text" in p).strip()
+                logger.info("[agent] final response len=%d finishReason=%s", len(text), finish_reason)
+                if not text:
+                    logger.warning("[agent] empty text, parts=%s", [list(p.keys()) for p in parts])
+                    text = "抱歉，出了点问题，请重试。" if (self.language or "").startswith("zh") else "Sorry, something went wrong. Please try again."
+                if on_text:
+                    on_text(text)
+                return text
+
+            # Add model turn (with tool calls) to context
+            contents.append({"role": "model", "parts": parts})
+            logger.info("[agent] tool calls: %s", [tc["name"] for tc in tool_calls])
+
+            # Execute tools and collect results
+            result_parts = []
+            for tc in tool_calls:
+                result = await self._execute_tool(tc["name"], tc.get("args") or {})
+                logger.info("[agent] tool=%s result=%s", tc["name"], str(result)[:200])
+                result_parts.append({
+                    "functionResponse": {
+                        "name": tc["name"],
+                        "response": result,
+                    }
+                })
+
+            contents.append({"role": "user", "parts": result_parts})
+
+        logger.error("[agent] exceeded max tool call rounds")
+        return "出了点问题，请重试。" if (self.language or "").startswith("zh") else "Something went wrong. Please try again."
 
     def reset(self) -> None:
-        """Reset state to start a new planning session."""
-        self._state = PlanState()
+        """No-op: agent is stateless."""
 
-    # ── Steps ─────────────────────────────────────────────────────────────────
+    # ── Tool execution ─────────────────────────────────────────────────────────
 
-    async def _step_gather_context(
-        self, user_input: str, history: List[Dict[str, str]], user_timezone: Optional[str] = None
-    ) -> str:
+    async def _execute_tool(self, name: str, args: Dict[str, Any]) -> Dict[str, Any]:
         try:
-            from zoneinfo import ZoneInfo
-            tz = ZoneInfo(user_timezone) if user_timezone else None
-        except Exception:
-            tz = None
-        today = datetime.now(tz).strftime("%Y-%m-%d")
-        augmented = f"[Today's date: {today}]\n{user_input}"
-        result = await skill_runner.run(
-            skill_dir=_SKILLS_DIR / "gather_context",
-            user_message=augmented,
-            history=history,
-            gemini_api_url=self.gemini_api_url,
-            language=self.language,
-        )
+            if name == "fetch_meal_plan":
+                return await self._tool_fetch(args)
+            if name == "save_meal_plan":
+                return await self._tool_save(args)
+            if name == "delete_meal_plan":
+                return await self._tool_delete(args)
+            return {"error": f"Unknown tool: {name}"}
+        except Exception as exc:
+            logger.error("[tool:%s] failed: %s", name, exc)
+            return {"error": str(exc)}
 
-        if not result:
-            return _str(self.language, "gather_fallback")
+    async def _tool_fetch(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        date: str = args["date"]
+        meal_type: Optional[str] = args.get("meal_type")
 
-        ctx = result.get("context") or {}
-        self._state.date = ctx.get("date")
-        self._state.meal_type = ctx.get("meal_type")
+        if meal_type:
+            record = await schedule_commands.fetch_existing(date, meal_type, self.auth_token)
+            if not record:
+                return {"date": date, "meal_type": meal_type, "found": False}
+            dishes = schedule_commands.extract_dishes_from_record(record)
+            return {"date": date, "meal_type": meal_type, "found": True, "dishes": dishes}
 
-        if result.get("confirmed"):
-            self._state.phase = Phase.CLASSIFY_DISHES
-            # User may have already mentioned what they want in the same message —
-            # run classify_dishes immediately instead of asking again.
-            return await self._step_classify_dishes(user_input, history)
-
-        return result.get("question") or _str(self.language, "gather_fallback")
-
-    def _step_ask_intent(self) -> str:
-        """Show the current saved plan and ask the user what they want to do with it."""
-        existing = self._state.dishes_with_steps or self._state.dishes
-        self._state.phase = Phase.CLARIFY_INTENT
-        if existing:
-            names = ", ".join(d["name"] for d in existing)
-            meal_label = (self._state.meal_type or "meal").capitalize()
-            date = self._state.date or ""
-            return _str(self.language, "ask_intent", meal_label=meal_label, date=date, names=names)
-        return _str(self.language, "ask_intent_no_plan")
-
-    async def _step_classify_dishes(
-        self, user_input: str, history: List[Dict[str, str]]
-    ) -> str:
-        # Only inject saved-plan context when modifying an already-saved plan.
-        # During the initial planning flow (no saved_schedule_id), skip the prefix
-        # so the skill can naturally track collecting → suggesting → confirmed.
-        if self._state.saved_schedule_id:
-            existing = self._state.dishes_with_steps or self._state.dishes
-            if existing:
-                names = ", ".join(d["name"] for d in existing)
-                augmented = f"[Already in plan: {names}]\n{user_input}"
-            else:
-                augmented = user_input
-        else:
-            augmented = user_input
-
-        result = await skill_runner.run(
-            skill_dir=_SKILLS_DIR / "classify_dishes",
-            user_message=augmented,
-            history=history,
-            gemini_api_url=self.gemini_api_url,
-            language=self.language,
-        )
-
-        if not result:
-            return _str(self.language, "classify_fallback")
-
-        stage = result.get("stage")
-        dishes = result.get("dishes") or []
-
-        if stage == "collecting":
-            return result.get("question") or _str(self.language, "classify_fallback")
-
-        if stage == "suggesting":
-            self._state.dishes = dishes
-            return result.get("suggestion_text") or _str(self.language, "classify_fallback")
-
-        if stage == "confirmed":
-            action = result.get("action", "add")
-            replaces = result.get("replaces")
-
-            if action == "replace" and replaces:
-                # Remove the dish being replaced from the current plan
-                existing = self._state.dishes_with_steps or self._state.dishes
-                kept = [d for d in existing if d["name"].lower() != replaces.lower()]
-                self._state.dishes_with_steps = kept
-                self._state.dishes = kept
-
-            self._state.dishes = dishes
-            self._state.phase = Phase.GENERATE_STEPS
-            return await self._step_generate_steps()
-
-        return _str(self.language, "classify_fallback")
-
-    async def _step_generate_steps(self) -> str:
-        msg = json.dumps(
-            {"dishes": self._state.dishes, "cooking_level": self.cooking_level},
-            ensure_ascii=False,
-        )
-        result = await skill_runner.run(
-            skill_dir=_SKILLS_DIR / "generate_cooking_steps",
-            user_message=msg,
-            history=None,
-            gemini_api_url=self.gemini_api_url,
-            language=self.language,
-        )
-
-        if not result or not result.get("dishes"):
-            return _str(self.language, "generate_failed")
-
-        self._state.dishes_with_steps = result["dishes"]
-        self._state.phase = Phase.SAVE
-
-        return await self._step_save()
-
-    async def _step_save(self) -> str:
-        date = self._state.date
-        meal_type = self._state.meal_type
-        new_dishes = self._state.dishes_with_steps
-
-        existing = await schedule_commands.fetch_existing(
-            date=date,
-            meal_type=meal_type,
+        # No meal_type — return all meals for the day
+        summaries = await schedule_commands.fetch_upcoming(
             auth_token=self.auth_token,
+            from_date=date,
+            days=1,
         )
+        day_meals = [s for s in summaries if s["date"] == date]
+        if not day_meals:
+            return {"date": date, "found": False}
+        return {"date": date, "found": True, "meals": day_meals}
+
+    async def _tool_save(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        date: str = args["date"]
+        meal_type: str = args["meal_type"]
+        dishes: List[Dict[str, Any]] = args.get("dishes") or []
+
+        existing = await schedule_commands.fetch_existing(date, meal_type, self.auth_token)
+
+        # Enrich kept dishes: if the model provides only {"name": "..."} (no steps),
+        # fill in the full recipe data from the existing DB record.
+        if existing:
+            stored = {d["name"]: d for d in schedule_commands.extract_dishes_from_record(existing)}
+            dishes = [stored.get(d["name"], d) if not d.get("steps") else d for d in dishes]
 
         if existing:
-            # Merge: keep old dishes, append new ones not already present by name
-            old_dishes = schedule_commands.extract_dishes_from_record(existing)
-            existing_names = {d["name"].lower() for d in old_dishes}
-            dishes = old_dishes + [d for d in new_dishes if d["name"].lower() not in existing_names]
-            self._state.dishes_with_steps = dishes
             record = await schedule_commands.update_plan(
                 schedule_id=existing["id"],
                 date=date,
                 meal_type=meal_type,
                 dishes=dishes,
                 auth_token=self.auth_token,
+                user_timezone=self.user_timezone,
             )
         else:
-            dishes = new_dishes
             record = await schedule_commands.save_plan(
                 date=date,
                 meal_type=meal_type,
                 dishes=dishes,
                 auth_token=self.auth_token,
+                user_timezone=self.user_timezone,
             )
 
         if record:
-            self._state.saved_schedule_id = record.get("id")
-            self._state.phase = Phase.DONE
-            dish_names = ", ".join(d["name"] for d in dishes)
-            meal_label = meal_type.capitalize() if meal_type else "Meal"
-            return _str(self.language, "saved", meal_label=meal_label, date=date, dish_names=dish_names)
+            # Check post-enrichment: dishes still missing steps need a Phase 2 save
+            pending = [d["name"] for d in dishes if not d.get("steps")]
+            result: Dict[str, Any] = {
+                "success": True,
+                "schedule_id": record.get("id"),
+                "saved": {"date": date, "meal_type": meal_type, "dish_count": len(dishes)},
+            }
+            if pending:
+                result["action_required"] = (
+                    f"INCOMPLETE — recipes not saved yet for: {', '.join(pending)}. "
+                    "Do NOT reply to the user yet. "
+                    "Generate full ingredients and steps for these dishes, "
+                    "then call save_meal_plan again with the complete list "
+                    "(kept dishes as {\"name\": \"...\"}, new dishes with full ingredients and steps)."
+                )
+            return result
+        return {"success": False, "error": "Save failed"}
 
-        self._state.phase = Phase.DONE
-        return _str(self.language, "save_failed")
+    async def _tool_delete(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        date: str = args["date"]
+        meal_type: str = args["meal_type"]
+
+        existing = await schedule_commands.fetch_existing(date, meal_type, self.auth_token)
+        if not existing:
+            return {"success": False, "error": "No plan found to delete"}
+
+        ok = await schedule_commands.delete_plan(existing["id"], self.auth_token)
+        return {"success": ok, "deleted": {"date": date, "meal_type": meal_type}}
+
+    # ── Gemini call ────────────────────────────────────────────────────────────
+
+    async def _call_gemini(self, contents: List[Dict], system_prompt: str) -> Dict[str, Any]:
+        url = (
+            f"https://generativelanguage.googleapis.com/v1beta/models/"
+            f"{settings.GEMINI_LLM_MODEL}:generateContent?key={settings.GEMINI_LLM_API_KEY}"
+        )
+        payload = {
+            "systemInstruction": {"parts": [{"text": system_prompt}]},
+            "contents": contents,
+            "tools": _TOOLS,
+            "generationConfig": {
+                "temperature": 0.3,
+                "maxOutputTokens": 4096,
+            },
+        }
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            resp = await client.post(url, json=payload)
+            resp.raise_for_status()
+            return resp.json()
+
+    # ── History conversion ─────────────────────────────────────────────────────
+
+    def _build_contents(
+        self,
+        history: List[Dict[str, str]],
+        user_input: str,
+        today: str,
+    ) -> List[Dict]:
+        contents = []
+        for msg in history[-10:]:
+            role = "user" if msg.get("role") == "user" else "model"
+            contents.append({"role": role, "parts": [{"text": msg.get("content", "")}]})
+        contents.append({
+            "role": "user",
+            "parts": [{"text": f"[Today: {today}]\n[Level: {self.cooking_level}]\n{user_input}"}],
+        })
+        return contents

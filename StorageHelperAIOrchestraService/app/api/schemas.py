@@ -18,4 +18,3 @@ class ChatRequest(BaseModel):
 
 class ChatResponse(BaseModel):
     response: str = Field(..., description="Assistant reply")
-    phase: str = Field(..., description="Current agent phase")

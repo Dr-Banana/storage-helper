@@ -18,19 +18,19 @@ api_router = APIRouter()
 _agents: Dict[int, MealPlanningAgent] = {}
 
 
-def _get_agent(owner_id: int, auth_token: str, cooking_level: str, language: Optional[str] = None) -> MealPlanningAgent:
+def _get_agent(owner_id: int, auth_token: str, cooking_level: str, language: Optional[str] = None, user_timezone: Optional[str] = None) -> MealPlanningAgent:
     if owner_id not in _agents:
         _agents[owner_id] = MealPlanningAgent(
-            gemini_api_url=(
-                f"https://generativelanguage.googleapis.com/v1beta/models/"
-                f"{settings.GEMINI_LLM_MODEL}:generateContent?key={settings.GEMINI_LLM_API_KEY}"
-            ),
             auth_token=auth_token,
             cooking_level=cooking_level,
             language=language,
+            user_timezone=user_timezone,
         )
     else:
+        # Refresh per-request fields in case JWT rotated or prefs changed
+        _agents[owner_id].auth_token = auth_token
         _agents[owner_id].language = language
+        _agents[owner_id].user_timezone = user_timezone
     return _agents[owner_id]
 
 
@@ -50,7 +50,7 @@ async def chat(
 ):
     """Chat with MealPlanningAgent."""
     auth_token = _extract_token(authorization)
-    agent = _get_agent(request.owner_id, auth_token, request.cooking_level or "beginner", request.language)
+    agent = _get_agent(request.owner_id, auth_token, request.cooking_level or "beginner", request.language, request.user_timezone)
 
     history = [{"role": m.role, "content": m.content} for m in request.history]
     reply = await agent.run(
@@ -58,7 +58,7 @@ async def chat(
         history=history,
         user_timezone=request.user_timezone,
     )
-    return ChatResponse(response=reply, phase=agent._state.phase.value)
+    return ChatResponse(response=reply)
 
 
 @api_router.post("/chat/stream")
@@ -75,7 +75,7 @@ async def chat_stream(
       {"type": "error",      "message": "<text>"}
     """
     auth_token = _extract_token(authorization)
-    agent = _get_agent(request.owner_id, auth_token, request.cooking_level or "beginner", request.language)
+    agent = _get_agent(request.owner_id, auth_token, request.cooking_level or "beginner", request.language, request.user_timezone)
     history = [{"role": m.role, "content": m.content} for m in request.history]
 
     async def event_generator():
@@ -95,7 +95,7 @@ async def chat_stream(
                 )
                 await queue.put({
                     "type": "result",
-                    "data": {"response": reply, "phase": agent._state.phase.value},
+                    "data": {"response": reply},
                 })
             except Exception as exc:
                 logger.error("chat_stream failed: %s", exc, exc_info=True)
