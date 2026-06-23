@@ -73,6 +73,21 @@ const Layout = () => {
     };
   }, []);
 
+  // Whenever the drawer transitions to open, silently re-fetch the schedule from
+  // the server so the displayed data is always fresh (e.g. after an AI update).
+  // The drawer opens immediately with the cached snapshot; this replaces it with
+  // the latest DB state within a single network round-trip.
+  useEffect(() => {
+    if (!isMealDrawerOpen) return;
+    const id = mealDrawerDataRef.current?.schedule.id;
+    if (!id) return;
+    ScheduleService.getSchedule(id)
+      .then(fresh => {
+        setMealDrawerData(prev => prev ? { ...prev, schedule: fresh } : prev);
+      })
+      .catch(() => { /* non-critical — drawer keeps showing cached data */ });
+  }, [isMealDrawerOpen]);
+
   // When a schedule is updated (e.g. AI adds a meal plan or cooking steps),
   // refresh the drawer's schedule snapshot so it always shows the latest data.
   // If the drawer is not open, we still notify the SchedulePage so its calendar

@@ -929,6 +929,13 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ isOpen, onClose }) => {
         // Clear plan_ahead context when switching to unrelated actions
         setActiveContext(null)
       }
+
+      // The new Gemini-based MealPlanningAgent returns only {response: text} with
+      // no action/action_data, so the branches above never fire schedule-updated.
+      // Fire it here as a catch-all so HomePage and SchedulePage stay in sync.
+      if (!response.action) {
+        window.dispatchEvent(new CustomEvent('schedule-updated', {}))
+      }
     } catch (error) {
       setMessages(prev => [...prev, { role: 'model', content: 'I encountered a slight hiccup. Let me try again!' }])
     } finally {
