@@ -186,6 +186,18 @@ class MealPlanningAgent:
             finish_reason = candidate.get("finishReason", "")
             tool_calls = [p["functionCall"] for p in parts if "functionCall" in p]
 
+            if finish_reason == "MALFORMED_FUNCTION_CALL":
+                logger.warning("[agent] MALFORMED_FUNCTION_CALL — retrying with brevity hint")
+                contents.append({
+                    "role": "user",
+                    "parts": [{"text": (
+                        "Your last function call was malformed (JSON truncated). "
+                        "Retry the same call but keep ingredient quantities and cooking steps shorter. "
+                        "Each step must be one sentence."
+                    )}],
+                })
+                continue
+
             if not tool_calls:
                 text = "".join(p.get("text", "") for p in parts if "text" in p).strip()
                 logger.info("[agent] final response len=%d finishReason=%s", len(text), finish_reason)
@@ -331,7 +343,7 @@ class MealPlanningAgent:
             "tools": _TOOLS,
             "generationConfig": {
                 "temperature": 0.3,
-                "maxOutputTokens": 4096,
+                "maxOutputTokens": 8192,
             },
         }
         async with httpx.AsyncClient(timeout=60.0) as client:
