@@ -24,6 +24,7 @@ import httpx
 
 from app.core.config import settings
 from app.db import schedule_commands
+from app.modules.howtocook_client import HowToCookClient
 
 logger = logging.getLogger(__name__)
 
@@ -135,6 +136,89 @@ _TOOLS = [
                     "required": ["date", "meal_type"],
                 },
             },
+            {
+                "name": "suggest_todays_menu",
+                "description": (
+                    "Ask the HowToCook database to recommend a dish combination for today. "
+                    "Useful when the user has no specific preference and you want to offer database suggestions. "
+                    "Returns a curated set of dishes."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "people_count": {
+                            "type": "integer",
+                            "description": "Number of diners (1–10). Default 2 if not specified.",
+                        },
+                    },
+                },
+            },
+            {
+                "name": "get_recipe_details",
+                "description": (
+                    "Fetch the full recipe (ingredients + cooking steps) for a specific dish "
+                    "from the HowToCook database. Supports fuzzy name matching. "
+                    "Call this in Phase 2 to get the real recipe before saving. "
+                    "Prefer this over inventing a recipe; fall back to generating one if this returns an error."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "dish_name": {
+                            "type": "string",
+                            "description": "Dish name to look up (fuzzy matching supported).",
+                        },
+                    },
+                    "required": ["dish_name"],
+                },
+            },
+            {
+                "name": "get_recipes_by_category",
+                "description": (
+                    "List available dishes in a specific category from the HowToCook database. "
+                    "Use when the user mentions a food type like '早餐', '荤菜', '水产', '主食', '素菜' etc."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "category": {
+                            "type": "string",
+                            "description": (
+                                "Category name in Chinese. Common values: "
+                                "早餐, 荤菜, 素菜, 主食, 水产, 半成品加工, 汤与粥类."
+                            ),
+                        },
+                    },
+                    "required": ["category"],
+                },
+            },
+            {
+                "name": "recommend_weekly_meals",
+                "description": (
+                    "Generate a full one-week meal plan with a shopping list. "
+                    "Use when the user explicitly asks for a weekly plan."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "people_count": {
+                            "type": "integer",
+                            "description": "Number of diners (1–10).",
+                        },
+                        "allergies": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Allergens to avoid, e.g. ['大蒜', '虾'].",
+                        },
+                        "avoid_items": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Ingredients to exclude, e.g. ['葱', '姜'].",
+                        },
+                    },
+                    "required": ["people_count"],
+                },
+            },
         ]
     }
 ]
@@ -152,6 +236,12 @@ class MealPlanningAgent:
         self.cooking_level = cooking_level
         self.language = language
         self.user_timezone = user_timezone
+        if settings.HOWTOCOOK_MCP_URL:
+            self._foodie = HowToCookClient(settings.HOWTOCOOK_MCP_URL)
+            logger.info("[agent] HowToCookClient configured url=%s", settings.HOWTOCOOK_MCP_URL)
+        else:
+            self._foodie = None
+            logger.info("[agent] HowToCookClient disabled (HOWTOCOOK_MCP_URL not set)")
 
     # ── Public ────────────────────────────────────────────────────────────────
 
@@ -202,7 +292,11 @@ class MealPlanningAgent:
                 text = "".join(p.get("text", "") for p in parts if "text" in p).strip()
                 logger.info("[agent] final response len=%d finishReason=%s", len(text), finish_reason)
                 if not text:
-                    logger.warning("[agent] empty text, parts=%s", [list(p.keys()) for p in parts])
+                    logger.warning(
+                        "[agent] empty text — candidate=%s promptFeedback=%s",
+                        json.dumps(candidate)[:800],
+                        json.dumps(response.get("promptFeedback"))[:300],
+                    )
                     text = "抱歉，出了点问题，请重试。" if (self.language or "").startswith("zh") else "Sorry, something went wrong. Please try again."
                 if on_text:
                     on_text(text)
@@ -242,6 +336,14 @@ class MealPlanningAgent:
                 return await self._tool_save(args)
             if name == "delete_meal_plan":
                 return await self._tool_delete(args)
+            if name == "suggest_todays_menu":
+                return await self._tool_what_to_eat(args)
+            if name == "get_recipe_details":
+                return await self._tool_get_recipe(args)
+            if name == "get_recipes_by_category":
+                return await self._tool_by_category(args)
+            if name == "recommend_weekly_meals":
+                return await self._tool_recommend_meals(args)
             return {"error": f"Unknown tool: {name}"}
         except Exception as exc:
             logger.error("[tool:%s] failed: %s", name, exc)
@@ -330,6 +432,40 @@ class MealPlanningAgent:
         ok = await schedule_commands.delete_plan(existing["id"], self.auth_token)
         return {"success": ok, "deleted": {"date": date, "meal_type": meal_type}}
 
+    def _foodie_unavailable(self) -> Dict[str, Any]:
+        return {"error": "HowToCook MCP not configured (HOWTOCOOK_MCP_URL is empty)"}
+
+    async def _tool_what_to_eat(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        if not self._foodie:
+            return self._foodie_unavailable()
+        people = max(1, min(int(args.get("people_count") or 2), 10))
+        result = await self._foodie.what_to_eat(people)
+        if "error" in result:
+            # On first failure, probe what tools the server actually exposes
+            logger.warning("[agent] suggest_todays_menu failed — probing MCP tool list")
+            await self._foodie.list_tools()
+        return result
+
+    async def _tool_get_recipe(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        if not self._foodie:
+            return self._foodie_unavailable()
+        return await self._foodie.get_recipe_details(args.get("dish_name", ""))
+
+    async def _tool_by_category(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        if not self._foodie:
+            return self._foodie_unavailable()
+        return await self._foodie.get_recipes_by_category(args.get("category", ""))
+
+    async def _tool_recommend_meals(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        if not self._foodie:
+            return self._foodie_unavailable()
+        people = max(1, min(int(args.get("people_count") or 2), 10))
+        return await self._foodie.recommend_meals(
+            people_count=people,
+            allergies=args.get("allergies") or None,
+            avoid_items=args.get("avoid_items") or None,
+        )
+
     # ── Gemini call ────────────────────────────────────────────────────────────
 
     async def _call_gemini(self, contents: List[Dict], system_prompt: str) -> Dict[str, Any]:
@@ -341,15 +477,47 @@ class MealPlanningAgent:
             "systemInstruction": {"parts": [{"text": system_prompt}]},
             "contents": contents,
             "tools": _TOOLS,
+            "toolConfig": {"functionCallingConfig": {"mode": "AUTO"}},
             "generationConfig": {
                 "temperature": 0.3,
                 "maxOutputTokens": 8192,
             },
         }
+
+        logger.debug(
+            "[gemini] --> turns=%d system_len=%d tool_count=%d last_role=%s last_text=%s",
+            len(contents),
+            len(system_prompt),
+            sum(len(t.get("functionDeclarations", [])) for t in _TOOLS),
+            contents[-1].get("role") if contents else "—",
+            str(contents[-1].get("parts", [{}])[0])[:120] if contents else "—",
+        )
+
         async with httpx.AsyncClient(timeout=60.0) as client:
             resp = await client.post(url, json=payload)
-            resp.raise_for_status()
-            return resp.json()
+
+        logger.debug("[gemini] <-- status=%d body_len=%d", resp.status_code, len(resp.text))
+
+        if resp.status_code != 200:
+            logger.error("[gemini] error response: %s", resp.text[:1000])
+
+        resp.raise_for_status()
+        data = resp.json()
+
+        candidates = data.get("candidates") or []
+        if candidates:
+            c = candidates[0]
+            parts = (c.get("content") or {}).get("parts") or []
+            tool_calls = [p["functionCall"]["name"] for p in parts if "functionCall" in p]
+            text_len = sum(len(p.get("text", "")) for p in parts if "text" in p)
+            logger.info(
+                "[gemini] finishReason=%s parts=%d text_len=%d tool_calls=%s",
+                c.get("finishReason"), len(parts), text_len, tool_calls,
+            )
+        else:
+            logger.warning("[gemini] no candidates — full response: %s", json.dumps(data)[:800])
+
+        return data
 
     # ── History conversion ─────────────────────────────────────────────────────
 
