@@ -69,7 +69,15 @@ def test_tools_declare_expected_functions():
     from app.agents.meal_planning_agent import _TOOLS
     decls = _TOOLS[0]["functionDeclarations"]
     names = {d["name"] for d in decls}
-    assert names == {"fetch_meal_plan", "save_meal_plan", "delete_meal_plan"}
+    assert names == {
+        "fetch_meal_plan",
+        "save_meal_plan",
+        "delete_meal_plan",
+        "suggest_todays_menu",
+        "get_recipe_details",
+        "get_recipes_by_category",
+        "recommend_weekly_meals",
+    }
 
 
 def test_save_meal_plan_dish_name_is_only_required_field():
