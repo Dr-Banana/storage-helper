@@ -89,7 +89,7 @@ class RecommendationGenerator:
         """
         self.model_name = model_name or settings.GEMINI_LLM_MODEL
         self.api_key = api_key or settings.GEMINI_LLM_API_KEY
-        self.api_url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model_name}:generateContent?key={self.api_key}"
+        self.api_url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model_name}:generateContent"
 
     def load_document_categories(self, user_id: int) -> List[Dict[str, Any]]:
         """Load document categories from API for a specific user."""
@@ -590,7 +590,7 @@ class RecommendationGenerator:
             }
         }
 
-        headers = {'Content-Type': 'application/json'}
+        headers = {'Content-Type': 'application/json', 'x-goog-api-key': self.api_key}
 
         # Implementing exponential backoff for robustness
         max_retries = 3

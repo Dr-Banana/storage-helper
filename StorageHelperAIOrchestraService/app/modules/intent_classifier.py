@@ -110,7 +110,7 @@ Respond ONLY with a JSON object that strictly adheres to the following schema:
     def __init__(self, model_name: Optional[str] = None, api_key: Optional[str] = None):
         self.model_name = model_name or settings.GEMINI_LLM_MODEL
         self.api_key = api_key or settings.GEMINI_LLM_API_KEY
-        self.api_url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model_name}:generateContent?key={self.api_key}"
+        self.api_url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model_name}:generateContent"
 
     async def classify(
         self,
@@ -198,7 +198,7 @@ Respond ONLY with a JSON object that strictly adheres to the following schema:
             }
         }
 
-        headers = {'Content-Type': 'application/json'}
+        headers = {'Content-Type': 'application/json', 'x-goog-api-key': self.api_key}
 
         try:
             async with httpx.AsyncClient(timeout=10.0) as client:

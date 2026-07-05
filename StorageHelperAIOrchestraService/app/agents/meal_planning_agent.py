@@ -536,10 +536,13 @@ class MealPlanningAgent:
     # ── Gemini call ────────────────────────────────────────────────────────────
 
     async def _call_gemini(self, contents: List[Dict], system_prompt: str) -> Dict[str, Any]:
+        # API key goes in a header, never in the URL — httpx logs full URLs
+        # at INFO level, which would leak the key into service logs.
         url = (
             f"https://generativelanguage.googleapis.com/v1beta/models/"
-            f"{settings.GEMINI_LLM_MODEL}:generateContent?key={settings.GEMINI_LLM_API_KEY}"
+            f"{settings.GEMINI_LLM_MODEL}:generateContent"
         )
+        headers = {"x-goog-api-key": settings.GEMINI_LLM_API_KEY}
         payload = {
             "systemInstruction": {"parts": [{"text": system_prompt}]},
             "contents": contents,
@@ -565,7 +568,7 @@ class MealPlanningAgent:
         )
 
         async with httpx.AsyncClient(timeout=60.0) as client:
-            resp = await client.post(url, json=payload)
+            resp = await client.post(url, json=payload, headers=headers)
 
         logger.debug("[gemini] <-- status=%d body_len=%d", resp.status_code, len(resp.text))
 
