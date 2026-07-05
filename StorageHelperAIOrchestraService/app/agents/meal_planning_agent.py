@@ -30,7 +30,7 @@ logger = logging.getLogger(__name__)
 
 _SKILL_MD = (Path(__file__).parent.parent / "skills" / "meal_planning" / "SKILL.md").read_text(encoding="utf-8")
 
-# Strip YAML frontmatter, keep only the prompt body
+
 def _load_system_prompt() -> str:
     lines = _SKILL_MD.splitlines()
     if lines[0].strip() == "---":
@@ -40,6 +40,7 @@ def _load_system_prompt() -> str:
         except ValueError:
             pass
     return _SKILL_MD.strip()
+
 
 _SYSTEM_PROMPT = _load_system_prompt()
 
@@ -228,11 +229,13 @@ class MealPlanningAgent:
     def __init__(
         self,
         auth_token: str,
+        owner_id: int = 0,
         cooking_level: str = "beginner",
         language: Optional[str] = None,
         user_timezone: Optional[str] = None,
     ):
         self.auth_token = auth_token
+        self.owner_id = owner_id
         self.cooking_level = cooking_level
         self.language = language
         self.user_timezone = user_timezone
@@ -264,10 +267,14 @@ class MealPlanningAgent:
             f"Cooking level for this user: {self.cooking_level}."
         )
 
-        # Build Gemini contents from frontend history
         contents = self._build_contents(history, user_input, today)
 
-        # Agent loop — max 10 rounds to prevent infinite loops
+        tools_used_this_turn = 0
+        reflected = False
+        pending_phase2 = False   # save returned action_required; full-recipe save still owed
+        phase2_nudges = 0
+        interim_text = ""        # text the model emitted alongside a tool call
+
         for _ in range(10):
             response = await self._call_gemini(contents, system_prompt)
             candidate = (response.get("candidates") or [{}])[0]
@@ -290,8 +297,61 @@ class MealPlanningAgent:
 
             if not tool_calls:
                 text = "".join(p.get("text", "") for p in parts if "text" in p).strip()
-                logger.info("[agent] final response len=%d finishReason=%s", len(text), finish_reason)
-                if not text:
+
+                # Invariant: a save that returned action_required must be followed
+                # by a second save_meal_plan (full recipes) before replying.
+                if text and pending_phase2 and phase2_nudges < 2:
+                    phase2_nudges += 1
+                    logger.warning(
+                        "[agent] phase-2 save still pending — nudging model (attempt %d)",
+                        phase2_nudges,
+                    )
+                    contents.append({"role": "model", "parts": [{"text": text}]})
+                    contents.append({
+                        "role": "user",
+                        "parts": [{"text": (
+                            "[System check — the user does not see this message] "
+                            "Your earlier save_meal_plan returned action_required: the dish is "
+                            "saved with its NAME ONLY, the recipe is still missing from the "
+                            "database. You must call save_meal_plan again now with the complete "
+                            "dishes list (full ingredients and steps) before replying. "
+                            "Do not tell the user it is saved until that call succeeds."
+                        )}],
+                    })
+                    continue
+
+                # Self-check: if the model answered without touching any tool,
+                # make it verify once that no data was actually needed.
+                if text and tools_used_this_turn == 0 and not reflected:
+                    reflected = True
+                    logger.info("[agent] no tools used — asking model to self-check, text=%s", text[:200])
+                    contents.append({"role": "model", "parts": [{"text": text}]})
+                    contents.append({
+                        "role": "user",
+                        "parts": [{"text": (
+                            "[Self-check — the user does not see this message] "
+                            "You answered without calling any tool. If your answer mentions dishes, "
+                            "recipes, or plans, that data MUST come from a tool call — call the right "
+                            "tool now. If your answer claims something is unsupported, impossible, or "
+                            "not found, you must first ATTEMPT a query (e.g. get_recipe_details fuzzy "
+                            "search, get_recipes_by_category) — call one now and only report failure "
+                            "if it returns nothing. If your answer genuinely needs no data (greeting, "
+                            "clarifying question), repeat exactly the same answer."
+                        )}],
+                    })
+                    continue
+
+                logger.info(
+                    "[agent] final response len=%d finishReason=%s text=%s",
+                    len(text), finish_reason, text[:200],
+                )
+                if not text and interim_text:
+                    logger.info(
+                        "[agent] empty final text — using interim text from tool-call turn len=%d",
+                        len(interim_text),
+                    )
+                    text = interim_text
+                elif not text:
                     logger.warning(
                         "[agent] empty text — candidate=%s promptFeedback=%s",
                         json.dumps(candidate)[:800],
@@ -302,19 +362,30 @@ class MealPlanningAgent:
                     on_text(text)
                 return text
 
-            # Add model turn (with tool calls) to context
             contents.append({"role": "model", "parts": parts})
             logger.info("[agent] tool calls: %s", [tc["name"] for tc in tool_calls])
 
-            # Execute tools and collect results
+            # The model sometimes writes its user-facing reply in the same
+            # message as the tool call, then returns empty content afterwards.
+            # Keep that text as a fallback for the final response.
+            text_with_call = "".join(p.get("text", "") for p in parts if "text" in p).strip()
+            if text_with_call:
+                interim_text = text_with_call
+                logger.info("[agent] interim text alongside tool call len=%d", len(interim_text))
+
             result_parts = []
             for tc in tool_calls:
+                tools_used_this_turn += 1
                 result = await self._execute_tool(tc["name"], tc.get("args") or {})
                 logger.info("[agent] tool=%s result=%s", tc["name"], str(result)[:200])
+
+                if tc["name"] == "save_meal_plan" and isinstance(result, dict) and result.get("success"):
+                    pending_phase2 = bool(result.get("action_required"))
+                response_value = result if isinstance(result, dict) else {"items": result}
                 result_parts.append({
                     "functionResponse": {
                         "name": tc["name"],
-                        "response": result,
+                        "response": response_value,
                     }
                 })
 
@@ -360,7 +431,6 @@ class MealPlanningAgent:
             dishes = schedule_commands.extract_dishes_from_record(record)
             return {"date": date, "meal_type": meal_type, "found": True, "dishes": dishes}
 
-        # No meal_type — return all meals for the day
         summaries = await schedule_commands.fetch_upcoming(
             auth_token=self.auth_token,
             from_date=date,
@@ -378,8 +448,6 @@ class MealPlanningAgent:
 
         existing = await schedule_commands.fetch_existing(date, meal_type, self.auth_token)
 
-        # Enrich kept dishes: if the model provides only {"name": "..."} (no steps),
-        # fill in the full recipe data from the existing DB record.
         if existing:
             stored = {d["name"]: d for d in schedule_commands.extract_dishes_from_record(existing)}
             dishes = [stored.get(d["name"], d) if not d.get("steps") else d for d in dishes]
@@ -403,7 +471,6 @@ class MealPlanningAgent:
             )
 
         if record:
-            # Check post-enrichment: dishes still missing steps need a Phase 2 save
             pending = [d["name"] for d in dishes if not d.get("steps")]
             result: Dict[str, Any] = {
                 "success": True,
@@ -441,7 +508,6 @@ class MealPlanningAgent:
         people = max(1, min(int(args.get("people_count") or 2), 10))
         result = await self._foodie.what_to_eat(people)
         if "error" in result:
-            # On first failure, probe what tools the server actually exposes
             logger.warning("[agent] suggest_todays_menu failed — probing MCP tool list")
             await self._foodie.list_tools()
         return result
@@ -454,7 +520,8 @@ class MealPlanningAgent:
     async def _tool_by_category(self, args: Dict[str, Any]) -> Dict[str, Any]:
         if not self._foodie:
             return self._foodie_unavailable()
-        return await self._foodie.get_recipes_by_category(args.get("category", ""))
+        result = await self._foodie.get_recipes_by_category(args.get("category", ""))
+        return result if isinstance(result, dict) else {"items": result}
 
     async def _tool_recommend_meals(self, args: Dict[str, Any]) -> Dict[str, Any]:
         if not self._foodie:
@@ -481,6 +548,10 @@ class MealPlanningAgent:
             "generationConfig": {
                 "temperature": 0.3,
                 "maxOutputTokens": 8192,
+                # Let the model reason about which tool to use before acting.
+                # Without an explicit budget, flash often skips thinking on
+                # tool-selection turns and falls back to memorized answers.
+                "thinkingConfig": {"thinkingBudget": 1024},
             },
         }
 
@@ -533,6 +604,11 @@ class MealPlanningAgent:
             contents.append({"role": role, "parts": [{"text": msg.get("content", "")}]})
         contents.append({
             "role": "user",
-            "parts": [{"text": f"[Today: {today}]\n[Level: {self.cooking_level}]\n{user_input}"}],
+            "parts": [{"text": (
+                f"[Today: {today}]\n[Level: {self.cooking_level}]\n"
+                "[Reminder: every dish you suggest must come from a tool result; "
+                "every recipe you save must come from get_recipe_details]\n"
+                f"{user_input}"
+            )}],
         })
         return contents

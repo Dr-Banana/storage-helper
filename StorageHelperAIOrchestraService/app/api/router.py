@@ -22,6 +22,7 @@ def _get_agent(owner_id: int, auth_token: str, cooking_level: str, language: Opt
     if owner_id not in _agents:
         _agents[owner_id] = MealPlanningAgent(
             auth_token=auth_token,
+            owner_id=owner_id,
             cooking_level=cooking_level,
             language=language,
             user_timezone=user_timezone,

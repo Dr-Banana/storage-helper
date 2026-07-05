@@ -44,7 +44,11 @@ class HowToCookClient:
         """Today's dish recommendations for *people_count* diners."""
         try:
             await self._ensure_initialized()
-            return await self._call_tool("mcp_howtocook_whatToEat", {"peopleCount": people_count})
+            result = await self._call_tool("mcp_howtocook_whatToEat", {"peopleCount": people_count})
+            dishes = result.get("dishes") or []
+            if dishes:
+                logger.debug("[howtocook] first dish full structure: %s", json.dumps(dishes[0], ensure_ascii=False))
+            return result
         except Exception as exc:
             logger.warning("[howtocook] what_to_eat failed: %s", exc)
             return {"error": str(exc)}
@@ -164,8 +168,12 @@ class HowToCookClient:
             raw = "\n".join(texts)
             try:
                 parsed = json.loads(raw)
-                logger.info("[howtocook] tool=%s parsed_result keys=%s",
-                            tool_name, list(parsed.keys()) if isinstance(parsed, dict) else type(parsed).__name__)
+                if isinstance(parsed, dict):
+                    logger.info("[howtocook] tool=%s parsed_result keys=%s", tool_name, list(parsed.keys()))
+                elif isinstance(parsed, list):
+                    logger.info("[howtocook] tool=%s parsed_result list len=%d", tool_name, len(parsed))
+                else:
+                    logger.info("[howtocook] tool=%s parsed_result type=%s", tool_name, type(parsed).__name__)
                 return parsed
             except json.JSONDecodeError:
                 logger.info("[howtocook] tool=%s text_result len=%d", tool_name, len(raw))

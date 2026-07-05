@@ -115,6 +115,109 @@ def test_skill_md_mentions_two_phase_save():
     )
 
 
+# ── SKILL.md experience guardrails ───────────────────────────────────────────
+# Each rule below was added to fix a specific observed failure. Removing the
+# rule reintroduces that failure. Wording may evolve, but the anchor phrase
+# must survive — or the test must be updated together with a replacement rule.
+
+def _skill_md() -> str:
+    return (SKILLS_ROOT / "SKILL.md").read_text(encoding="utf-8")
+
+
+def test_skill_md_declares_database_as_only_authoritative_source():
+    """Failure fixed: AI suggested dishes from its own memory instead of MCP."""
+    assert "only authoritative source" in _skill_md()
+
+
+def test_skill_md_has_data_sourcing_rules():
+    md = _skill_md()
+    assert "Data sourcing rules" in md
+    assert "no exceptions" in md
+
+
+def test_skill_md_has_try_before_you_refuse_rule():
+    """Failure fixed: AI claimed 'no ingredient search' without trying a query."""
+    md = _skill_md()
+    assert "Try before you refuse" in md
+    assert "fuzzy match" in md
+
+
+def test_skill_md_has_constraints_persist_rule():
+    """Failure fixed: 'anything else?' dumped the whole category, forgetting the user had lamb."""
+    assert "Constraints persist across turns" in _skill_md()
+
+
+def test_skill_md_has_curate_dont_dump_rule():
+    """Failure fixed: 90-dish category list shown in full."""
+    md = _skill_md()
+    assert "Curate, don't dump" in md
+    assert "5–8" in md or "5-8" in md
+
+
+def test_skill_md_has_numbered_choice_rule():
+    """Failure fixed: '1' resolved against an older list instead of the latest one."""
+    md = _skill_md()
+    assert "Resolving numbered choices" in md
+    assert "MOST RECENTLY" in md
+
+
+def test_skill_md_has_recipe_adaptation_section():
+    """Failure fixed: beef recipe copied verbatim when the user wanted lamb shank."""
+    md = _skill_md()
+    assert "Adapting a recipe" in md
+    assert "database recipe is the base" in md
+
+
+def test_skill_md_has_worked_examples():
+    """Few-shot examples are the main lever for flash tool-use compliance."""
+    md = _skill_md()
+    assert "Worked examples" in md
+    for marker in ("Example 1", "Example 2", "Example 2b", "Example 3", "Example 4"):
+        assert marker in md, f"SKILL.md missing worked example: {marker}"
+    assert md.count("Wrong:") >= 4, "Examples should state the wrong behavior explicitly"
+
+
+def test_skill_md_prose_is_english_only():
+    """
+    Prompt language policy: instructions are pure English. Chinese is allowed
+    only inside code fences (functional values like MCP category names).
+    """
+    import re
+    prose = re.sub(r"```.*?```", "", _skill_md(), flags=re.S)
+    cjk = re.findall(r"[\u4e00-\u9fff]+", prose)
+    assert not cjk, f"Chinese found outside code fences: {cjk[:10]}"
+
+
+def test_skill_md_no_conflicting_always_first_rules():
+    """
+    Regression: two global 'Always call X first' rules made Gemini return
+    empty responses. At most one tool may be declared a universal first step.
+    """
+    import re
+    hits = re.findall(r"[Aa]lways call `?\w+`? first", _skill_md())
+    assert len(hits) <= 1, f"Conflicting 'always first' rules: {hits}"
+
+
+# ── Agent loop guardrail wiring ───────────────────────────────────────────────
+# Behavior is covered in test_meal_planning_agent.py; these assert the wiring
+# stays present in the source (cheap tripwire against accidental deletion).
+
+def test_agent_source_keeps_loop_guardrails():
+    import inspect
+    from app.agents import meal_planning_agent as m
+    src = inspect.getsource(m)
+    for anchor, why in [
+        ("[Self-check", "self-check round when no tools were used"),
+        ("[System check", "phase-2 save nudge after action_required"),
+        ("interim_text", "fallback to text emitted alongside a tool call"),
+        ("MALFORMED_FUNCTION_CALL", "retry with brevity hint"),
+        ("thinkingConfig", "explicit thinking budget for tool selection"),
+        ("toolConfig", "explicit AUTO function-calling mode"),
+        ("[Reminder:", "per-turn data-sourcing reminder"),
+    ]:
+        assert anchor in src, f"Agent loop guardrail missing: {why} ({anchor})"
+
+
 # ── API schemas ───────────────────────────────────────────────────────────────
 
 def test_chat_request_schema():

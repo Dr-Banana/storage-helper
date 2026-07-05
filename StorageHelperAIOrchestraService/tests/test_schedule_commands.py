@@ -162,7 +162,7 @@ async def test_fetch_existing_rejects_record_with_mismatched_metadata_date():
         "id": 38,
         "scheduled_time": "2026-06-14T10:00:00",
         "metadata": _build_metadata("2026-06-14", "dinner", [
-            {"name": "西葫芦鸡蛋汤", "ingredients": [], "steps": []}
+            {"name": "Zucchini Egg Soup", "ingredients": [], "steps": []}
         ]),
     }
 

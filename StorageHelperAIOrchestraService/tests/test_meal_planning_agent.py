@@ -45,7 +45,7 @@ def make_agent(**kwargs):
     return MealPlanningAgent(
         auth_token=kwargs.get("auth_token", "test-token"),
         cooking_level=kwargs.get("cooking_level", "beginner"),
-        language=kwargs.get("language", "zh-CN"),
+        language=kwargs.get("language", "en-US"),
         user_timezone=kwargs.get("user_timezone", "Asia/Shanghai"),
     )
 
@@ -54,11 +54,11 @@ def make_agent(**kwargs):
 
 @pytest.mark.asyncio
 async def test_text_only_response_returned_immediately():
-    """No tool calls → return the text directly without extra rounds."""
+    """No tool calls → return the text (after one self-check round)."""
     agent = make_agent()
-    with patch.object(agent, "_call_gemini", new=AsyncMock(return_value=_gemini_text("今晚吃面条"))):
-        reply = await agent.run("今晚吃什么", [], user_timezone="Asia/Shanghai")
-    assert reply == "今晚吃面条"
+    with patch.object(agent, "_call_gemini", new=AsyncMock(return_value=_gemini_text("Noodles tonight"))):
+        reply = await agent.run("What should I eat tonight?", [], user_timezone="Asia/Shanghai")
+    assert reply == "Noodles tonight"
 
 
 @pytest.mark.asyncio
@@ -67,13 +67,13 @@ async def test_single_tool_call_then_text():
     agent = make_agent()
     responses = iter([
         _gemini_tool_call("fetch_meal_plan", {"date": "2026-06-14", "meal_type": "dinner"}),
-        _gemini_text("今晚有西葫芦鸡蛋汤"),
+        _gemini_text("Tonight you have Zucchini Egg Soup"),
     ])
     with patch.object(agent, "_call_gemini", new=AsyncMock(side_effect=lambda *a, **kw: next(responses))), \
          patch("app.agents.meal_planning_agent.schedule_commands.fetch_existing",
                new=AsyncMock(return_value=None)):
-        reply = await agent.run("今晚吃什么", [], user_timezone="Asia/Shanghai")
-    assert reply == "今晚有西葫芦鸡蛋汤"
+        reply = await agent.run("What should I eat tonight?", [], user_timezone="Asia/Shanghai")
+    assert reply == "Tonight you have Zucchini Egg Soup"
 
 
 @pytest.mark.asyncio
@@ -84,22 +84,36 @@ async def test_fetch_save_text_three_round_flow():
         _gemini_tool_call("fetch_meal_plan", {"date": "2026-06-14", "meal_type": "dinner"}),
         _gemini_tool_call("save_meal_plan", {
             "date": "2026-06-14", "meal_type": "dinner",
-            "dishes": [{"name": "面条", "ingredients": [], "steps": ["煮"]}],
+            "dishes": [{"name": "Noodles", "ingredients": [], "steps": ["Boil"]}],
         }),
-        _gemini_text("已保存今晚面条！"),
+        _gemini_text("Saved noodles for tonight!"),
     ])
     with patch.object(agent, "_call_gemini", new=AsyncMock(side_effect=lambda *a, **kw: next(responses))), \
          patch("app.agents.meal_planning_agent.schedule_commands.fetch_existing",
                new=AsyncMock(return_value=None)), \
          patch("app.agents.meal_planning_agent.schedule_commands.save_plan",
                new=AsyncMock(return_value={"id": 99})):
-        reply = await agent.run("帮我计划今晚", [], user_timezone="Asia/Shanghai")
-    assert reply == "已保存今晚面条！"
+        reply = await agent.run("Plan my dinner tonight", [], user_timezone="Asia/Shanghai")
+    assert reply == "Saved noodles for tonight!"
 
 
 @pytest.mark.asyncio
-async def test_max_rounds_returns_fallback_chinese():
-    """After 10 rounds of tool calls, return a Chinese fallback (language=zh-CN)."""
+async def test_max_rounds_returns_fallback():
+    """After 10 rounds of tool calls, return a fallback message."""
+    agent = make_agent(language="en-US")
+    with patch.object(agent, "_call_gemini",
+                      new=AsyncMock(return_value=_gemini_tool_call("fetch_meal_plan", {"date": "2026-06-14"}))), \
+         patch("app.agents.meal_planning_agent.schedule_commands.fetch_existing",
+               new=AsyncMock(return_value=None)), \
+         patch("app.agents.meal_planning_agent.schedule_commands.fetch_upcoming",
+               new=AsyncMock(return_value=[])):
+        reply = await agent.run("What should I eat tonight?", [], user_timezone="Asia/Shanghai")
+    assert "try again" in reply.lower()
+
+
+@pytest.mark.asyncio
+async def test_max_rounds_fallback_localized_for_chinese_users():
+    """language=zh-CN users get the Chinese fallback message."""
     agent = make_agent(language="zh-CN")
     with patch.object(agent, "_call_gemini",
                       new=AsyncMock(return_value=_gemini_tool_call("fetch_meal_plan", {"date": "2026-06-14"}))), \
@@ -107,8 +121,8 @@ async def test_max_rounds_returns_fallback_chinese():
                new=AsyncMock(return_value=None)), \
          patch("app.agents.meal_planning_agent.schedule_commands.fetch_upcoming",
                new=AsyncMock(return_value=[])):
-        reply = await agent.run("今晚吃什么", [], user_timezone="Asia/Shanghai")
-    assert "重试" in reply
+        reply = await agent.run("What should I eat tonight?", [], user_timezone="Asia/Shanghai")
+    assert reply and "try again" not in reply.lower(), "zh users must get the localized fallback"
 
 
 @pytest.mark.asyncio
@@ -117,11 +131,11 @@ async def test_empty_gemini_response_returns_non_empty_fallback():
     Regression: empty parts used to return '' silently.
     Now returns a user-visible error message.
     """
-    agent = make_agent(language="zh-CN")
+    agent = make_agent(language="en-US")
     with patch.object(agent, "_call_gemini", new=AsyncMock(return_value=_gemini_empty())):
-        reply = await agent.run("今晚吃什么", [], user_timezone="Asia/Shanghai")
+        reply = await agent.run("What should I eat tonight?", [], user_timezone="Asia/Shanghai")
     assert reply, "Empty Gemini response must produce a non-empty fallback, not silent ''"
-    assert "重试" in reply
+    assert "try again" in reply.lower()
 
 
 @pytest.mark.asyncio
@@ -129,9 +143,9 @@ async def test_on_text_callback_called_with_final_text():
     """on_text streaming callback fires with the final reply."""
     agent = make_agent()
     collected = []
-    with patch.object(agent, "_call_gemini", new=AsyncMock(return_value=_gemini_text("回复内容"))):
-        await agent.run("问题", [], on_text=collected.append)
-    assert collected == ["回复内容"]
+    with patch.object(agent, "_call_gemini", new=AsyncMock(return_value=_gemini_text("reply content"))):
+        await agent.run("question", [], on_text=collected.append)
+    assert collected == ["reply content"]
 
 
 # ── _tool_fetch ───────────────────────────────────────────────────────────────
@@ -150,13 +164,13 @@ async def test_fetch_with_meal_type_calls_fetch_existing():
 async def test_fetch_with_meal_type_returns_dishes():
     agent = make_agent()
     record = _sample_record("2026-06-14", "dinner", [
-        {"name": "西葫芦鸡蛋汤", "ingredients": [{"name": "西葫芦", "quantity": "1个"}], "steps": ["step1"]}
+        {"name": "Zucchini Egg Soup", "ingredients": [{"name": "zucchini", "quantity": "1"}], "steps": ["step1"]}
     ])
     with patch("app.agents.meal_planning_agent.schedule_commands.fetch_existing",
                new=AsyncMock(return_value=record)):
         result = await agent._tool_fetch({"date": "2026-06-14", "meal_type": "dinner"})
     assert result["found"] is True
-    assert result["dishes"][0]["name"] == "西葫芦鸡蛋汤"
+    assert result["dishes"][0]["name"] == "Zucchini Egg Soup"
 
 
 @pytest.mark.asyncio
@@ -178,14 +192,14 @@ async def test_fetch_without_meal_type_filters_results_by_date():
     agent = make_agent()
     summaries = [
         {"date": "2026-06-13", "meal_type": "dinner", "dishes": ["Curry Beef"]},
-        {"date": "2026-06-14", "meal_type": "dinner", "dishes": ["西葫芦鸡蛋汤"]},
+        {"date": "2026-06-14", "meal_type": "dinner", "dishes": ["Zucchini Egg Soup"]},
     ]
     with patch("app.agents.meal_planning_agent.schedule_commands.fetch_upcoming",
                new=AsyncMock(return_value=summaries)):
         result = await agent._tool_fetch({"date": "2026-06-14"})
     assert result["found"] is True
     all_dish_names = [d for m in result["meals"] for d in m["dishes"]]
-    assert "西葫芦鸡蛋汤" in all_dish_names
+    assert "Zucchini Egg Soup" in all_dish_names
     assert "Curry Beef" not in all_dish_names
 
 
@@ -194,7 +208,7 @@ async def test_fetch_without_meal_type_filters_results_by_date():
 @pytest.mark.asyncio
 async def test_save_creates_new_when_no_existing():
     agent = make_agent()
-    dishes = [{"name": "面条", "ingredients": [{"name": "面", "quantity": "100g"}], "steps": ["煮"]}]
+    dishes = [{"name": "Noodles", "ingredients": [{"name": "noodles", "quantity": "100g"}], "steps": ["Boil"]}]
     with patch("app.agents.meal_planning_agent.schedule_commands.fetch_existing",
                new=AsyncMock(return_value=None)), \
          patch("app.agents.meal_planning_agent.schedule_commands.save_plan",
@@ -210,11 +224,11 @@ async def test_save_creates_new_when_no_existing():
 async def test_save_updates_when_existing_record_found():
     agent = make_agent()
     existing = _sample_record("2026-06-14", "dinner", [
-        {"name": "西葫芦鸡蛋汤", "ingredients": [], "steps": ["step"]}
+        {"name": "Zucchini Egg Soup", "ingredients": [], "steps": ["step"]}
     ])
     dishes = [
-        {"name": "西葫芦鸡蛋汤"},
-        {"name": "菠萝咕唠肉", "ingredients": [{"name": "猪肉", "quantity": "200g"}], "steps": ["炸", "调汁"]},
+        {"name": "Zucchini Egg Soup"},
+        {"name": "Sweet and Sour Pork", "ingredients": [{"name": "pork", "quantity": "200g"}], "steps": ["Fry", "Mix sauce"]},
     ]
     with patch("app.agents.meal_planning_agent.schedule_commands.fetch_existing",
                new=AsyncMock(return_value=existing)), \
@@ -231,7 +245,7 @@ async def test_save_updates_when_existing_record_found():
 @pytest.mark.asyncio
 async def test_save_returns_error_when_backend_fails():
     agent = make_agent()
-    dishes = [{"name": "面条", "ingredients": [], "steps": ["煮"]}]
+    dishes = [{"name": "Noodles", "ingredients": [], "steps": ["Boil"]}]
     with patch("app.agents.meal_planning_agent.schedule_commands.fetch_existing",
                new=AsyncMock(return_value=None)), \
          patch("app.agents.meal_planning_agent.schedule_commands.save_plan",
@@ -250,7 +264,7 @@ async def test_name_only_kept_dish_enriched_from_db():
     full recipe filled from the DB record, not saved with empty ingredients/steps.
     """
     agent = make_agent()
-    stored = [{"name": "西葫芦鸡蛋汤", "ingredients": [{"name": "西葫芦", "quantity": "1个"}], "steps": ["step1", "step2"]}]
+    stored = [{"name": "Zucchini Egg Soup", "ingredients": [{"name": "zucchini", "quantity": "1"}], "steps": ["step1", "step2"]}]
     existing = _sample_record("2026-06-14", "dinner", stored)
 
     captured = {}
@@ -266,17 +280,17 @@ async def test_name_only_kept_dish_enriched_from_db():
         await agent._tool_save({
             "date": "2026-06-14", "meal_type": "dinner",
             "dishes": [
-                {"name": "西葫芦鸡蛋汤"},  # ← name only, kept dish
-                {"name": "菠萝咕唠肉", "ingredients": [{"name": "猪肉", "quantity": "200g"}], "steps": ["炸"]},
+                {"name": "Zucchini Egg Soup"},  # ← name only, kept dish
+                {"name": "Sweet and Sour Pork", "ingredients": [{"name": "pork", "quantity": "200g"}], "steps": ["Fry"]},
             ],
         })
 
-    zucchini = next(d for d in captured["dishes"] if d["name"] == "西葫芦鸡蛋汤")
+    zucchini = next(d for d in captured["dishes"] if d["name"] == "Zucchini Egg Soup")
     assert zucchini["steps"] == ["step1", "step2"], "Kept dish must be enriched from DB"
-    assert zucchini["ingredients"][0]["name"] == "西葫芦"
+    assert zucchini["ingredients"][0]["name"] == "zucchini"
 
-    pineapple = next(d for d in captured["dishes"] if d["name"] == "菠萝咕唠肉")
-    assert pineapple["steps"] == ["炸"], "New dish must keep model-provided data"
+    pork = next(d for d in captured["dishes"] if d["name"] == "Sweet and Sour Pork")
+    assert pork["steps"] == ["Fry"], "New dish must keep model-provided data"
 
 
 @pytest.mark.asyncio
@@ -287,7 +301,7 @@ async def test_dish_with_steps_from_model_not_overwritten_by_db():
     """
     agent = make_agent()
     existing = _sample_record("2026-06-14", "dinner", [
-        {"name": "西红柿炒蛋", "ingredients": [], "steps": ["old step"]}
+        {"name": "Tomato Scrambled Eggs", "ingredients": [], "steps": ["old step"]}
     ])
     captured = {}
 
@@ -301,7 +315,7 @@ async def test_dish_with_steps_from_model_not_overwritten_by_db():
                side_effect=mock_update):
         await agent._tool_save({
             "date": "2026-06-14", "meal_type": "dinner",
-            "dishes": [{"name": "西红柿炒蛋", "ingredients": [], "steps": ["new step"]}],
+            "dishes": [{"name": "Tomato Scrambled Eggs", "ingredients": [], "steps": ["new step"]}],
         })
 
     dish = captured["dishes"][0]
@@ -327,10 +341,10 @@ async def test_phase1_name_only_new_dish_saved_as_is():
                side_effect=mock_save):
         await agent._tool_save({
             "date": "2026-06-14", "meal_type": "dinner",
-            "dishes": [{"name": "新菜"}],
+            "dishes": [{"name": "New Dish"}],
         })
 
-    assert captured["dishes"][0]["name"] == "新菜"
+    assert captured["dishes"][0]["name"] == "New Dish"
     assert captured["dishes"][0].get("steps", []) == []
 
 
@@ -381,23 +395,23 @@ async def test_tool_exception_returns_error_dict():
 
 def test_build_contents_injects_today_and_level():
     agent = make_agent(cooking_level="intermediate")
-    contents = agent._build_contents([], "今晚吃什么", "2026-06-14")
+    contents = agent._build_contents([], "What should I eat tonight?", "2026-06-14")
     last = contents[-1]
     assert last["role"] == "user"
     text = last["parts"][0]["text"]
     assert "[Today: 2026-06-14]" in text
     assert "[Level: intermediate]" in text
-    assert "今晚吃什么" in text
+    assert "What should I eat tonight?" in text
 
 
 def test_build_contents_maps_assistant_role_to_model():
     """Gemini requires 'model', not 'assistant', for AI turns."""
     agent = make_agent()
     history = [
-        {"role": "user", "content": "你好"},
-        {"role": "assistant", "content": "你好！"},
+        {"role": "user", "content": "Hello"},
+        {"role": "assistant", "content": "Hi there!"},
     ]
-    contents = agent._build_contents(history, "下一条", "2026-06-14")
+    contents = agent._build_contents(history, "next message", "2026-06-14")
     assert contents[0]["role"] == "user"
     assert contents[1]["role"] == "model"
     assert contents[2]["role"] == "user"
@@ -423,3 +437,269 @@ def test_reset_is_noop():
     """Agent is stateless; reset() exists for API compatibility and does nothing."""
     agent = make_agent()
     agent.reset()  # must not raise
+
+
+# ── Agent loop guardrails ─────────────────────────────────────────────────────
+# These lock in the experience-critical behaviors added during MCP integration.
+# If a prompt or loop change breaks one of these, the user-visible experience
+# regresses in a known way — do not delete them to make a change pass.
+
+def _gemini_malformed() -> dict:
+    return {
+        "candidates": [{
+            "content": {"role": "model"},
+            "finishReason": "MALFORMED_FUNCTION_CALL",
+        }]
+    }
+
+
+def _gemini_text_and_tool(text: str, name: str, args: dict) -> dict:
+    """Model emits user-facing text AND a tool call in the same message."""
+    return {
+        "candidates": [{
+            "content": {"role": "model", "parts": [
+                {"text": text},
+                {"functionCall": {"name": name, "args": args}},
+            ]},
+            "finishReason": "STOP",
+        }]
+    }
+
+
+def _all_injected_texts(recorded):
+    texts = []
+    for contents in recorded:
+        for msg in contents:
+            for part in msg.get("parts", []):
+                if "text" in part:
+                    texts.append(part["text"])
+    return texts
+
+
+@pytest.mark.asyncio
+async def test_self_check_fires_when_no_tools_used():
+    """
+    Guardrail: a text answer produced with zero tool calls triggers one
+    self-check round instead of being returned immediately.
+    """
+    agent = make_agent()
+    responses = iter([_gemini_text("answer from memory"), _gemini_text("answer after self-check")])
+    recorded = []
+
+    async def scripted(contents, system_prompt):
+        recorded.append([m for m in contents])
+        return next(responses)
+
+    with patch.object(agent, "_call_gemini", side_effect=scripted):
+        reply = await agent.run("What should I eat tonight?", [], user_timezone="Asia/Shanghai")
+
+    assert reply == "answer after self-check"
+    assert len(recorded) == 2, "Exactly one self-check round expected"
+    injected = _all_injected_texts(recorded)
+    assert any("[Self-check" in t for t in injected), "Self-check message must be injected"
+
+
+@pytest.mark.asyncio
+async def test_self_check_fires_at_most_once():
+    """Self-check must not loop: two consecutive no-tool texts → second is final."""
+    agent = make_agent()
+    responses = iter([_gemini_text("answer one"), _gemini_text("answer two"), _gemini_text("answer three")])
+
+    async def scripted(contents, system_prompt):
+        return next(responses)
+
+    with patch.object(agent, "_call_gemini", side_effect=scripted):
+        reply = await agent.run("Hello", [], user_timezone="Asia/Shanghai")
+
+    assert reply == "answer two", "Only one self-check round; second text is final"
+
+
+@pytest.mark.asyncio
+async def test_self_check_skipped_when_tools_were_used():
+    """After any tool call, a text response is final — no self-check round."""
+    agent = make_agent()
+    responses = iter([
+        _gemini_tool_call("fetch_meal_plan", {"date": "2026-07-05", "meal_type": "dinner"}),
+        _gemini_text("answer after lookup"),
+    ])
+    calls = []
+
+    async def scripted(contents, system_prompt):
+        calls.append(1)
+        return next(responses)
+
+    with patch.object(agent, "_call_gemini", side_effect=scripted), \
+         patch("app.agents.meal_planning_agent.schedule_commands.fetch_existing",
+               new=AsyncMock(return_value=None)):
+        reply = await agent.run("What should I eat tonight?", [], user_timezone="Asia/Shanghai")
+
+    assert reply == "answer after lookup"
+    assert len(calls) == 2, "No extra self-check round after tool use"
+
+
+@pytest.mark.asyncio
+async def test_phase2_nudge_forces_second_save():
+    """
+    Guardrail (regression: dish saved name-only, recipe never persisted):
+    save returns action_required → model tries to reply → loop must inject a
+    system check and the model must complete the full-recipe save before the
+    reply goes out.
+    """
+    agent = make_agent()
+    full_dish = {"name": "Braised Lamb Shank", "ingredients": [{"name": "lamb shank", "quantity": "500g"}], "steps": ["Blanch", "Braise"]}
+    responses = iter([
+        _gemini_tool_call("save_meal_plan", {
+            "date": "2026-07-05", "meal_type": "dinner", "dishes": [{"name": "Braised Lamb Shank"}],
+        }),
+        _gemini_text("Saved!"),  # premature — phase 2 still owed
+        _gemini_tool_call("save_meal_plan", {
+            "date": "2026-07-05", "meal_type": "dinner", "dishes": [full_dish],
+        }),
+        _gemini_text("Saved, recipe below"),
+    ])
+    recorded = []
+
+    async def scripted(contents, system_prompt):
+        recorded.append(list(contents))
+        return next(responses)
+
+    save_calls = []
+
+    async def mock_save(date, meal_type, dishes, auth_token, user_timezone):
+        save_calls.append(dishes)
+        return {"id": 1}
+
+    with patch.object(agent, "_call_gemini", side_effect=scripted), \
+         patch("app.agents.meal_planning_agent.schedule_commands.fetch_existing",
+               new=AsyncMock(return_value=None)), \
+         patch("app.agents.meal_planning_agent.schedule_commands.save_plan",
+               side_effect=mock_save):
+        reply = await agent.run("Lamb shank it is", [], user_timezone="Asia/Shanghai")
+
+    assert reply == "Saved, recipe below"
+    assert len(save_calls) == 2, "Both phase-1 and phase-2 saves must run"
+    assert save_calls[1][0]["steps"], "Phase-2 save must contain full steps"
+    injected = _all_injected_texts(recorded)
+    assert any("[System check" in t for t in injected), "Phase-2 nudge must be injected"
+
+
+@pytest.mark.asyncio
+async def test_phase2_nudge_gives_up_after_two_attempts():
+    """The nudge must not loop forever if the model refuses to comply."""
+    agent = make_agent()
+    responses = iter([
+        _gemini_tool_call("save_meal_plan", {
+            "date": "2026-07-05", "meal_type": "dinner", "dishes": [{"name": "Braised Lamb Shank"}],
+        }),
+        _gemini_text("reply one"),
+        _gemini_text("reply two"),
+        _gemini_text("reply three"),
+    ])
+
+    async def scripted(contents, system_prompt):
+        return next(responses)
+
+    with patch.object(agent, "_call_gemini", side_effect=scripted), \
+         patch("app.agents.meal_planning_agent.schedule_commands.fetch_existing",
+               new=AsyncMock(return_value=None)), \
+         patch("app.agents.meal_planning_agent.schedule_commands.save_plan",
+               new=AsyncMock(return_value={"id": 1})):
+        reply = await agent.run("Lamb shank it is", [], user_timezone="Asia/Shanghai")
+
+    assert reply == "reply three", "After 2 nudges the reply must pass through (no infinite loop)"
+
+
+@pytest.mark.asyncio
+async def test_interim_text_used_when_final_response_empty():
+    """
+    Guardrail (regression: empty reply after text+toolcall message):
+    text emitted alongside a tool call must be used as the reply if the
+    follow-up model response is empty.
+    """
+    agent = make_agent()
+    responses = iter([
+        _gemini_text_and_tool(
+            "Saved, recipe below: ...",
+            "fetch_meal_plan", {"date": "2026-07-05", "meal_type": "dinner"},
+        ),
+        _gemini_empty(),
+    ])
+
+    async def scripted(contents, system_prompt):
+        return next(responses)
+
+    with patch.object(agent, "_call_gemini", side_effect=scripted), \
+         patch("app.agents.meal_planning_agent.schedule_commands.fetch_existing",
+               new=AsyncMock(return_value=None)):
+        reply = await agent.run("That one", [], user_timezone="Asia/Shanghai")
+
+    assert reply == "Saved, recipe below: ...", "Interim text must be used, not the apology fallback"
+
+
+@pytest.mark.asyncio
+async def test_malformed_function_call_retried_with_hint():
+    """MALFORMED_FUNCTION_CALL → brevity hint injected → retry proceeds."""
+    agent = make_agent()
+    responses = iter([
+        _gemini_malformed(),
+        _gemini_tool_call("fetch_meal_plan", {"date": "2026-07-05", "meal_type": "dinner"}),
+        _gemini_text("answer after lookup"),
+    ])
+    recorded = []
+
+    async def scripted(contents, system_prompt):
+        recorded.append(list(contents))
+        return next(responses)
+
+    with patch.object(agent, "_call_gemini", side_effect=scripted), \
+         patch("app.agents.meal_planning_agent.schedule_commands.fetch_existing",
+               new=AsyncMock(return_value=None)):
+        reply = await agent.run("What should I eat tonight?", [], user_timezone="Asia/Shanghai")
+
+    assert reply == "answer after lookup"
+    injected = _all_injected_texts(recorded)
+    assert any("malformed" in t for t in injected), "Brevity hint must be injected after MALFORMED"
+
+
+@pytest.mark.asyncio
+async def test_list_tool_result_wrapped_in_items_dict():
+    """
+    Guardrail (regression: HTTP 400 'Proto field is not repeating'):
+    a tool returning a list must be wrapped as {"items": [...]} in the
+    functionResponse — Gemini rejects bare arrays.
+    """
+    agent = make_agent()
+    responses = iter([
+        _gemini_tool_call("get_recipes_by_category", {"category": "meat"}),
+        _gemini_text("Here are the meat dishes"),
+    ])
+    recorded = []
+
+    async def scripted(contents, system_prompt):
+        recorded.append([m for m in contents])
+        return next(responses)
+
+    with patch.object(agent, "_call_gemini", side_effect=scripted), \
+         patch.object(agent, "_execute_tool", new=AsyncMock(return_value=["dish one", "dish two"])):
+        reply = await agent.run("What meat dishes are there?", [], user_timezone="Asia/Shanghai")
+
+    assert reply == "Here are the meat dishes"
+    fn_responses = [
+        part["functionResponse"]["response"]
+        for contents in recorded for msg in contents
+        for part in msg.get("parts", []) if "functionResponse" in part
+    ]
+    assert fn_responses, "functionResponse must be present in follow-up contents"
+    assert all(isinstance(r, dict) for r in fn_responses), (
+        "functionResponse.response must always be a dict, never a bare list"
+    )
+    assert fn_responses[0] == {"items": ["dish one", "dish two"]}
+
+
+def test_build_contents_injects_data_sourcing_reminder():
+    """Every turn carries the tool-grounding reminder next to [Today]."""
+    agent = make_agent()
+    contents = agent._build_contents([], "What should I eat tonight?", "2026-07-05")
+    text = contents[-1]["parts"][0]["text"]
+    assert "[Reminder:" in text
+    assert "tool result" in text
