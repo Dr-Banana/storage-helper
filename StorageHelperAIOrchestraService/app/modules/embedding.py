@@ -98,7 +98,7 @@ class EmbeddingGenerator:
         self.task_type = task_type
         self.max_retries = max_retries
         self.timeout = timeout
-        self._api_url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model_name}:embedContent?key={self.api_key}"
+        self._api_url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model_name}:embedContent"
     
     async def generate(self, text: str) -> EmbeddingResult:
         """
@@ -131,7 +131,7 @@ class EmbeddingGenerator:
             "outputDimensionality": 768  # Force 768 dimensions for DB compatibility
         }
         
-        headers = {'Content-Type': 'application/json'}
+        headers = {'Content-Type': 'application/json', 'x-goog-api-key': self.api_key}
         
         # Implement exponential backoff retry
         delay = 1

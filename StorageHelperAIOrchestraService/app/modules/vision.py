@@ -210,10 +210,13 @@ Provide a structured, comprehensive description that captures both text and visu
         """
         Call Gemini Vision API with Exponential Backoff Retry for 429 errors.
         """
+        # API key goes in a header, not the URL — httpx logs full URLs at
+        # INFO level, which would leak the key into service logs.
         headers = {
-            "Content-Type": "application/json"
+            "Content-Type": "application/json",
+            "x-goog-api-key": self.api_key,
         }
-        
+
         payload = {
             "contents": [{
                 "parts": [
@@ -234,17 +237,14 @@ Provide a structured, comprehensive description that captures both text and visu
             }
         }
         
-        # Add API key to URL
-        url_with_key = f"{self.api_url}?key={self.api_key}"
-        
         # Retry Configuration
         max_retries = 3
         base_delay = 2  # start with 2 seconds
-        
+
         for attempt in range(max_retries + 1):
             try:
                 async with httpx.AsyncClient(timeout=self.timeout) as client:
-                    response = await client.post(url_with_key, json=payload, headers=headers)
+                    response = await client.post(self.api_url, json=payload, headers=headers)
                     
                     # If 429, explicitly raise it to catch below
                     if response.status_code == 429:
