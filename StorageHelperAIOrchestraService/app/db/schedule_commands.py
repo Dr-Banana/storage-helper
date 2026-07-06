@@ -247,9 +247,17 @@ async def fetch_existing(
     """
     Look up whether a schedule already exists for the given date and meal type.
     Returns the first matching record, or None.
+
+    The query window is widened by one day on each side: a meal's stored
+    `scheduled_time` is timezone-aware, so for negative-UTC-offset users an
+    18:00 dinner lands on the *next* UTC day (e.g. 18:00-07:00 → 01:00Z next
+    day). A naive same-day window would miss it and cause a duplicate save.
+    Correctness is preserved by the exact `plan.date == date` filter below.
     """
-    start = f"{date}T00:00:00"
-    end = f"{date}T23:59:59"
+    from datetime import date as _date, timedelta
+    d = _date.fromisoformat(date)
+    start = f"{(d - timedelta(days=1)).isoformat()}T00:00:00"
+    end = f"{(d + timedelta(days=1)).isoformat()}T23:59:59"
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
             resp = await client.get(

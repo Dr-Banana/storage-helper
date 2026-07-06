@@ -213,3 +213,71 @@ async def test_fetch_existing_returns_none_when_only_wrong_date_record_present()
         result = await fetch_existing("2026-06-14", "dinner", "token")
 
     assert result is None
+
+
+@pytest.mark.asyncio
+async def test_fetch_existing_queries_widened_window():
+    """
+    Regression (prod duplicate saves, ids 109/110): an 18:00 dinner for a
+    -07:00 user is stored as next-day 01:00 UTC, so a naive same-day range
+    query missed the record and phase 2 created a duplicate. fetch_existing
+    must query one day on each side; exact matching is done by plan.date.
+    Also covers month boundaries via date arithmetic.
+    """
+    from unittest.mock import AsyncMock, MagicMock, patch
+    from app.db.schedule_commands import fetch_existing
+
+    mock_response = MagicMock()
+    mock_response.raise_for_status = MagicMock()
+    mock_response.json = MagicMock(return_value=[])
+
+    mock_client = AsyncMock()
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=None)
+    mock_client.get = AsyncMock(return_value=mock_response)
+
+    with patch("httpx.AsyncClient", return_value=mock_client):
+        await fetch_existing("2026-07-06", "dinner", "token")
+    params = mock_client.get.call_args.kwargs["params"]
+    assert params["start_time"] == "2026-07-05T00:00:00"
+    assert params["end_time"] == "2026-07-07T23:59:59"
+
+    with patch("httpx.AsyncClient", return_value=mock_client):
+        await fetch_existing("2026-08-01", "dinner", "token")
+    params = mock_client.get.call_args.kwargs["params"]
+    assert params["start_time"] == "2026-07-31T00:00:00", "Window must cross month boundaries"
+    assert params["end_time"] == "2026-08-02T23:59:59"
+
+
+@pytest.mark.asyncio
+async def test_fetch_existing_finds_utc_shifted_record_in_widened_window():
+    """
+    The prod failure record: metadata date=2026-07-06, scheduled_time stored
+    as 2026-07-07T01:00:00 UTC. With the widened window the backend returns
+    it and fetch_existing must match it for date=2026-07-06.
+    """
+    from unittest.mock import AsyncMock, MagicMock, patch
+    from app.db.schedule_commands import _build_metadata, fetch_existing
+
+    utc_shifted = {
+        "id": 109,
+        "scheduled_time": "2026-07-07T01:00:00",  # 2026-07-06 18:00 at -07:00
+        "metadata": _build_metadata("2026-07-06", "dinner", [
+            {"name": "Braised Beef Brisket", "ingredients": [], "steps": []}
+        ]),
+    }
+
+    mock_response = MagicMock()
+    mock_response.raise_for_status = MagicMock()
+    mock_response.json = MagicMock(return_value=[utc_shifted])
+
+    mock_client = AsyncMock()
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=None)
+    mock_client.get = AsyncMock(return_value=mock_response)
+
+    with patch("httpx.AsyncClient", return_value=mock_client):
+        result = await fetch_existing("2026-07-06", "dinner", "token")
+
+    assert result is not None
+    assert result["id"] == 109

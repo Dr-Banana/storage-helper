@@ -564,21 +564,29 @@ async def test_phase2_nudge_forces_second_save():
         return next(responses)
 
     save_calls = []
+    update_calls = []
 
     async def mock_save(date, meal_type, dishes, auth_token, user_timezone):
         save_calls.append(dishes)
         return {"id": 1}
 
+    async def mock_update(schedule_id, date, meal_type, dishes, auth_token, user_timezone):
+        update_calls.append((schedule_id, dishes))
+        return {"id": schedule_id}
+
     with patch.object(agent, "_call_gemini", side_effect=scripted), \
          patch("app.agents.meal_planning_agent.schedule_commands.fetch_existing",
                new=AsyncMock(return_value=None)), \
          patch("app.agents.meal_planning_agent.schedule_commands.save_plan",
-               side_effect=mock_save):
+               side_effect=mock_save), \
+         patch("app.agents.meal_planning_agent.schedule_commands.update_plan",
+               side_effect=mock_update):
         reply = await agent.run("Lamb shank it is", [], user_timezone="Asia/Shanghai")
 
     assert reply == "Saved, recipe below"
-    assert len(save_calls) == 2, "Both phase-1 and phase-2 saves must run"
-    assert save_calls[1][0]["steps"], "Phase-2 save must contain full steps"
+    assert len(save_calls) == 1, "Phase 1 creates the record"
+    assert len(update_calls) == 1, "Phase 2 updates the cached schedule_id (no duplicate create)"
+    assert update_calls[0][1][0]["steps"], "Phase-2 save must contain full steps"
     injected = _all_injected_texts(recorded)
     assert any("[System check" in t for t in injected), "Phase-2 nudge must be injected"
 
@@ -696,6 +704,52 @@ async def test_list_tool_result_wrapped_in_items_dict():
     assert fn_responses[0] == {"items": ["dish one", "dish two"]}
 
 
+@pytest.mark.asyncio
+async def test_schedule_id_cache_does_not_leak_across_turns():
+    """
+    The saved-id cache must live for exactly one run() call. If it leaked
+    across turns, a plan deleted between turns would be 'updated' on a dead
+    schedule_id instead of created fresh.
+    """
+    agent = make_agent()
+
+    def turn_responses():
+        return iter([
+            _gemini_tool_call("save_meal_plan", {
+                "date": "2026-07-06", "meal_type": "dinner",
+                "dishes": [{"name": "Cumin Beef", "ingredients": [], "steps": ["Stir-fry"]}],
+            }),
+            _gemini_text("Saved"),
+        ])
+
+    create_calls = []
+
+    async def mock_save(date, meal_type, dishes, auth_token, user_timezone):
+        create_calls.append(dishes)
+        return {"id": 7}
+
+    async def run_turn():
+        responses = turn_responses()
+
+        async def scripted(contents, system_prompt):
+            return next(responses)
+
+        # fetch_existing finds nothing in both turns (e.g. the record was
+        # deleted between turns) — each turn must CREATE, never update id=7
+        with patch.object(agent, "_call_gemini", side_effect=scripted), \
+             patch("app.agents.meal_planning_agent.schedule_commands.fetch_existing",
+                   new=AsyncMock(return_value=None)), \
+             patch("app.agents.meal_planning_agent.schedule_commands.save_plan",
+                   side_effect=mock_save), \
+             patch("app.agents.meal_planning_agent.schedule_commands.update_plan") as mock_update:
+            await agent.run("Cumin beef tonight", [], user_timezone="Asia/Shanghai")
+            mock_update.assert_not_called()
+
+    await run_turn()
+    await run_turn()
+    assert len(create_calls) == 2, "Each turn starts with a fresh cache and must create"
+
+
 def test_build_contents_injects_data_sourcing_reminder():
     """Every turn carries the tool-grounding reminder next to [Today]."""
     agent = make_agent()
@@ -703,3 +757,112 @@ def test_build_contents_injects_data_sourcing_reminder():
     text = contents[-1]["parts"][0]["text"]
     assert "[Reminder:" in text
     assert "tool result" in text
+
+
+@pytest.mark.asyncio
+async def test_add_dish_flow_updates_existing_plan_with_complete_list():
+    """
+    Guardrail (regression: 'add cumin beef' never persisted):
+    the add-a-dish flow (SKILL.md Example 5) must UPDATE the existing record
+    with the complete dish list — kept dish enriched from DB, new dish carrying
+    the full recipe — and must never create a second record.
+    """
+    agent = make_agent()
+    existing = _sample_record("2026-07-05", "dinner", [
+        {"name": "Stewed Lamb Shank", "ingredients": [{"name": "lamb shank", "quantity": "500g"}], "steps": ["Blanch", "Stew"]}
+    ])
+    responses = iter([
+        _gemini_tool_call("fetch_meal_plan", {"date": "2026-07-05", "meal_type": "dinner"}),
+        _gemini_tool_call("save_meal_plan", {
+            "date": "2026-07-05", "meal_type": "dinner",
+            "dishes": [{"name": "Stewed Lamb Shank"}, {"name": "Cumin Beef"}],
+        }),
+        _gemini_tool_call("save_meal_plan", {
+            "date": "2026-07-05", "meal_type": "dinner",
+            "dishes": [
+                {"name": "Stewed Lamb Shank"},
+                {"name": "Cumin Beef", "ingredients": [{"name": "beef", "quantity": "300g"}], "steps": ["Slice", "Stir-fry with cumin"]},
+            ],
+        }),
+        _gemini_text("Added cumin beef to tonight's dinner"),
+    ])
+
+    async def scripted(contents, system_prompt):
+        return next(responses)
+
+    update_calls = []
+
+    async def mock_update(schedule_id, date, meal_type, dishes, auth_token, user_timezone):
+        update_calls.append((schedule_id, dishes))
+        return {"id": schedule_id}
+
+    with patch.object(agent, "_call_gemini", side_effect=scripted), \
+         patch("app.agents.meal_planning_agent.schedule_commands.fetch_existing",
+               new=AsyncMock(return_value=existing)), \
+         patch("app.agents.meal_planning_agent.schedule_commands.update_plan",
+               side_effect=mock_update), \
+         patch("app.agents.meal_planning_agent.schedule_commands.save_plan") as mock_create:
+        reply = await agent.run("Add cumin beef to tonight's dinner", [], user_timezone="Asia/Shanghai")
+
+    assert reply == "Added cumin beef to tonight's dinner"
+    mock_create.assert_not_called()
+    assert len(update_calls) == 2, "Both saves must update the existing record"
+    assert all(sid == 42 for sid, _ in update_calls), "Updates must target the existing schedule_id"
+
+    final_dishes = update_calls[1][1]
+    lamb = next(d for d in final_dishes if d["name"] == "Stewed Lamb Shank")
+    assert lamb["steps"] == ["Blanch", "Stew"], "Kept dish must be enriched from the DB record"
+    beef = next(d for d in final_dishes if d["name"] == "Cumin Beef")
+    assert beef["steps"], "New dish must carry its full recipe"
+
+
+@pytest.mark.asyncio
+async def test_phase2_updates_cached_schedule_id_even_when_backend_lookup_misses():
+    """
+    Guardrail (regression: duplicate records in prod, ids 109/110):
+    the backend range query failed to return the record created in phase 1,
+    so phase 2 created a second record. The schedule_id from phase 1 must be
+    cached within the turn and phase 2 must UPDATE it — a backend read miss
+    must never cause a duplicate create.
+    """
+    agent = make_agent()
+    full_dish = {"name": "Braised Beef Brisket", "ingredients": [{"name": "brisket", "quantity": "500g"}], "steps": ["Blanch", "Braise"]}
+    responses = iter([
+        _gemini_tool_call("save_meal_plan", {
+            "date": "2026-07-06", "meal_type": "dinner", "dishes": [{"name": "Braised Beef Brisket"}],
+        }),
+        _gemini_tool_call("save_meal_plan", {
+            "date": "2026-07-06", "meal_type": "dinner", "dishes": [full_dish],
+        }),
+        _gemini_text("Saved with recipe"),
+    ])
+
+    async def scripted(contents, system_prompt):
+        return next(responses)
+
+    create_calls = []
+    update_calls = []
+
+    async def mock_save(date, meal_type, dishes, auth_token, user_timezone):
+        create_calls.append(dishes)
+        return {"id": 109}
+
+    async def mock_update(schedule_id, date, meal_type, dishes, auth_token, user_timezone):
+        update_calls.append((schedule_id, dishes))
+        return {"id": schedule_id}
+
+    # fetch_existing NEVER finds the phase-1 record — reproduces the prod read miss
+    with patch.object(agent, "_call_gemini", side_effect=scripted), \
+         patch("app.agents.meal_planning_agent.schedule_commands.fetch_existing",
+               new=AsyncMock(return_value=None)), \
+         patch("app.agents.meal_planning_agent.schedule_commands.save_plan",
+               side_effect=mock_save), \
+         patch("app.agents.meal_planning_agent.schedule_commands.update_plan",
+               side_effect=mock_update):
+        reply = await agent.run("Braised beef brisket it is", [], user_timezone="Asia/Shanghai")
+
+    assert reply == "Saved with recipe"
+    assert len(create_calls) == 1, "Only phase 1 may create; phase 2 must not create a duplicate"
+    assert len(update_calls) == 1, "Phase 2 must update the cached schedule_id"
+    assert update_calls[0][0] == 109, "Update must target the id returned by the phase-1 create"
+    assert update_calls[0][1][0]["steps"], "Phase-2 update must carry the full recipe"

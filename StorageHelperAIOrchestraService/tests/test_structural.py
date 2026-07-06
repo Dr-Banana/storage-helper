@@ -172,9 +172,14 @@ def test_skill_md_has_worked_examples():
     """Few-shot examples are the main lever for flash tool-use compliance."""
     md = _skill_md()
     assert "Worked examples" in md
-    for marker in ("Example 1", "Example 2", "Example 2b", "Example 3", "Example 4"):
+    for marker in ("Example 1", "Example 2", "Example 2b", "Example 3", "Example 4", "Example 5"):
         assert marker in md, f"SKILL.md missing worked example: {marker}"
-    assert md.count("Wrong:") >= 4, "Examples should state the wrong behavior explicitly"
+    assert md.count("Wrong:") >= 5, "Examples should state the wrong behavior explicitly"
+
+
+def test_skill_md_has_talking_is_not_saving_rule():
+    """Failure fixed: 'add cumin beef' fetched and showed the recipe but never saved."""
+    assert "Talking is not saving" in _skill_md()
 
 
 def test_skill_md_prose_is_english_only():

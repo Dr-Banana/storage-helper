@@ -274,6 +274,7 @@ class MealPlanningAgent:
         pending_phase2 = False   # save returned action_required; full-recipe save still owed
         phase2_nudges = 0
         interim_text = ""        # text the model emitted alongside a tool call
+        turn_ctx: Dict[str, Any] = {"saved_ids": {}}  # (date, meal_type) -> schedule_id created this turn
 
         for _ in range(10):
             response = await self._call_gemini(contents, system_prompt)
@@ -376,7 +377,7 @@ class MealPlanningAgent:
             result_parts = []
             for tc in tool_calls:
                 tools_used_this_turn += 1
-                result = await self._execute_tool(tc["name"], tc.get("args") or {})
+                result = await self._execute_tool(tc["name"], tc.get("args") or {}, turn_ctx)
                 logger.info("[agent] tool=%s result=%s", tc["name"], str(result)[:200])
 
                 if tc["name"] == "save_meal_plan" and isinstance(result, dict) and result.get("success"):
@@ -399,12 +400,17 @@ class MealPlanningAgent:
 
     # ── Tool execution ─────────────────────────────────────────────────────────
 
-    async def _execute_tool(self, name: str, args: Dict[str, Any]) -> Dict[str, Any]:
+    async def _execute_tool(
+        self,
+        name: str,
+        args: Dict[str, Any],
+        turn_ctx: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
         try:
             if name == "fetch_meal_plan":
                 return await self._tool_fetch(args)
             if name == "save_meal_plan":
-                return await self._tool_save(args)
+                return await self._tool_save(args, turn_ctx)
             if name == "delete_meal_plan":
                 return await self._tool_delete(args)
             if name == "suggest_todays_menu":
@@ -441,10 +447,21 @@ class MealPlanningAgent:
             return {"date": date, "found": False}
         return {"date": date, "found": True, "meals": day_meals}
 
-    async def _tool_save(self, args: Dict[str, Any]) -> Dict[str, Any]:
+    async def _tool_save(
+        self,
+        args: Dict[str, Any],
+        turn_ctx: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
         date: str = args["date"]
         meal_type: str = args["meal_type"]
         dishes: List[Dict[str, Any]] = args.get("dishes") or []
+
+        # Invariant: within one turn, a (date, meal_type) that we already saved
+        # maps to a known schedule_id. Phase 2 must UPDATE that record — never
+        # trust fetch_existing alone, because a backend read that misses the
+        # phase-1 record would otherwise cause a duplicate create.
+        saved_ids: Dict[Any, Any] = (turn_ctx or {}).setdefault("saved_ids", {})
+        cached_id = saved_ids.get((date, meal_type))
 
         existing = await schedule_commands.fetch_existing(date, meal_type, self.auth_token)
 
@@ -452,9 +469,16 @@ class MealPlanningAgent:
             stored = {d["name"]: d for d in schedule_commands.extract_dishes_from_record(existing)}
             dishes = [stored.get(d["name"], d) if not d.get("steps") else d for d in dishes]
 
-        if existing:
+        target_id = cached_id or (existing["id"] if existing else None)
+        if cached_id and existing and existing["id"] != cached_id:
+            logger.warning(
+                "[tool:save] fetch_existing returned id=%s but this turn created id=%s — using cached id",
+                existing["id"], cached_id,
+            )
+
+        if target_id:
             record = await schedule_commands.update_plan(
-                schedule_id=existing["id"],
+                schedule_id=target_id,
                 date=date,
                 meal_type=meal_type,
                 dishes=dishes,
@@ -471,6 +495,8 @@ class MealPlanningAgent:
             )
 
         if record:
+            if record.get("id") is not None:
+                saved_ids[(date, meal_type)] = record["id"]
             pending = [d["name"] for d in dishes if not d.get("steps")]
             result: Dict[str, Any] = {
                 "success": True,
