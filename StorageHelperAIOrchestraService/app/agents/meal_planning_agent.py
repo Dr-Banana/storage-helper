@@ -14,6 +14,7 @@ Tools (wrapping schedule_commands):
 The agent is stateless: no session state is kept between turns.
 All context comes from the frontend history passed on each request.
 """
+import asyncio
 import json
 import logging
 from datetime import datetime
@@ -25,6 +26,9 @@ import httpx
 from app.core.config import settings
 from app.db import schedule_commands
 from app.modules.howtocook_client import HowToCookClient
+from app.modules.kroger_client import KrogerClient
+from app.modules import shopping_list
+from app.modules import ingredient_translate
 
 logger = logging.getLogger(__name__)
 
@@ -220,6 +224,52 @@ _TOOLS = [
                     "required": ["people_count"],
                 },
             },
+            {
+                "name": "find_stores",
+                "description": (
+                    "Find nearby grocery stores (Kroger family: Kroger, Ralphs, Fry's, "
+                    "King Soopers, etc.) for a US ZIP code. Call this to get a location_id "
+                    "before pricing, or to let the user pick a store. US only."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "zip_code": {"type": "string", "description": "US 5-digit ZIP code"},
+                    },
+                    "required": ["zip_code"],
+                },
+            },
+            {
+                "name": "price_meal_plan",
+                "description": (
+                    "Price the shopping list for the user's SAVED meal plan over a date "
+                    "range, using real US grocery prices. It aggregates every ingredient "
+                    "across the planned dishes and looks up each price at a store. "
+                    "Provide zip_code (a nearby store is chosen automatically) OR an "
+                    "explicit location_id from find_stores. Returns per-ingredient prices "
+                    "and a total. Use this whenever the user asks how much groceries/"
+                    "ingredients will cost, or to build a priced shopping list."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "from_date": {"type": "string", "description": "Start date YYYY-MM-DD"},
+                        "days": {
+                            "type": "integer",
+                            "description": "Number of days to include (1 for a single day)",
+                        },
+                        "zip_code": {
+                            "type": "string",
+                            "description": "US ZIP code to find a store; optional if location_id is given",
+                        },
+                        "location_id": {
+                            "type": "string",
+                            "description": "Explicit store id from find_stores; optional if zip_code is given",
+                        },
+                    },
+                    "required": ["from_date", "days"],
+                },
+            },
         ]
     }
 ]
@@ -245,6 +295,13 @@ class MealPlanningAgent:
         else:
             self._foodie = None
             logger.info("[agent] HowToCookClient disabled (HOWTOCOOK_MCP_URL not set)")
+
+        self._kroger = KrogerClient(
+            client_id=settings.KROGER_CLIENT_ID,
+            client_secret=settings.KROGER_CLIENT_SECRET,
+            base_url=settings.KROGER_API_BASE,
+            timeout=settings.KROGER_TIMEOUT,
+        )
 
     # ── Public ────────────────────────────────────────────────────────────────
 
@@ -421,6 +478,10 @@ class MealPlanningAgent:
                 return await self._tool_by_category(args)
             if name == "recommend_weekly_meals":
                 return await self._tool_recommend_meals(args)
+            if name == "find_stores":
+                return await self._tool_find_stores(args)
+            if name == "price_meal_plan":
+                return await self._tool_price_meal_plan(args)
             return {"error": f"Unknown tool: {name}"}
         except Exception as exc:
             logger.error("[tool:%s] failed: %s", name, exc)
@@ -558,6 +619,83 @@ class MealPlanningAgent:
             allergies=args.get("allergies") or None,
             avoid_items=args.get("avoid_items") or None,
         )
+
+    async def _tool_find_stores(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        zip_code = str(args.get("zip_code", "")).strip()
+        if not zip_code:
+            return {"error": "zip_code is required"}
+        locs = await self._kroger.find_locations(zip_code)
+        return {
+            "stores": [
+                {"location_id": l.location_id, "name": l.name, "chain": l.chain, "address": l.address}
+                for l in locs
+            ],
+            "mock": self._kroger.mock,
+        }
+
+    async def _tool_price_meal_plan(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        from_date = str(args.get("from_date", "")).strip()
+        days = int(args.get("days") or 1)
+        zip_code = str(args.get("zip_code", "")).strip()
+        location_id = str(args.get("location_id", "")).strip()
+        if not from_date:
+            return {"error": "from_date is required"}
+
+        # Resolve which store to price at.
+        store_name = location_id
+        if not location_id:
+            if not zip_code:
+                return {"error": "Provide zip_code or location_id to pick a store"}
+            locs = await self._kroger.find_locations(zip_code)
+            if not locs:
+                return {"error": f"No stores found near ZIP {zip_code}"}
+            location_id = locs[0].location_id
+            store_name = locs[0].name
+
+        # Aggregate the plan's ingredients into a shopping list.
+        dishes = await schedule_commands.fetch_dishes_with_ingredients(self.auth_token, from_date, days)
+        if not dishes:
+            return {
+                "found": False,
+                "message": f"No planned dishes found from {from_date} for {days} day(s).",
+            }
+        agg = shopping_list.aggregate_ingredients(dishes)
+        if not agg:
+            return {
+                "found": False,
+                "message": "The planned dishes have no saved ingredients yet — fetch recipes first.",
+            }
+
+        # Kroger is a US/English API — translate ingredient names to English
+        # grocery search terms first (no-op when already English).
+        names = [item["ingredient"] for item in agg]
+        term_map = await ingredient_translate.to_english_terms(names)
+
+        async def _price_one(item: Dict[str, Any]) -> Dict[str, Any]:
+            term = term_map.get(item["ingredient"], item["ingredient"])
+            prod = await self._kroger.search_product(term, location_id)
+            return {
+                "ingredient": item["ingredient"],
+                "search_term": term,
+                "quantities": item["quantities"],
+                "dishes": item["dishes"],
+                "price": prod.price if prod else None,
+                "matched_name": prod.name if prod else None,
+                "mock": prod.mock if prod else self._kroger.mock,
+            }
+
+        priced: List[Dict[str, Any]] = list(await asyncio.gather(*[_price_one(i) for i in agg]))
+
+        summary = shopping_list.summarize_priced(priced)
+        return {
+            "found": True,
+            "store": store_name,
+            "location_id": location_id,
+            "from_date": from_date,
+            "days": days,
+            "items": priced,
+            **summary,
+        }
 
     # ── Gemini call ────────────────────────────────────────────────────────────
 

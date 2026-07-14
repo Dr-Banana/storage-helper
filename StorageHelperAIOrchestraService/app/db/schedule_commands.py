@@ -239,6 +239,57 @@ async def fetch_upcoming(
         return []
 
 
+async def fetch_dishes_with_ingredients(
+    auth_token: str,
+    from_date: str,
+    days: int = 7,
+) -> List[Dict[str, Any]]:
+    """
+    Fetch meal_plan records in [from_date, from_date+days) and return a flat list
+    of dishes with their ingredients — used to build a shopping list for pricing:
+      [{"date","meal_type","name","ingredients":[{"name","quantity"}]}]
+    """
+    from datetime import date as _date, timedelta
+    start = f"{from_date}T00:00:00"
+    end_d = (_date.fromisoformat(from_date) + timedelta(days=days)).isoformat()
+    end = f"{end_d}T23:59:59"
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(
+                f"{_base_url()}/api/schedule/range",
+                headers={"Authorization": f"Bearer {auth_token}"},
+                params={"start_time": start, "end_time": end},
+            )
+            resp.raise_for_status()
+            records = resp.json()
+
+        out: List[Dict[str, Any]] = []
+        for r in records:
+            features = (r.get("metadata") or {}).get("features") or []
+            for feat in features:
+                if feat.get("type") != "meal_plan":
+                    continue
+                for plan in feat.get("plans") or []:
+                    plan_date = plan.get("date", "")
+                    for meal in plan.get("meals") or []:
+                        meal_type = meal.get("mealTime", "")
+                        for d in meal.get("dishes") or []:
+                            out.append({
+                                "date": plan_date,
+                                "meal_type": meal_type,
+                                "name": d.get("name", ""),
+                                "ingredients": [
+                                    {"name": i.get("name", ""), "quantity": i.get("quantity", "")}
+                                    for i in d.get("ingredients") or []
+                                ],
+                            })
+        logger.info("[fetch_dishes_with_ingredients] from=%s days=%s → %d dish(es)", from_date, days, len(out))
+        return out
+    except Exception as exc:
+        logger.error("[schedule_commands] fetch_dishes_with_ingredients failed: %s", exc)
+        return []
+
+
 async def fetch_existing(
     date: str,
     meal_type: str,

@@ -77,6 +77,8 @@ def test_tools_declare_expected_functions():
         "get_recipe_details",
         "get_recipes_by_category",
         "recommend_weekly_meals",
+        "find_stores",
+        "price_meal_plan",
     }
 
 

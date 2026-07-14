@@ -147,6 +147,15 @@ class Settings(BaseSettings):
     HOWTOCOOK_MCP_URL: str = "http://howtocook-mcp:3000/mcp"
     # How often the background task refreshes the dish catalog (hours)
     HOWTOCOOK_SYNC_INTERVAL_HOURS: int = 24
+
+    # Kroger Grocery Price Integration (US only) — https://developer.kroger.com
+    # Credentials are created by registering a developer app. When either is
+    # empty the KrogerClient runs in MOCK mode (returns deterministic fake
+    # prices) so the pricing feature is testable without live credentials.
+    KROGER_CLIENT_ID: str = ""
+    KROGER_CLIENT_SECRET: str = ""
+    KROGER_API_BASE: str = "https://api.kroger.com/v1"
+    KROGER_TIMEOUT: float = 15.0
     
     # 允许 Pydantic 读取 .env 文件
     model_config = SettingsConfigDict(env_file=get_env_file(), extra='ignore')
